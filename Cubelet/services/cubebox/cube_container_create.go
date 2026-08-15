@@ -75,7 +75,7 @@ import (
 )
 
 const (
-	cubeSharedBindRootPath = "/run/cube-bind-share"
+	cubeVirtiofsRootPath = "/run/virtiofs"
 
 	K8sEmptyDirPath        = "kubernetes.io~empty-dir"
 	envdInitCleanupTimeout = 10 * time.Second
@@ -1230,12 +1230,18 @@ func (l *local) prepareWritableRootfs(ctx context.Context, flowOpts *workflow.Cr
 	blkPath := ""
 	if flowOpts.StorageInfo != nil {
 		tmpInfo, ok := flowOpts.StorageInfo.(*storage.StorageInfo)
-		if ok && len(tmpInfo.Volumes) > 0 {
+		if ok {
 			for _, v := range tmpInfo.Volumes {
 				if volumeName == v.Name {
 					foundBlk = true
 					blkPath = v.FilePath
 					break
+				}
+			}
+			if !foundBlk {
+				if hostDir := tmpInfo.HostDirBackendInfos[volumeName]; hostDir != nil && !hostDir.ReadOnly {
+					foundBlk = true
+					blkPath = filepath.Join(cubeVirtiofsRootPath, constants.PropagationVirtioRw, filepath.Base(hostDir.BindPath))
 				}
 			}
 		}

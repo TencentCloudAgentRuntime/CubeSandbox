@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/mount"
@@ -95,7 +97,7 @@ func (c *CubeImageService) GenImageExtraAttributes(ctx context.Context, oldimg, 
 		log.Debugf("try to generate uid files for image")
 
 		uidFile := filepath.Join(c.uidDir, ns, i.Target.Digest.String())
-		if localRoot, ok := i.Labels[constants.LabelImageHostLowerDirsPrefix]; ok && localRoot != "" {
+		if localRoot, ok := i.Labels[constants.LabelImageHostLowerDirsPrefix]; ok && localRoot != "" && !isReadOnlyMount(localRoot) {
 			uidFile = filepath.Join(localRoot, "uids_file")
 			info, statErr := os.Stat(uidFile)
 			if statErr == nil && !info.IsDir() {
@@ -141,6 +143,15 @@ func (c *CubeImageService) GenImageExtraAttributes(ctx context.Context, oldimg, 
 	}
 
 	return
+}
+
+func isReadOnlyMount(path string) bool {
+	var stat unix.Statfs_t
+	return unix.Statfs(path, &stat) == nil && isReadOnlyMountFlags(stat.Flags)
+}
+
+func isReadOnlyMountFlags(flags int64) bool {
+	return flags&unix.ST_RDONLY != 0
 }
 
 func CopyImageUidsFile(ctx context.Context, client *containerd.Client, snapshotter string, i containerd.Image, target string) error {

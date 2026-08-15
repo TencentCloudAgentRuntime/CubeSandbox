@@ -114,6 +114,11 @@ dynamic_config_path = "/usr/local/services/cubetoolbox/Cubelet/dynamicconf/conf.
       type        = "binary"
       binary_path = "/usr/local/services/cubetoolbox/Cubelet/plugin/cube-volume-cos"
 
+    [[plugins."io.cubelet.internal.v1.storage".volume_plugins]]
+      name        = "block-device"
+      type        = "binary"
+      binary_path = "/usr/local/services/cubetoolbox/Cubelet/plugin/cube-volume-block-device"
+
 
     [plugins."io.cubelet.internal.v1.storage".cow.log]
     level = "info,h2=warn,hyper=warn,tower=warn"

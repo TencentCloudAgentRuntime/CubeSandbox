@@ -61,13 +61,16 @@ RUN set -eux; \
     GOOS=linux GOARCH="${goarch}" go build -ldflags "${ldflags}" \
       -o /out/bin/cubelet ./cmd/cubelet; \
     GOOS=linux GOARCH="${goarch}" go build -ldflags "${ldflags}" \
-      -o /out/bin/cubecli ./cmd/cubecli
+      -o /out/bin/cubecli ./cmd/cubecli; \
+    GOOS=linux GOARCH="${goarch}" go build -ldflags "-s -w" \
+      -o /out/bin/cube-volume-block-device ./cmd/cube-volume-block-device
 
 # Assemble one-click-compatible Cubelet tree for the runtime stage.
 RUN set -eux; \
     mkdir -p /out/Cubelet/bin /out/Cubelet/config /out/Cubelet/dynamicconf /out/Cubelet/plugin \
              /out/cube-vs/network/bin; \
     cp /out/bin/cubelet /out/bin/cubecli /out/Cubelet/bin/; \
+    cp /out/bin/cube-volume-block-device /out/Cubelet/plugin/; \
     cp /out/bin/cubevsmapdump /out/cube-vs/network/bin/; \
     cp -a /workspace/Cubelet/config/. /out/Cubelet/config/; \
     cp -a /workspace/Cubelet/dynamicconf/. /out/Cubelet/dynamicconf/; \
@@ -130,6 +133,7 @@ RUN printf '{"schema_version":1,"components":{"cubelet":{"version":"%s"},"cubecl
       ${IMAGE_ROOT}/Cubelet/bin/cubecli \
       ${IMAGE_ROOT}/cube-vs/network/bin/cubevsmapdump \
       ${IMAGE_ROOT}/Cubelet/plugin/cube-volume-cos \
+      ${IMAGE_ROOT}/Cubelet/plugin/cube-volume-block-device \
       /usr/local/bin/component-entrypoint.sh \
     && mkdir -p \
       /data/cubelet \
