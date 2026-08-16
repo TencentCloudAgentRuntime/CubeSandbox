@@ -87,6 +87,8 @@
     - [SELinuxOption](#cubelet-services-cubebox-v1-SELinuxOption)
     - [SandboxPathVolumeSource](#cubelet-services-cubebox-v1-SandboxPathVolumeSource)
     - [SandboxStorageInfo](#cubelet-services-cubebox-v1-SandboxStorageInfo)
+    - [SnapshotRuntimeRequest](#cubelet-services-cubebox-v1-SnapshotRuntimeRequest)
+    - [SnapshotRuntimeResponse](#cubelet-services-cubebox-v1-SnapshotRuntimeResponse)
     - [StorageOrphanEntry](#cubelet-services-cubebox-v1-StorageOrphanEntry)
     - [StorageVolumeInfo](#cubelet-services-cubebox-v1-StorageVolumeInfo)
     - [SysCall](#cubelet-services-cubebox-v1-SysCall)
@@ -1728,6 +1730,41 @@ for a single sandbox.
 
 
 
+<a name="cubelet-services-cubebox-v1-SnapshotRuntimeRequest"></a>
+
+### SnapshotRuntimeRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  |  |
+| sandboxID | [string](#string) |  |  |
+| staging_dir | [string](#string) |  | Absolute destination for the immutable Runtime staging directory. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-SnapshotRuntimeResponse"></a>
+
+### SnapshotRuntimeResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  |  |
+| ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  |  |
+| sandboxID | [string](#string) |  |  |
+| staging_dir | [string](#string) |  |  |
+
+
+
+
+
+
 <a name="cubelet-services-cubebox-v1-StorageOrphanEntry"></a>
 
 ### StorageOrphanEntry
@@ -2029,6 +2066,7 @@ Service for handling cubesandbox
 | Exec | [ExecCubeSandboxRequest](#cubelet-services-cubebox-v1-ExecCubeSandboxRequest) | [ExecCubeSandboxResponse](#cubelet-services-cubebox-v1-ExecCubeSandboxResponse) |  |
 | AppSnapshot | [AppSnapshotRequest](#cubelet-services-cubebox-v1-AppSnapshotRequest) | [AppSnapshotResponse](#cubelet-services-cubebox-v1-AppSnapshotResponse) | AppSnapshot creates a cubebox, makes an app snapshot, and destroys the cubebox. Required annotations: - cube.master.appsnapshot.create: &#34;true&#34; - cube.master.appsnapshot.template.id: &#34;&lt;template_id&gt;&#34; |
 | CommitSandbox | [CommitSandboxRequest](#cubelet-services-cubebox-v1-CommitSandboxRequest) | [CommitSandboxResponse](#cubelet-services-cubebox-v1-CommitSandboxResponse) | CommitSandbox snapshots an existing running sandbox into a template snapshot. |
+| SnapshotRuntime | [SnapshotRuntimeRequest](#cubelet-services-cubebox-v1-SnapshotRuntimeRequest) | [SnapshotRuntimeResponse](#cubelet-services-cubebox-v1-SnapshotRuntimeResponse) | SnapshotRuntime exports VM state and memory from an existing sandbox. |
 | RollbackSandbox | [RollbackSandboxRequest](#cubelet-services-cubebox-v1-RollbackSandboxRequest) | [RollbackSandboxResponse](#cubelet-services-cubebox-v1-RollbackSandboxResponse) | RollbackSandbox restores a running sandbox to a committed snapshot. |
 | CleanupTemplate | [CleanupTemplateRequest](#cubelet-services-cubebox-v1-CleanupTemplateRequest) | [CleanupTemplateResponse](#cubelet-services-cubebox-v1-CleanupTemplateResponse) | CleanupTemplate removes local template snapshot/base data from this node. |
 | ListSandboxSnapshots | [ListSandboxSnapshotsRequest](#cubelet-services-cubebox-v1-ListSandboxSnapshotsRequest) | [ListSandboxSnapshotsResponse](#cubelet-services-cubebox-v1-ListSandboxSnapshotsResponse) | ListSandboxSnapshots inspects the requested snapshot objects on this node. |

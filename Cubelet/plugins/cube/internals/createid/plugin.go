@@ -6,12 +6,14 @@ package createid
 
 import (
 	"context"
+	"strings"
 
 	"github.com/containerd/plugin"
 	"github.com/containerd/plugin/registry"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
@@ -54,6 +56,16 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 	}
 
 	opts.SandboxID = utils.GenerateID()
+	annotations := opts.ReqInfo.GetAnnotations()
+	if restoreID := strings.TrimSpace(annotations[constants.MasterAnnotationRuntimeRestoreSandboxID]); restoreID != "" {
+		if annotations[constants.AnnotationAppSnapshotRestore] != "true" {
+			return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "runtime restore sandbox id requires cube.appsnapshot.restore=true")
+		}
+		if err := pathutil.ValidateSafeID(restoreID); err != nil {
+			return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "invalid runtime restore sandbox id")
+		}
+		opts.SandboxID = restoreID
+	}
 
 	if opts.IsCreateSnapshot() {
 

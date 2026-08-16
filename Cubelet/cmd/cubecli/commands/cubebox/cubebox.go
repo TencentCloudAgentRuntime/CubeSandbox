@@ -20,6 +20,7 @@ var Command = &cli.Command{
 		&inspecMetaData,
 		Snapshot,
 		DebugCommitSandbox,
+		DebugSnapshotRuntime,
 		DebugRollbackSandbox,
 	},
 }

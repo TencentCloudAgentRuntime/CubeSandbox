@@ -191,6 +191,17 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 		resolvedDNSServers, dnsAllowOutCIDRs, formatNetworkRuntimeCubeNetworkConfig(cubeNetworkConfigBeforeDNS), formatNetworkRuntimeCubeNetworkConfig(cubeNetworkConfig))
 
 	ensureReq := l.buildEnsureNetworkRequestFromIntent(opts.SandboxID, request.GetRequestID(), request.ExposedPorts, req, cubeNetworkConfig)
+	if request.GetAnnotations()[constants.AnnotationAppSnapshotRestore] == "true" {
+		if ip := strings.TrimSpace(request.GetAnnotations()[constants.MasterAnnotationRuntimeRestoreSandboxIP]); ip != "" {
+			if net.ParseIP(ip) == nil {
+				return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid runtime restore sandbox IP %q", ip)
+			}
+			if ensureReq.PersistMetadata == nil {
+				ensureReq.PersistMetadata = make(map[string]string)
+			}
+			ensureReq.PersistMetadata["sandbox_ip"] = ip
+		}
+	}
 	log.G(ctx).Infof("tap create ensure request: sandbox_id=%s interfaces=%d routes=%d arps=%d port_mappings=%d resolved_dns_servers=%v dns_allow_out_cidrs=%v cube_network_config=%s persist_metadata=%s",
 		ensureReq.SandboxID, len(ensureReq.Interfaces), len(ensureReq.Routes), len(ensureReq.ARPNeighbors),
 		len(ensureReq.PortMappings), resolvedDNSServers, dnsAllowOutCIDRs, formatNetworkRuntimeCubeNetworkConfig(ensureReq.CubeNetworkConfig), utils.InterfaceToString(ensureReq.PersistMetadata))

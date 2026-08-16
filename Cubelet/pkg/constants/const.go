@@ -203,6 +203,10 @@ const (
 	// matches the memory file recorded here.
 	MasterAnnotationRuntimeRestoreSnapshotID         = "cube.master.runtime.restore.snapshot.id"
 	MasterAnnotationRuntimeRestoreSnapshotAttachedAt = "cube.master.runtime.restore.snapshot.attached_at"
+	// MasterAnnotationRuntimeRestoreSandboxID and SandboxIP preserve the
+	// destroyed sandbox identity during cross-node runtime restore.
+	MasterAnnotationRuntimeRestoreSandboxID = "cube.master.runtime.restore.sandbox.id"
+	MasterAnnotationRuntimeRestoreSandboxIP = "cube.master.runtime.restore.sandbox.ip"
 	// MasterAnnotationPauseSnapshotID is the Master-allocated pause snapshot
 	// id (same snap-* format as normal Commit snapshots). Cubelet only stores
 	// the local catalog under this id; Kind=pause_snapshot.

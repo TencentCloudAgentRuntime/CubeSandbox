@@ -26,6 +26,8 @@ service CubeboxMgr {
   rpc AppSnapshot(AppSnapshotRequest) returns (AppSnapshotResponse);
   // CommitSandbox snapshots an existing running sandbox into a template snapshot.
   rpc CommitSandbox(CommitSandboxRequest) returns (CommitSandboxResponse);
+  // SnapshotRuntime exports VM state and memory from an existing sandbox.
+  rpc SnapshotRuntime(SnapshotRuntimeRequest) returns (SnapshotRuntimeResponse);
   // RollbackSandbox restores a running sandbox to a committed snapshot.
   rpc RollbackSandbox(RollbackSandboxRequest) returns (RollbackSandboxResponse);
   // CleanupTemplate removes local template snapshot/base data from this node.
@@ -1187,4 +1189,18 @@ message CleanupOrphanStorageFilesResponse {
   cubelet.services.errorcode.v1.Ret ret = 2;
   // Orphan files cubelet found (and possibly removed).
   repeated StorageOrphanEntry orphans = 3;
+}
+
+message SnapshotRuntimeRequest {
+  string requestID = 1;
+  string sandboxID = 2;
+  // Absolute destination for the immutable Runtime staging directory.
+  string staging_dir = 3;
+}
+
+message SnapshotRuntimeResponse {
+  string requestID = 1;
+  cubelet.services.errorcode.v1.Ret ret = 2;
+  string sandboxID = 3;
+  string staging_dir = 4;
 }

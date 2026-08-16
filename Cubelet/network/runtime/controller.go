@@ -543,7 +543,8 @@ func (s *NetworkController) createState(ctx context.Context, req *EnsureNetworkR
 	t.ensureRoute = time.Since(stageStart)
 	stageStart = time.Now()
 	requestedMappings := s.normalizePortMappings(req.PortMappings)
-	tap, entry, err := s.acquireTap(req.SandboxID)
+	requestedIP := net.ParseIP(strings.TrimSpace(req.PersistMetadata["sandbox_ip"]))
+	tap, entry, err := s.acquireTap(req.SandboxID, requestedIP)
 	if err != nil {
 		return nil, err
 	}
@@ -731,8 +732,14 @@ func (s *NetworkController) cleanupCreateFailure(ctx context.Context, state *man
 // acquireTap obtains a Ready tap for a new sandbox through TapPool. The entry
 // remains Ready but owner-reserved until success is committed; Active is only
 // published after creating -> success.
-func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry, error) {
-	entry, err := s.tapPool.Acquire(owner)
+func (s *NetworkController) acquireTap(owner string, requestedIP net.IP) (*tapDevice, *TapPoolEntry, error) {
+	var entry *TapPoolEntry
+	var err error
+	if requestedIP != nil {
+		entry, err = s.tapPool.AcquireIP(owner, requestedIP)
+	} else {
+		entry, err = s.tapPool.Acquire(owner)
+	}
 	if err == nil {
 		tap, err := tapDeviceFromEntry(entry)
 		if err != nil {
@@ -744,7 +751,12 @@ func (s *NetworkController) acquireTap(owner string) (*tapDevice, *TapPoolEntry,
 		tap.File = s.takePooledTapFD(entry.TapName)
 		return tap, entry, nil
 	}
-	ip, err := s.allocator.Allocate()
+	var ip net.IP
+	if requestedIP != nil {
+		ip, err = s.allocator.AllocateSpecific(requestedIP)
+	} else {
+		ip, err = s.allocator.Allocate()
+	}
 	if err != nil {
 		return nil, nil, err
 	}

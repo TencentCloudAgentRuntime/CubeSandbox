@@ -85,6 +85,16 @@ func TestBuildCubeRuntimeSnapshotArgsOmitsMemoryVolWhenEmpty(t *testing.T) {
 	assert.NotContains(t, args, "--memory-vol")
 }
 
+func TestBuildCubeRuntimeSnapshotArgsIncludesEmptyDeviceLists(t *testing.T) {
+	args := buildCubeRuntimeSnapshotArgs("sb-1", &CubeboxSnapshotSpec{}, "/tmp/s.tmp", "/tmp/memory.raw", snapshotTypeFull)
+	disk := indexOf(args, "--disk")
+	pmem := indexOf(args, "--pmem")
+	require.GreaterOrEqual(t, disk, 0)
+	require.GreaterOrEqual(t, pmem, 0)
+	assert.Equal(t, "[]", args[disk+1])
+	assert.Equal(t, "[]", args[pmem+1])
+}
+
 func TestResolveBaseSnapshotIDPriority(t *testing.T) {
 	t.Run("runtime label wins over annotations", func(t *testing.T) {
 		cb := &cubeboxstore.CubeBox{

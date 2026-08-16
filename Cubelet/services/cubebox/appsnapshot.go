@@ -614,12 +614,16 @@ func buildCubeRuntimeSnapshotArgs(sandboxID string, spec *CubeboxSnapshotSpec, s
 		if len(spec.Resource) > 0 {
 			args = append(args, "--resource", string(spec.Resource))
 		}
+		disk := "[]"
 		if len(spec.Disk) > 0 {
-			args = append(args, "--disk", string(spec.Disk))
+			disk = string(spec.Disk)
 		}
+		args = append(args, "--disk", disk)
+		pmem := "[]"
 		if len(spec.Pmem) > 0 {
-			args = append(args, "--pmem", string(spec.Pmem))
+			pmem = string(spec.Pmem)
 		}
+		args = append(args, "--pmem", pmem)
 		if spec.Kernel != "" {
 			args = append(args, "--kernel", spec.Kernel)
 		}
