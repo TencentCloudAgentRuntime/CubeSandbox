@@ -93,6 +93,28 @@ func TestIsImageStorageMediaType(t *testing.T) {
 	}
 }
 
+func TestCubeStorageMountsScopesDirectShare(t *testing.T) {
+	volumeMounts := []*cubebox.VolumeMounts{
+		{Name: "file", ContainerPath: "/file"},
+		{Name: "workspace", ContainerPath: "/workspace"},
+		{Name: "legacy", ContainerPath: "/legacy"},
+	}
+	info := &storage.StorageInfo{
+		Volumes: map[string]*storage.BackendFileInfo{"file": {FilePath: "/data/file"}},
+		HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{
+			"workspace": {DirectShare: true},
+			"legacy":    {ShareDir: "/same", BindPath: "/same"},
+		},
+	}
+
+	mounts := cubeStorageMounts(volumeMounts, info)
+	require.Len(t, mounts, 2)
+	require.Equal(t, "/data/file", mounts[0].Source)
+	require.Equal(t, "/file", mounts[0].Destination)
+	require.Equal(t, filepath.Join(cubeVirtiofsRootPath, constants.PropagationVirtioRw), mounts[1].Source)
+	require.Equal(t, "/workspace", mounts[1].Destination)
+}
+
 func TestGetMountOptions(t *testing.T) {
 	tests := []struct {
 		name  string

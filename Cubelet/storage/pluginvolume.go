@@ -231,6 +231,19 @@ func (l *local) attachPluginVolume(
 			}
 		}
 	}
+	if driver == "erox-workspace" {
+		if result.HostDirBackendInfos == nil {
+			result.HostDirBackendInfos = make(map[string]*HostDirBackendInfo)
+		}
+		result.HostDirBackendInfos[volumeName] = &HostDirBackendInfo{
+			VolumeName:  volumeName,
+			ShareDir:    res.HostPath,
+			BindPath:    res.HostPath,
+			ReadOnly:    readOnly,
+			DirectShare: true,
+		}
+		return nil
+	}
 
 	shareDir := filepath.Join(hostDirBasePath, opts.SandboxID, roStr)
 	bindDest := filepath.Join(shareDir, volumeName)

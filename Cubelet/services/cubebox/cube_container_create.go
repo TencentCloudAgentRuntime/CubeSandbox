@@ -1427,6 +1427,29 @@ func getMountOptions(mount *cubebox.VolumeMounts) []string {
 	return mOptions
 }
 
+func cubeStorageMounts(volumeMounts []*cubebox.VolumeMounts, info *storage.StorageInfo) []specs.Mount {
+	var mounts []specs.Mount
+	for _, volumeMount := range volumeMounts {
+		if volumeMount.ContainerPath == "/" {
+			continue
+		}
+		if file := info.Volumes[volumeMount.Name]; file != nil {
+			mounts = append(mounts, specs.Mount{Type: constants.MountTypeBind, Source: file.FilePath, Destination: volumeMount.ContainerPath, Options: getMountOptions(volumeMount)})
+			continue
+		}
+		hostDir := info.HostDirBackendInfos[volumeMount.Name]
+		if hostDir == nil || !hostDir.DirectShare {
+			continue
+		}
+		source := filepath.Join(cubeVirtiofsRootPath, constants.PropagationVirtioRw)
+		if hostDir.ReadOnly {
+			source = filepath.Join(cubeVirtiofsRootPath, constants.PropagationVirtioRo)
+		}
+		mounts = append(mounts, specs.Mount{Type: constants.MountTypeBind, Source: source, Destination: volumeMount.ContainerPath, Options: getMountOptions(volumeMount)})
+	}
+	return mounts
+}
+
 func (l *local) prepareVolume(ctx context.Context,
 	c *cubebox.ContainerConfig,
 	opts *workflow.CreateContext,
@@ -1464,21 +1487,8 @@ func (l *local) prepareVolume(ctx context.Context,
 	if constants.IsCubeRuntime(ctx) {
 		if opts.StorageInfo != nil {
 			tmpInfo, ok := opts.StorageInfo.(*storage.StorageInfo)
-			if ok && len(tmpInfo.Volumes) > 0 {
-				for _, v := range c.VolumeMounts {
-					if v.ContainerPath == "/" {
-
-						continue
-					}
-					if file, ok := tmpInfo.Volumes[v.Name]; ok {
-						mounts = append(mounts, specs.Mount{
-							Type:        constants.MountTypeBind,
-							Source:      file.FilePath,
-							Destination: v.ContainerPath,
-							Options:     getMountOptions(v),
-						})
-					}
-				}
+			if ok && (len(tmpInfo.Volumes) > 0 || len(tmpInfo.HostDirBackendInfos) > 0) {
+				mounts = append(mounts, cubeStorageMounts(c.VolumeMounts, tmpInfo)...)
 			}
 		}
 	}

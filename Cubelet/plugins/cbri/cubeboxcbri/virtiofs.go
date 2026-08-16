@@ -49,7 +49,9 @@ func generateSandboxVirtiofsOpt(ctx context.Context, flowOpts *workflow.CreateCo
 		if channels[k] == nil {
 			channels[k] = &channelVal{}
 		}
-		channels[k].bindPaths = append(channels[k].bindPaths, info.BindPath)
+		if !info.DirectShare {
+			channels[k].bindPaths = append(channels[k].bindPaths, info.BindPath)
+		}
 	}
 
 	var allVirtios []*virtiofs.VirtiofsConfig
@@ -126,12 +128,14 @@ func generateRestoreVirtiofsOpt(ctx context.Context, flowOpts *workflow.CreateCo
 	var restoreMounts []restoreVirtioMount
 	for backendKey, info := range storageInfo.HostDirBackendInfos {
 
-		base := filepath.Base(info.BindPath)
 		var containerSrc string
 		if info.ReadOnly {
-			containerSrc = constants.PropagationContainerDirRo + "/" + base
+			containerSrc = constants.PropagationContainerDirRo
 		} else {
-			containerSrc = constants.PropagationContainerDirRw + "/" + base
+			containerSrc = constants.PropagationContainerDirRw
+		}
+		if !info.DirectShare {
+			containerSrc = path.Join(containerSrc, filepath.Base(info.BindPath))
 		}
 
 		indexedVM, ok := vmByVolName[info.VolumeName]
