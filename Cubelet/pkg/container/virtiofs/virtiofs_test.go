@@ -5,6 +5,8 @@
 package virtiofs
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,6 +14,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMountSource(t *testing.T) {
+	mountInfo := filepath.Join(t.TempDir(), "mountinfo")
+	require.NoError(t, os.WriteFile(mountInfo, []byte("835 113 43:16 / /data/layer ro,relatime shared:243 - erofs /dev/nbd1 ro\n"), 0o600))
+
+	source, err := mountSource("/data/layer", mountInfo)
+	require.NoError(t, err)
+	assert.Equal(t, "/dev/nbd1", source)
+}
 
 func TestVv(t *testing.T) {
 	d1 := "/data/cubelet/root/io.cubelet.internal.v1.images/cfsrootfs/9.0.224.155-/lam-480nm3z7/12e957dbcefaef9d4bc0375c2b22af21190a373a9de3506920a38b39c108abbf/fs"

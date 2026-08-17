@@ -290,6 +290,7 @@ const (
 
 	AnnotationVMKernelCmdlineAppend = "cube.vm.kernel.cmdline.append"
 	AnnotationVirtiofs              = "cube.virtiofs"
+	EroxWorkspaceVirtiofsID         = "erox_workspace"
 
 	AnnotationPropagationMounts          = "cube.propagation.mounts"
 	AnnotationPropagationContainerMounts = "cube.propagation.container.mounts"

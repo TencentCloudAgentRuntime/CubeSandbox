@@ -39,13 +39,14 @@ func generateSandboxVirtiofsOpt(ctx context.Context, flowOpts *workflow.CreateCo
 	type channelKey struct {
 		shareDir string
 		readOnly bool
+		id       string
 	}
 	type channelVal struct {
 		bindPaths []string
 	}
 	channels := make(map[channelKey]*channelVal)
 	for _, info := range storageInfo.HostDirBackendInfos {
-		k := channelKey{shareDir: info.ShareDir, readOnly: info.ReadOnly}
+		k := channelKey{shareDir: info.ShareDir, readOnly: info.ReadOnly, id: info.VirtiofsID}
 		if channels[k] == nil {
 			channels[k] = &channelVal{}
 		}
@@ -70,6 +71,10 @@ func generateSandboxVirtiofsOpt(ctx context.Context, flowOpts *workflow.CreateCo
 		} else {
 			cfg.ID = constants.PropagationVirtioRw
 			cfg.PropagationMountName = constants.PropagationVirtioRw
+		}
+		if k.id != "" {
+			cfg.ID = k.id
+			cfg.PropagationMountName = k.id
 		}
 		if coldStart {
 			cfg.PropagationMountName = ""
@@ -133,6 +138,9 @@ func generateRestoreVirtiofsOpt(ctx context.Context, flowOpts *workflow.CreateCo
 			containerSrc = constants.PropagationContainerDirRo
 		} else {
 			containerSrc = constants.PropagationContainerDirRw
+		}
+		if info.DirectShare && info.VirtiofsID != "" {
+			containerSrc = path.Join(path.Dir(constants.PropagationContainerDirRw), info.VirtiofsID)
 		}
 		if !info.DirectShare {
 			containerSrc = path.Join(containerSrc, filepath.Base(info.BindPath))

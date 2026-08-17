@@ -40,6 +40,8 @@ type HostDirBackendInfo struct {
 	ReadOnly bool `json:"read_only"`
 
 	DirectShare bool `json:"direct_share,omitempty"`
+
+	VirtiofsID string `json:"virtiofs_id,omitempty"`
 }
 
 func defaultRunHostDirCommand(ctx context.Context, name string, args ...string) error {

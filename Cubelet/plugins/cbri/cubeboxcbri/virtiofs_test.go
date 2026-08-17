@@ -60,6 +60,7 @@ func TestGenerateSandboxVirtiofsOptDirectShare(t *testing.T) {
 				ShareDir:    "/data/cube-shared/volume/workspace/.erox/workspaces/workspace/merged",
 				BindPath:    "/data/cube-shared/volume/workspace/.erox/workspaces/workspace/merged",
 				DirectShare: true,
+				VirtiofsID:  constants.EroxWorkspaceVirtiofsID,
 			},
 		},
 	}}
@@ -70,6 +71,7 @@ func TestGenerateSandboxVirtiofsOptDirectShare(t *testing.T) {
 	var configs []*virtiofs.VirtiofsConfig
 	require.NoError(t, json.Unmarshal([]byte(spec.Annotations[constants.AnnotationVirtiofs]), &configs))
 	require.Len(t, configs, 1)
+	require.Equal(t, constants.EroxWorkspaceVirtiofsID, configs[0].ID)
 	require.Empty(t, configs[0].VirtioBackendFsConfig.AllowedDirs)
 }
 

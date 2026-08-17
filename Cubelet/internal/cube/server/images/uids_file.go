@@ -88,8 +88,11 @@ func (c *CubeImageService) GenImageExtraAttributes(ctx context.Context, oldimg, 
 		}
 	}
 
-	_, uidsFileExists := i.Labels[constants.LabelImageUidFiles]
-	if !uidsFileExists {
+	uidsFileReady := false
+	if uidFile := i.Labels[constants.LabelImageUidFiles]; uidFile != "" {
+		uidsFileReady = !isReadOnlyMount(filepath.Dir(uidFile)) && isUidFilesDir(uidFile)
+	}
+	if !uidsFileReady {
 		startTime := time.Now()
 		defer func() {
 			workflow.RecordCreateMetricIfGreaterThan(ctx, nil, "image_prepare_uids_time", time.Since(startTime), time.Millisecond)
@@ -145,9 +148,17 @@ func (c *CubeImageService) GenImageExtraAttributes(ctx context.Context, oldimg, 
 	return
 }
 
+func isUidFilesDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
 func isReadOnlyMount(path string) bool {
 	var stat unix.Statfs_t
-	return unix.Statfs(path, &stat) == nil && isReadOnlyMountFlags(stat.Flags)
+	if unix.Statfs(path, &stat) == nil && isReadOnlyMountFlags(stat.Flags) {
+		return true
+	}
+	return unix.Statfs(filepath.Join("/proc/1/root", path), &stat) == nil && isReadOnlyMountFlags(stat.Flags)
 }
 
 func isReadOnlyMountFlags(flags int64) bool {

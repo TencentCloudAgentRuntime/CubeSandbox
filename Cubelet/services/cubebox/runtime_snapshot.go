@@ -175,6 +175,15 @@ func (s *service) SnapshotRuntime(ctx context.Context, req *cubebox.SnapshotRunt
 	if err := os.Rename(tmp, rsp.StagingDir); err != nil {
 		return runtimeSnapshotFailure(rsp, errorcode.ErrorCode_Unknown, fmt.Sprintf("publish staging directory: %v", err)), nil
 	}
+	if req.GetStopAfterSnapshot() {
+		container, err := s.cubeboxMgr.client.LoadContainer(ctx, rsp.SandboxID)
+		if err != nil {
+			return runtimeSnapshotFailure(rsp, errorcode.ErrorCode_Unknown, fmt.Sprintf("snapshot published but load sandbox before stop failed: %v", err)), nil
+		}
+		if err := s.cubeboxMgr.stopTask(ctx, container); err != nil {
+			return runtimeSnapshotFailure(rsp, errorcode.ErrorCode_Unknown, fmt.Sprintf("snapshot published but stop sandbox failed: %v", err)), nil
+		}
+	}
 	return rsp, nil
 }
 

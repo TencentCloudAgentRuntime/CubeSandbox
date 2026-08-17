@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/containerd/containerd/v2/core/images"
@@ -33,6 +34,7 @@ import (
 	imagestore "github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/store/image"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cdp"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/membolt"
@@ -470,6 +472,17 @@ func (c *imageDeleteScheduler) doDeleteImageTask(task *deleteImageTask) (err err
 	}
 
 	for _, dir := range toRemoveDirs.List() {
+		parent := filepath.Dir(dir)
+		if virtiofs.IsReadOnlyMount(parent) || virtiofs.IsReadOnlyMount(filepath.Join("/proc/1/root", parent)) {
+			continue
+		}
+		remaining, listErr := c.images.List(ctx)
+		if listErr != nil {
+			return fmt.Errorf("list images before removing uid files %q: %w", dir, listErr)
+		}
+		if hasUidFilesReference(remaining, dir) {
+			continue
+		}
 		err = os.RemoveAll(dir)
 		if err != nil {
 			stepLog.Errorf("failed to remove uid files %q: %v", dir, err)
@@ -480,6 +493,15 @@ func (c *imageDeleteScheduler) doDeleteImageTask(task *deleteImageTask) (err err
 
 	stepLog.Infof("successfully deleted image %q with %d references", image.ID, len(toDeleteArr))
 	return
+}
+
+func hasUidFilesReference(imageList []images.Image, path string) bool {
+	for _, image := range imageList {
+		if image.Labels[constants.LabelImageUidFiles] == path {
+			return true
+		}
+	}
+	return false
 }
 
 type orphanedContainerdImage struct {

@@ -23,6 +23,7 @@ var DebugSnapshotRuntime = &cli.Command{
 	Flags: []cli.Flag{
 		&cli.StringFlag{Name: "sandbox-id", Required: true},
 		&cli.StringFlag{Name: "staging-dir", Required: true},
+		&cli.BoolFlag{Name: "stop-after-snapshot"},
 		&cli.BoolFlag{Name: "json"},
 	},
 	Action: debugSnapshotRuntimeAction,
@@ -38,9 +39,10 @@ func debugSnapshotRuntimeAction(cliCtx *cli.Context) error {
 	grpcCtx, grpcCancel := context.WithTimeout(grpcCtx, cliCtx.Duration("timeout"))
 	defer grpcCancel()
 	resp, err := cubebox.NewCubeboxMgrClient(conn).SnapshotRuntime(grpcCtx, &cubebox.SnapshotRuntimeRequest{
-		RequestID:  uuid.NewString(),
-		SandboxID:  cliCtx.String("sandbox-id"),
-		StagingDir: cliCtx.String("staging-dir"),
+		RequestID:         uuid.NewString(),
+		SandboxID:         cliCtx.String("sandbox-id"),
+		StagingDir:        cliCtx.String("staging-dir"),
+		StopAfterSnapshot: cliCtx.Bool("stop-after-snapshot"),
 	})
 	if err != nil {
 		return err

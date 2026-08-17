@@ -6,6 +6,7 @@ package virtiofs
 
 import (
 	"fmt"
+	"golang.org/x/sys/unix"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,8 +126,70 @@ func GenVirtiofsConfig(shared []string) (*VirtiofsConfig, error) {
 		shareDirs = append(shareDirs, dir)
 	}
 	virtiofsConfig.VirtioBackendFsConfig.AllowedDirs = shareDirs
+	if len(shareDirs) == 1 && IsReadOnlyMount(shareDirs[0]) {
+		virtiofsConfig.VirtioBackendFsConfig.SharedDir = shareDirs[0]
+		virtiofsConfig.VirtioBackendFsConfig.AllowedDirs = nil
+	}
 
 	return virtiofsConfig, nil
+}
+
+func IsReadOnlyMount(path string) bool {
+	const erofsSuperMagic = 0xE0F5E1E2
+	var stat unix.Statfs_t
+	return unix.Statfs(path, &stat) == nil && (stat.Flags&unix.ST_RDONLY != 0 || stat.Type == erofsSuperMagic)
+}
+
+func EnsureHostErofsMount(path string) error {
+	if IsReadOnlyMount(path) {
+		return nil
+	}
+	hostPath := filepath.Join("/proc/1/root", path)
+	if !IsReadOnlyMount(hostPath) {
+		return nil
+	}
+	source, err := mountSource(path, "/proc/1/mountinfo")
+	if err != nil {
+		return fmt.Errorf("find host EROFS mount %s: %w", path, err)
+	}
+	if err := unix.Mount(source, path, "erofs", unix.MS_RDONLY, ""); err != nil {
+		return fmt.Errorf("mount host EROFS device %s at %s: %w", source, path, err)
+	}
+	if err := unix.Mount("", path, "", unix.MS_PRIVATE, ""); err != nil {
+		_ = unix.Unmount(path, unix.MNT_DETACH)
+		return fmt.Errorf("make EROFS mount %s private: %w", path, err)
+	}
+	return nil
+}
+
+func mountSource(path, mountInfoPath string) (string, error) {
+	line, err := findMount(path, mountInfoPath)
+	if err != nil {
+		return "", err
+	}
+	separator := strings.Index(line, " - ")
+	fields := strings.Fields(line[separator+3:])
+	if len(fields) < 2 || fields[0] != "erofs" {
+		return "", fmt.Errorf("mount %s is not EROFS", path)
+	}
+	return fields[1], nil
+}
+func findMount(path, mountInfoPath string) (string, error) {
+	data, err := os.ReadFile(mountInfoPath)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		separator := strings.Index(line, " - ")
+		if separator < 0 {
+			continue
+		}
+		fields := strings.Fields(line[:separator])
+		if len(fields) >= 6 && fields[4] == path {
+			return line, nil
+		}
+	}
+	return "", fmt.Errorf("mount %s not found", path)
 }
 
 func GenEmptyVirtiofsConfig(readOnly bool, cache int) (*VirtiofsConfig, error) {

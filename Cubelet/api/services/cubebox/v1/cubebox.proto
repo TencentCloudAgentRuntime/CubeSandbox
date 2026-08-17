@@ -1196,6 +1196,9 @@ message SnapshotRuntimeRequest {
   string sandboxID = 2;
   // Absolute destination for the immutable Runtime staging directory.
   string staging_dir = 3;
+  // Stop the VM task after the Runtime checkpoint is complete while keeping
+  // Cube and volume metadata available for storage snapshotting.
+  bool stop_after_snapshot = 4;
 }
 
 message SnapshotRuntimeResponse {

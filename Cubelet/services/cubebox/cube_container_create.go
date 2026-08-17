@@ -1445,6 +1445,9 @@ func cubeStorageMounts(volumeMounts []*cubebox.VolumeMounts, info *storage.Stora
 		if hostDir.ReadOnly {
 			source = filepath.Join(cubeVirtiofsRootPath, constants.PropagationVirtioRo)
 		}
+		if hostDir.VirtiofsID != "" {
+			source = filepath.Join(cubeVirtiofsRootPath, hostDir.VirtiofsID)
+		}
 		mounts = append(mounts, specs.Mount{Type: constants.MountTypeBind, Source: source, Destination: volumeMount.ContainerPath, Options: getMountOptions(volumeMount)})
 	}
 	return mounts

@@ -102,7 +102,7 @@ func TestCubeStorageMountsScopesDirectShare(t *testing.T) {
 	info := &storage.StorageInfo{
 		Volumes: map[string]*storage.BackendFileInfo{"file": {FilePath: "/data/file"}},
 		HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{
-			"workspace": {DirectShare: true},
+			"workspace": {DirectShare: true, VirtiofsID: constants.EroxWorkspaceVirtiofsID},
 			"legacy":    {ShareDir: "/same", BindPath: "/same"},
 		},
 	}
@@ -111,7 +111,7 @@ func TestCubeStorageMountsScopesDirectShare(t *testing.T) {
 	require.Len(t, mounts, 2)
 	require.Equal(t, "/data/file", mounts[0].Source)
 	require.Equal(t, "/file", mounts[0].Destination)
-	require.Equal(t, filepath.Join(cubeVirtiofsRootPath, constants.PropagationVirtioRw), mounts[1].Source)
+	require.Equal(t, filepath.Join(cubeVirtiofsRootPath, constants.EroxWorkspaceVirtiofsID), mounts[1].Source)
 	require.Equal(t, "/workspace", mounts[1].Destination)
 }
 
