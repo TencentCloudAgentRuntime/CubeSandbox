@@ -146,7 +146,7 @@ func TestAttachMountsAWVAndPreparesEROXWorkspace(t *testing.T) {
 	if !reflect.DeepEqual(runner.calls[0].args, wantArgs) {
 		t.Fatalf("prepare args = %#v, want %#v", runner.calls[0].args, wantArgs)
 	}
-	if !reflect.DeepEqual(runner.calls[0].env, []string{"EROX_WORKSPACE_ENABLE_REAL_MOUNT=1", "EROX_WORKSPACE_ENABLE_ADVANCED_OVERLAY=1"}) {
+	if !reflect.DeepEqual(runner.calls[0].env, workspaceEnv()) {
 		t.Fatalf("prepare env = %#v", runner.calls[0].env)
 	}
 	var response attachResponse
@@ -249,5 +249,11 @@ func TestSnapshotDetachesAndCommitsWorkspace(t *testing.T) {
 		if runner.calls[i].args[0] != command {
 			t.Fatalf("call[%d] = %#v, want %s", i, runner.calls[i], command)
 		}
+	}
+}
+
+func TestDefaultEROXBinaryIsVisibleInCubeletToolbox(t *testing.T) {
+	if defaultEROXBinary != "/usr/local/services/cubetoolbox/Cubelet/plugin/erox-snapshotter" {
+		t.Fatalf("defaultEROXBinary = %q", defaultEROXBinary)
 	}
 }

@@ -17,7 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const defaultEROXBinary = "/usr/local/bin/erox-snapshotter"
+const defaultEROXBinary = "/usr/local/services/cubetoolbox/Cubelet/plugin/erox-snapshotter"
 const defaultAWVStateDir = "/data/cubelet/awv-state"
 
 type privateData struct {

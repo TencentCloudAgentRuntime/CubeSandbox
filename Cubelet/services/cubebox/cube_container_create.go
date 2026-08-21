@@ -1244,6 +1244,9 @@ func (l *local) prepareWritableRootfs(ctx context.Context, flowOpts *workflow.Cr
 					blkPath = filepath.Join(cubeVirtiofsRootPath, constants.PropagationVirtioRw, filepath.Base(hostDir.BindPath))
 				}
 			}
+			if !foundBlk {
+				blkPath, foundBlk = pluginWritableRootFSPath(tmpInfo, volumeName)
+			}
 		}
 	}
 	if !foundBlk {
@@ -1256,6 +1259,14 @@ func (l *local) prepareWritableRootfs(ctx context.Context, flowOpts *workflow.Cr
 	log.G(ctx).Debugf("writable rootfs:%+v", blkPath)
 
 	return oci.WithAnnotations(annotations), nil
+}
+
+func pluginWritableRootFSPath(info *storage.StorageInfo, volumeName string) (string, bool) {
+	pluginVolume := info.PluginVolumeBackendInfos[volumeName]
+	if pluginVolume == nil || pluginVolume.Driver != "block-device" || pluginVolume.HostPath == "" {
+		return "", false
+	}
+	return pluginVolume.HostPath, true
 }
 
 func setCgroup(ctx context.Context, pid uint32, group string) {
