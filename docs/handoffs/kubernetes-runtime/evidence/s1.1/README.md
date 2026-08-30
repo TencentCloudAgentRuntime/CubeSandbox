@@ -15,6 +15,7 @@
 - `871e9f7a`：采用 containerd 2.3 官方 Sandbox bindings。
 - `47522929`：实现 Sandbox VM 生命周期、RuntimeResource adapter/recovery 与测试。
 - `e7881524`：修正真实联调发现的 route family、asset/KVM preflight、API version negotiation 和 durable state 枚举覆盖。
+- `dfdc0455`：串行化 Shutdown 与 detached Create/Start/Stop，并在 VM teardown 错误时清除已释放 lease。
 
 ## 官方 containerd wire 验证
 
