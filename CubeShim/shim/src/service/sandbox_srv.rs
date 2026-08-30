@@ -3,14 +3,13 @@
 
 use async_trait::async_trait;
 use containerd_shim::asynchronous::ExitSignal;
-use containerd_shim::protos::protobuf::{
-    well_known_types::timestamp::Timestamp, Message, MessageField,
-};
+use containerd_shim::protos::protobuf::{well_known_types::timestamp::Timestamp, MessageField};
 use containerd_shim::protos::ttrpc::{r#async::TtrpcContext, Code, Error as TtrpcError};
 use containerd_shim::protos::types::platform::Platform;
 use containerd_shim::protos::{sandbox_api as api, sandbox_async::Sandbox};
 use containerd_shim::TtrpcResult;
 use oci_spec::runtime::Spec;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -528,6 +527,47 @@ impl SandboxService {
     }
 }
 
+fn hash_create_part(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn create_request_fingerprint(
+    request: &api::CreateSandboxRequest,
+    cri_fingerprint: &str,
+) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    for value in [
+        request.sandbox_id.as_bytes(),
+        request.bundle_path.as_bytes(),
+        request.netns_path.as_bytes(),
+        cri_fingerprint.as_bytes(),
+    ] {
+        hash_create_part(&mut hasher, value);
+    }
+    hash_create_part(&mut hasher, &(request.rootfs.len() as u64).to_be_bytes());
+    for mount in &request.rootfs {
+        for value in [
+            mount.type_.as_bytes(),
+            mount.source.as_bytes(),
+            mount.target.as_bytes(),
+        ] {
+            hash_create_part(&mut hasher, value);
+        }
+        hash_create_part(&mut hasher, &(mount.options.len() as u64).to_be_bytes());
+        for option in &mount.options {
+            hash_create_part(&mut hasher, option.as_bytes());
+        }
+    }
+    let mut annotations: Vec<_> = request.annotations.iter().collect();
+    annotations.sort_by(|left, right| left.0.cmp(right.0));
+    for (key, value) in annotations {
+        hash_create_part(&mut hasher, key.as_bytes());
+        hash_create_part(&mut hasher, value.as_bytes());
+    }
+    hasher.finalize().to_vec()
+}
+
 #[async_trait]
 impl Sandbox for SandboxService {
     async fn create_sandbox(
@@ -556,9 +596,8 @@ impl Sandbox for SandboxService {
         })?;
         let config = runtime_resource::decode_cri_config(&options.type_url, &options.value)
             .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
-        let wire = req.write_to_bytes().map_err(|error| {
-            rpc_error(Code::INVALID_ARGUMENT, format!("encode request: {error}"))
-        })?;
+        let fingerprint =
+            create_request_fingerprint(&req, &runtime_resource::cri_semantic_fingerprint(&config));
         let config_path = Path::new(&req.bundle_path).join("config.json");
         let mut spec: Spec = if config_path.is_file() {
             Utils::load_spec(&req.bundle_path).map_err(|error| {
@@ -577,10 +616,10 @@ impl Sandbox for SandboxService {
             match state.phase {
                 Phase::Unmanaged => {
                     state.phase = Phase::Creating;
-                    state.create_request = Some(wire.clone());
+                    state.create_request = Some(fingerprint.clone());
                     true
                 }
-                _ if state.create_request.as_deref() == Some(wire.as_slice()) => false,
+                _ if state.create_request.as_deref() == Some(fingerprint.as_slice()) => false,
                 phase => {
                     return Err(rpc_error(
                         Code::ALREADY_EXISTS,
@@ -847,6 +886,45 @@ mod tests {
         assert_eq!(
             lifecycle.begin_shutdown().await,
             ShutdownAction::WaitForExisting
+        );
+    }
+
+    #[test]
+    fn create_retry_fingerprint_ignores_annotation_map_iteration_order() {
+        let mut first = api::CreateSandboxRequest {
+            sandbox_id: "sandbox-a".to_string(),
+            bundle_path: "/run/containerd/bundle".to_string(),
+            netns_path: "/run/netns/pod-a".to_string(),
+            ..Default::default()
+        };
+        first
+            .annotations
+            .insert("z.example/key".to_string(), "z".to_string());
+        first
+            .annotations
+            .insert("a.example/key".to_string(), "a".to_string());
+        let mut second = api::CreateSandboxRequest {
+            sandbox_id: first.sandbox_id.clone(),
+            bundle_path: first.bundle_path.clone(),
+            netns_path: first.netns_path.clone(),
+            ..Default::default()
+        };
+        second
+            .annotations
+            .insert("a.example/key".to_string(), "a".to_string());
+        second
+            .annotations
+            .insert("z.example/key".to_string(), "z".to_string());
+        assert_eq!(
+            create_request_fingerprint(&first, "cri-fingerprint"),
+            create_request_fingerprint(&second, "cri-fingerprint")
+        );
+        second
+            .annotations
+            .insert("z.example/key".to_string(), "changed".to_string());
+        assert_ne!(
+            create_request_fingerprint(&first, "cri-fingerprint"),
+            create_request_fingerprint(&second, "cri-fingerprint")
         );
     }
 

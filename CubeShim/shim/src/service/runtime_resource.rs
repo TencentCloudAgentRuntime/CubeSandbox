@@ -8,13 +8,13 @@ use nix::cmsg_space;
 use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
 use oci_spec::runtime::Spec;
 use prost::Message;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{IoSliceMut, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::net::UnixStream;
 use tonic::codegen::http::uri::PathAndQuery;
@@ -38,7 +38,9 @@ const ANNO_USE_PASSFD_IO: &str = "cube.use_passfd_io";
 const ANNO_SANDBOX_UID: &str = "io.kubernetes.cri.sandbox-uid";
 const ANNO_SANDBOX_NAMESPACE: &str = "io.kubernetes.cri.sandbox-namespace";
 const ANNO_SANDBOX_NAME: &str = "io.kubernetes.cri.sandbox-name";
+const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const CRI_V1_POD_SANDBOX_CONFIG: &str = "runtime.v1.PodSandboxConfig";
+const RUNTIME_CLEANUP_RECORD: &str = "cube-runtime-resource.json";
 
 const REQUIRED_CAPABILITIES: [(&str, u32); 3] = [
     ("io.cubesandbox.runtime.assets", 1),
@@ -322,6 +324,14 @@ enum FdHandoffCode {
     Internal = 6,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct RuntimeCleanupRecord {
+    endpoint: String,
+    sandbox_id: String,
+    lease_id: String,
+    generation: u64,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeLease {
     endpoint: String,
@@ -329,6 +339,89 @@ pub(crate) struct RuntimeLease {
 }
 
 impl RuntimeLease {
+    fn cleanup_record(&self) -> RuntimeCleanupRecord {
+        RuntimeCleanupRecord {
+            endpoint: self.endpoint.clone(),
+            sandbox_id: self.sandbox.sandbox_id.clone(),
+            lease_id: self.sandbox.lease_id.clone(),
+            generation: self.sandbox.generation,
+        }
+    }
+
+    fn persist_cleanup_record_at(&self, path: &Path) -> Result<(), String> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("cleanup record has no parent: {}", path.display()))?;
+        let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+        let data = serde_json::to_vec(&self.cleanup_record())
+            .map_err(|error| format!("encode RuntimeResource cleanup record: {error}"))?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temp)
+            .map_err(|error| {
+                format!(
+                    "create RuntimeResource cleanup record {}: {error}",
+                    temp.display()
+                )
+            })?;
+        file.write_all(&data)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| {
+                format!(
+                    "persist RuntimeResource cleanup record {}: {error}",
+                    temp.display()
+                )
+            })?;
+        std::fs::rename(&temp, path).map_err(|error| {
+            format!(
+                "commit RuntimeResource cleanup record {}: {error}",
+                path.display()
+            )
+        })?;
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                format!(
+                    "sync RuntimeResource cleanup record parent {}: {error}",
+                    parent.display()
+                )
+            })
+    }
+
+    fn persist_cleanup_record(&self) -> Result<(), String> {
+        self.persist_cleanup_record_at(&runtime_cleanup_record_path()?)
+    }
+
+    fn remove_cleanup_record_at(&self, path: &Path) -> Result<(), String> {
+        let Some(record) = load_cleanup_record_at(path)? else {
+            return Ok(());
+        };
+        if record != self.cleanup_record() {
+            return Err("RuntimeResource cleanup record identity changed".to_string());
+        }
+        std::fs::remove_file(path).map_err(|error| {
+            format!(
+                "remove RuntimeResource cleanup record {}: {error}",
+                path.display()
+            )
+        })?;
+        let parent = path.parent().unwrap();
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                format!(
+                    "sync RuntimeResource cleanup removal {}: {error}",
+                    parent.display()
+                )
+            })
+    }
+
+    fn remove_cleanup_record(&self) -> Result<(), String> {
+        self.remove_cleanup_record_at(&runtime_cleanup_record_path()?)
+    }
+
     pub(crate) async fn acquire_tap(&self) -> Result<std::fs::File, String> {
         preflight_runtime_environment_at(&self.sandbox, Path::new("/dev/kvm"))?;
         let sandbox = self.sandbox.clone();
@@ -354,8 +447,61 @@ impl RuntimeLease {
         if !response.released {
             return Err("Cubelet did not confirm RuntimeResource release".to_string());
         }
+        self.remove_cleanup_record()?;
         Ok(())
     }
+}
+
+fn runtime_cleanup_record_path() -> Result<PathBuf, String> {
+    std::env::current_dir()
+        .map(|directory| directory.join(RUNTIME_CLEANUP_RECORD))
+        .map_err(|error| format!("resolve RuntimeResource cleanup record directory: {error}"))
+}
+
+fn load_cleanup_record_at(path: &Path) -> Result<Option<RuntimeCleanupRecord>, String> {
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "read RuntimeResource cleanup record {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    let record: RuntimeCleanupRecord = serde_json::from_slice(&data).map_err(|error| {
+        format!(
+            "decode RuntimeResource cleanup record {}: {error}",
+            path.display()
+        )
+    })?;
+    if record.endpoint.is_empty()
+        || !Path::new(&record.endpoint).is_absolute()
+        || record.sandbox_id.is_empty()
+        || record.lease_id.is_empty()
+        || record.generation == 0
+    {
+        return Err("RuntimeResource cleanup record has invalid identity".to_string());
+    }
+    Ok(Some(record))
+}
+
+pub(crate) async fn release_persisted() -> Result<(), String> {
+    let path = runtime_cleanup_record_path()?;
+    let Some(record) = load_cleanup_record_at(&path)? else {
+        return Ok(());
+    };
+    RuntimeLease {
+        endpoint: record.endpoint,
+        sandbox: PreparedSandbox {
+            sandbox_id: record.sandbox_id,
+            lease_id: record.lease_id,
+            generation: record.generation,
+            ..Default::default()
+        },
+    }
+    .release()
+    .await
 }
 
 struct RuntimeResourceClient {
@@ -423,6 +569,60 @@ pub(crate) fn decode_cri_config(
     Ok(config)
 }
 
+fn hash_fingerprint_part(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+pub(crate) fn cri_semantic_fingerprint(config: &CriPodSandboxConfig) -> String {
+    let mut hasher = Sha256::new();
+    if let Some(metadata) = &config.metadata {
+        for value in [
+            metadata.name.as_bytes(),
+            metadata.uid.as_bytes(),
+            metadata.namespace.as_bytes(),
+            &metadata.attempt.to_be_bytes(),
+        ] {
+            hash_fingerprint_part(&mut hasher, value);
+        }
+    } else {
+        hash_fingerprint_part(&mut hasher, b"no-metadata");
+    }
+    if let Some(dns) = &config.dns_config {
+        for values in [&dns.servers, &dns.searches, &dns.options] {
+            hash_fingerprint_part(&mut hasher, &(values.len() as u64).to_be_bytes());
+            for value in values {
+                hash_fingerprint_part(&mut hasher, value.as_bytes());
+            }
+        }
+    } else {
+        hash_fingerprint_part(&mut hasher, b"no-dns");
+    }
+    let mut annotations: Vec<_> = config.annotations.iter().collect();
+    annotations.sort_by(|left, right| left.0.cmp(right.0));
+    for (key, value) in annotations {
+        hash_fingerprint_part(&mut hasher, key.as_bytes());
+        hash_fingerprint_part(&mut hasher, value.as_bytes());
+    }
+    if let Some(resources) = config
+        .linux
+        .as_ref()
+        .and_then(|linux| linux.resources.as_ref())
+    {
+        for value in [
+            resources.cpu_period,
+            resources.cpu_quota,
+            resources.cpu_shares,
+            resources.memory_limit_in_bytes,
+        ] {
+            hash_fingerprint_part(&mut hasher, &value.to_be_bytes());
+        }
+    } else {
+        hash_fingerprint_part(&mut hasher, b"no-linux-resources");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 pub(crate) fn merge_cri_annotations(
     spec: &mut Spec,
     config: &CriPodSandboxConfig,
@@ -438,8 +638,48 @@ pub(crate) fn merge_cri_annotations(
         metadata.namespace.clone(),
     );
     annotations.insert(ANNO_SANDBOX_NAME.to_string(), metadata.name.clone());
+    if config.dns_config.is_some() {
+        let dns = cri_dns_entries(config.dns_config.as_ref())?;
+        annotations.insert(
+            ANNO_SANDBOX_DNS.to_string(),
+            serde_json::to_string(&dns).map_err(|error| format!("encode CRI DNS: {error}"))?,
+        );
+    }
     spec.set_annotations(Some(annotations));
     Ok(())
+}
+
+fn cri_dns_entries(config: Option<&CriDnsConfig>) -> Result<Vec<String>, String> {
+    let Some(config) = config else {
+        return Ok(Vec::new());
+    };
+    let mut entries = Vec::new();
+    for server in &config.servers {
+        let server = server.trim();
+        server
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| format!("invalid CRI DNS server {server}"))?;
+        entries.push(format!("nameserver {server}"));
+    }
+    let searches: Vec<&str> = config
+        .searches
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect();
+    if !searches.is_empty() {
+        entries.push(format!("search {}", searches.join(" ")));
+    }
+    let options: Vec<&str> = config
+        .options
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect();
+    if !options.is_empty() {
+        entries.push(format!("options {}", options.join(" ")));
+    }
+    Ok(entries)
 }
 
 pub(crate) async fn prepare(
@@ -480,11 +720,7 @@ pub(crate) async fn prepare(
             netns_path: netns_path.to_string(),
             interface_name: "eth0".to_string(),
             pod_ip: String::new(),
-            dns: config
-                .dns_config
-                .as_ref()
-                .map(|dns| dns.servers.clone())
-                .unwrap_or_default(),
+            dns: cri_dns_entries(config.dns_config.as_ref())?,
         }),
     };
     let response: PrepareSandboxResponse = client
@@ -498,7 +734,17 @@ pub(crate) async fn prepare(
         .ok_or_else(|| "Cubelet returned no prepared sandbox".to_string())?;
     validate_prepared(sandbox_id, generation, &sandbox)?;
     inject_annotations(spec, &resources, &sandbox)?;
-    Ok(RuntimeLease { endpoint, sandbox })
+    let lease = RuntimeLease { endpoint, sandbox };
+    if let Err(error) = lease.persist_cleanup_record() {
+        let release_error = lease.release().await.err();
+        return Err(match release_error {
+            Some(release_error) => format!(
+                "persist RuntimeResource cleanup identity: {error}; release RuntimeResource: {release_error}"
+            ),
+            None => format!("persist RuntimeResource cleanup identity: {error}"),
+        });
+    }
+    Ok(lease)
 }
 
 fn preflight_runtime_environment_at(
@@ -830,7 +1076,7 @@ fn acquire_tap_blocking(sandbox: &PreparedSandbox) -> Result<std::fs::File, Stri
     let mut header = [0_u8; 4];
     let mut iov = [IoSliceMut::new(&mut header)];
     let mut control = cmsg_space!([RawFd; 1]);
-    let (received, descriptors) = {
+    let (received, truncated, descriptors) = {
         let message = recvmsg::<()>(
             stream.as_raw_fd(),
             &mut iov,
@@ -839,21 +1085,36 @@ fn acquire_tap_blocking(sandbox: &PreparedSandbox) -> Result<std::fs::File, Stri
         )
         .map_err(|error| format!("receive FD handoff response: {error}"))?;
         let received = message.bytes;
+        let truncated = message.flags.contains(MsgFlags::MSG_CTRUNC);
         let mut descriptors = Vec::new();
-        for control_message in message
-            .cmsgs()
-            .map_err(|error| format!("decode FD handoff control message: {error}"))?
-        {
-            if let ControlMessageOwned::ScmRights(rights) = control_message {
-                descriptors.extend(rights);
+        if !truncated {
+            for control_message in message
+                .cmsgs()
+                .map_err(|error| format!("decode FD handoff control message: {error}"))?
+            {
+                if let ControlMessageOwned::ScmRights(rights) = control_message {
+                    descriptors.extend(rights);
+                }
             }
         }
-        (received, descriptors)
+        (received, truncated, descriptors)
     };
     drop(iov);
-    if received != header.len() {
+    if truncated {
         close_raw_fds(&descriptors);
-        return Err(format!("short FD handoff response header: {received}"));
+        return Err("truncated FD handoff control message".to_string());
+    }
+    if received == 0 {
+        close_raw_fds(&descriptors);
+        return Err("empty FD handoff response header".to_string());
+    }
+    if received < header.len() {
+        if let Err(error) = stream.read_exact(&mut header[received..]) {
+            close_raw_fds(&descriptors);
+            return Err(format!(
+                "read remaining FD handoff response header: {error}"
+            ));
+        }
     }
     let size = u32::from_be_bytes(header) as usize;
     if size == 0 || size > 64 * 1024 {
@@ -1058,6 +1319,137 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    fn handoff_sandbox(endpoint: String) -> PreparedSandbox {
+        PreparedSandbox {
+            sandbox_id: "sandbox-fd".to_string(),
+            lease_id: "lease-fd".to_string(),
+            generation: 1,
+            network: Some(NetworkAttachment {
+                network_handle: "network-fd".to_string(),
+                fd_handoff: Some(FdHandoffDescriptor {
+                    protocol_version: FD_PROTOCOL_VERSION,
+                    endpoint,
+                    token: "token-fd".to_string(),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn spawn_handoff_server(
+        listener: std::os::unix::net::UnixListener,
+        fragment_header: bool,
+        descriptor_count: usize,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_size = [0_u8; 4];
+            stream.read_exact(&mut request_size).unwrap();
+            let mut request = vec![0_u8; u32::from_be_bytes(request_size) as usize];
+            stream.read_exact(&mut request).unwrap();
+            FdHandoffRequestV1::decode(request.as_slice()).unwrap();
+
+            let response = FdHandoffResponseV1 {
+                protocol_version: FD_PROTOCOL_VERSION,
+                code: FdHandoffCode::Ok as i32,
+                message: "ok".to_string(),
+                fd_count: 1,
+            }
+            .encode_to_vec();
+            let header = (response.len() as u32).to_be_bytes();
+            let files: Vec<_> = (0..descriptor_count)
+                .map(|_| std::fs::File::open("/dev/null").unwrap())
+                .collect();
+            let rights: Vec<_> = files.iter().map(|file| file.as_raw_fd()).collect();
+            let header_bytes = if fragment_header {
+                &header[..1]
+            } else {
+                &header[..]
+            };
+            let iov = [std::io::IoSlice::new(header_bytes)];
+            nix::sys::socket::sendmsg::<()>(
+                stream.as_raw_fd(),
+                &iov,
+                &[nix::sys::socket::ControlMessage::ScmRights(&rights)],
+                MsgFlags::empty(),
+                None,
+            )
+            .unwrap();
+            if fragment_header {
+                stream.write_all(&header[1..]).unwrap();
+            }
+            stream.write_all(&response).unwrap();
+        })
+    }
+
+    #[test]
+    fn fd_handoff_accepts_fragmented_stream_header_with_scm_rights() {
+        let root = std::env::temp_dir().join(format!("cube-runtime-fd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join("handoff.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let server = spawn_handoff_server(listener, true, 1);
+        let file = acquire_tap_blocking(&handoff_sandbox(socket.display().to_string())).unwrap();
+        assert!(file.metadata().is_ok());
+        drop(file);
+        server.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fd_handoff_rejects_truncated_control_message() {
+        let root =
+            std::env::temp_dir().join(format!("cube-runtime-fd-trunc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join("handoff.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let server = spawn_handoff_server(listener, false, 8);
+        let error =
+            acquire_tap_blocking(&handoff_sandbox(socket.display().to_string())).unwrap_err();
+        assert!(
+            error.contains("truncated FD handoff control message"),
+            "{error}"
+        );
+        server.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_record_is_durable_and_exact_lease_scoped() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-runtime-cleanup-record-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(RUNTIME_CLEANUP_RECORD);
+        let lease = RuntimeLease {
+            endpoint: "/run/cubelet/runtime.sock".to_string(),
+            sandbox: PreparedSandbox {
+                sandbox_id: "sandbox-a".to_string(),
+                lease_id: "lease-a".to_string(),
+                generation: 3,
+                ..Default::default()
+            },
+        };
+        lease.persist_cleanup_record_at(&path).unwrap();
+        assert_eq!(
+            load_cleanup_record_at(&path).unwrap(),
+            Some(lease.cleanup_record())
+        );
+
+        let mut stale = lease.clone();
+        stale.sandbox.lease_id = "stale".to_string();
+        assert!(stale
+            .remove_cleanup_record_at(&path)
+            .unwrap_err()
+            .contains("identity changed"));
+        assert!(path.is_file());
+        lease.remove_cleanup_record_at(&path).unwrap();
+        assert_eq!(load_cleanup_record_at(&path).unwrap(), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn retry_keys_are_stable_and_operation_scoped() {
         let sandbox = PreparedSandbox {
@@ -1134,6 +1526,25 @@ mod tests {
         assert_eq!(annotations[ANNO_SANDBOX_NAME], "pod-a");
         assert_eq!(annotations["pod.example/key"], "value");
         assert_eq!(annotations["request.example/key"], "request");
+        let dns: Vec<String> = serde_json::from_str(&annotations[ANNO_SANDBOX_DNS]).unwrap();
+        assert_eq!(
+            dns,
+            [
+                "nameserver 10.96.0.10",
+                "search ns-a.svc.cluster.local",
+                "options ndots:5",
+            ]
+        );
+    }
+
+    #[test]
+    fn cri_dns_rejects_invalid_server_before_resource_prepare() {
+        let mut config = sample_cri();
+        config.dns_config.as_mut().unwrap().servers = vec!["not-an-ip".to_string()];
+        let mut spec = Spec::default();
+        assert!(merge_cri_annotations(&mut spec, &config, &HashMap::new())
+            .unwrap_err()
+            .contains("invalid CRI DNS server"));
     }
 
     #[test]

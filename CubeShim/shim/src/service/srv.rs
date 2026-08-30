@@ -3,7 +3,7 @@
 //
 
 use crate::common::utils::{ADDRESS_FILE, SHIM_PID_FILE};
-use crate::service::tools;
+use crate::service::{runtime_resource, tools};
 use crate::{common::utils, service::task_srv::TaskService};
 use async_trait::async_trait;
 use containerd_shim::{
@@ -70,6 +70,10 @@ impl Shim for Service {
                 let _ = tools::signal(shim_pid, Some(Signal::SIGKILL));
             }
         }
+
+        runtime_resource::release_persisted()
+            .await
+            .map_err(|error| Error::Other(format!("release persisted RuntimeResource: {error}")))?;
 
         if let Ok(sk_file) = tools::read_address(ADDRESS_FILE) {
             let _ = fs::remove_file(sk_file.as_str());
