@@ -50,6 +50,25 @@ const CTRL_QUEUE_EVENT: u16 = EPOLL_HELPER_EVENT_LAST + 1;
 // Following the VIRTIO specification, the MTU should be at least 1280.
 pub const MIN_MTU: u16 = 1280;
 
+fn net_avail_features(tap_offload_available: bool) -> u64 {
+    let mut features =
+        1 << VIRTIO_NET_F_MTU | 1 << VIRTIO_RING_F_EVENT_IDX | 1 << VIRTIO_F_VERSION_1;
+    if tap_offload_available {
+        features |= 1 << VIRTIO_NET_F_CSUM
+            | 1 << VIRTIO_NET_F_CTRL_GUEST_OFFLOADS
+            | 1 << VIRTIO_NET_F_GUEST_CSUM
+            | 1 << VIRTIO_NET_F_GUEST_ECN
+            | 1 << VIRTIO_NET_F_GUEST_TSO4
+            | 1 << VIRTIO_NET_F_GUEST_TSO6
+            | 1 << VIRTIO_NET_F_GUEST_UFO
+            | 1 << VIRTIO_NET_F_HOST_ECN
+            | 1 << VIRTIO_NET_F_HOST_TSO4
+            | 1 << VIRTIO_NET_F_HOST_TSO6
+            | 1 << VIRTIO_NET_F_HOST_UFO;
+    }
+    features
+}
+
 pub struct NetCtrlEpollHandler {
     pub mem: GuestMemoryAtomic<GuestMemoryMmap>,
     pub kill_evt: EventFd,
@@ -425,6 +444,8 @@ impl Net {
         id: String,
         taps: Vec<Tap>,
         guest_mac: Option<MacAddr>,
+        mtu: Option<u16>,
+        fds_from_other_netns: bool,
         iommu: bool,
         num_queues: usize,
         queue_size: u16,
@@ -435,7 +456,10 @@ impl Net {
     ) -> Result<Self> {
         assert!(!taps.is_empty());
 
-        let mtu = taps[0].mtu().map_err(Error::TapError)? as u16;
+        let mtu = match mtu {
+            Some(mtu) => mtu,
+            None => taps[0].mtu().map_err(Error::TapError)? as u16,
+        };
 
         let (avail_features, acked_features, config, queue_sizes) = if let Some(state) = state {
             debug!("Restoring virtio-net {}", id);
@@ -446,20 +470,9 @@ impl Net {
                 state.queue_size,
             )
         } else {
-            let mut avail_features = 1 << VIRTIO_NET_F_CSUM
-                | 1 << VIRTIO_NET_F_CTRL_GUEST_OFFLOADS
-                | 1 << VIRTIO_NET_F_GUEST_CSUM
-                | 1 << VIRTIO_NET_F_GUEST_ECN
-                | 1 << VIRTIO_NET_F_GUEST_TSO4
-                | 1 << VIRTIO_NET_F_GUEST_TSO6
-                | 1 << VIRTIO_NET_F_GUEST_UFO
-                | 1 << VIRTIO_NET_F_HOST_ECN
-                | 1 << VIRTIO_NET_F_HOST_TSO4
-                | 1 << VIRTIO_NET_F_HOST_TSO6
-                | 1 << VIRTIO_NET_F_HOST_UFO
-                | 1 << VIRTIO_NET_F_MTU
-                | 1 << VIRTIO_RING_F_EVENT_IDX
-                | 1 << VIRTIO_F_VERSION_1;
+            let tap_offload_available =
+                !fds_from_other_netns && taps.iter().all(Tap::if_name_visible);
+            let mut avail_features = net_avail_features(tap_offload_available);
 
             if iommu {
                 avail_features |= 1u64 << VIRTIO_F_IOMMU_PLATFORM;
@@ -546,6 +559,8 @@ impl Net {
             id,
             taps,
             guest_mac,
+            mtu,
+            false,
             iommu,
             num_queues,
             queue_size,
@@ -562,6 +577,7 @@ impl Net {
         fds: &[RawFd],
         guest_mac: Option<MacAddr>,
         mtu: Option<u16>,
+        fds_from_other_netns: bool,
         iommu: bool,
         queue_size: u16,
         seccomp_action: SeccompAction,
@@ -579,20 +595,25 @@ impl Net {
             if fd < 0 {
                 return Err(Error::DuplicateTapFd(std::io::Error::last_os_error()));
             }
-            let tap = Tap::from_tap_fd(fd, num_queue_pairs).map_err(Error::TapError)?;
+            let tap = Tap::from_tap_fd(fd, num_queue_pairs, !fds_from_other_netns)
+                .map_err(Error::TapError)?;
             taps.push(tap);
         }
 
         assert!(!taps.is_empty());
 
         if let Some(mtu) = mtu {
-            taps[0].set_mtu(mtu as i32).map_err(Error::TapError)?;
+            if !fds_from_other_netns && taps[0].if_name_visible() {
+                taps[0].set_mtu(mtu as i32).map_err(Error::TapError)?;
+            }
         }
 
         Self::new_with_tap(
             id,
             taps,
             guest_mac,
+            mtu,
+            fds_from_other_netns,
             iommu,
             num_queue_pairs * 2,
             queue_size,
@@ -724,7 +745,7 @@ impl VirtioDevice for Net {
 
             let tap = taps.remove(0);
 
-            if !tap.is_donated() {
+            if !tap.is_donated() && tap.if_name_visible() {
                 tap.set_offload(virtio_features_to_tap_offload(self.common.acked_features))
                     .map_err(|e| {
                         error!("Error programming tap offload: {:?}", e);
@@ -860,3 +881,18 @@ impl Snapshottable for Net {
 }
 impl Transportable for Net {}
 impl Migratable for Net {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cross_netns_tap_disables_fd_offloads() {
+        let features = net_avail_features(false);
+
+        assert_eq!(features & (1 << VIRTIO_NET_F_CSUM), 0);
+        assert_eq!(features & (1 << VIRTIO_NET_F_GUEST_TSO4), 0);
+        assert_ne!(features & (1 << VIRTIO_NET_F_MTU), 0);
+        assert_ne!(net_avail_features(true) & (1 << VIRTIO_NET_F_CSUM), 0);
+    }
+}

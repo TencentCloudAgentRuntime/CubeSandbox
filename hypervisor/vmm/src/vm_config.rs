@@ -303,6 +303,10 @@ pub struct NetConfig {
     pub id: Option<String>,
     #[serde(default)]
     pub fds: Option<Vec<i32>>,
+    /// File descriptors whose interfaces belong to another network namespace.
+    /// Name-based ioctls must not be used for these descriptors.
+    #[serde(default)]
+    pub fds_from_other_netns: bool,
     #[serde(default)]
     pub rate_limiter_config: Option<RateLimiterConfig>,
     #[serde(default)]
@@ -354,6 +358,7 @@ impl Default for NetConfig {
             vhost_mode: VhostMode::Client,
             id: None,
             fds: None,
+            fds_from_other_netns: false,
             rate_limiter_config: None,
             pci_segment: 0,
         }

@@ -33,6 +33,8 @@ pub enum Error {
     GetFeatures(IoError),
     #[error("Missing multiqueue support in the kernel")]
     MultiQueueKernelSupport,
+    #[error("{0} ioctl failed: {1}")]
+    IoctlOperation(&'static str, IoError),
     #[error("ioctl failed: {0}")]
     IoctlError(IoError),
     #[error("Failed to create a socket: {0}")]
@@ -70,6 +72,7 @@ pub struct Tap {
     tap_file: File,
     if_name: Vec<u8>,
     donated: bool,
+    if_name_visible: bool,
 }
 
 impl PartialEq for Tap {
@@ -84,6 +87,7 @@ impl std::clone::Clone for Tap {
             tap_file: self.tap_file.try_clone().unwrap(),
             if_name: self.if_name.clone(),
             donated: self.donated,
+            if_name_visible: self.if_name_visible,
         }
     }
 }
@@ -225,6 +229,7 @@ impl Tap {
             tap_file: file,
             if_name: if_name.into(),
             donated: true,
+            if_name_visible: true,
         });
     }
 
@@ -289,6 +294,7 @@ impl Tap {
             tap_file: tuntap,
             if_name,
             donated: false,
+            if_name_visible: true,
         })
     }
 
@@ -297,7 +303,11 @@ impl Tap {
         Self::open_named("vmtap%d", num_queue_pairs, None)
     }
 
-    pub fn from_tap_fd(fd: RawFd, num_queue_pairs: usize) -> Result<Tap> {
+    pub fn from_tap_fd(
+        fd: RawFd,
+        num_queue_pairs: usize,
+        name_operations_allowed: bool,
+    ) -> Result<Tap> {
         // Ensure that the file is opened non-blocking, this is particularly
         // needed when opened via the shell for macvtap.
         let ret = unsafe {
@@ -312,13 +322,33 @@ impl Tap {
         let tap_file = unsafe { File::from_raw_fd(fd) };
         let mut ifreq: net_gen::ifreq = Default::default();
 
-        // Get current config including name
+        // Get current config including name. An attached TAP FD from another
+        // network namespace can return ENODEV even though reads and writes on
+        // the file description remain valid.
         let ret = unsafe { ioctl_with_mut_ref(&tap_file, net_gen::TUNGETIFF(), &mut ifreq) };
-        if ret < 0 {
-            return Err(Error::IoctlError(IoError::last_os_error()));
+        let mut if_name_visible = true;
+        let if_name = if ret < 0 {
+            let error = IoError::last_os_error();
+            if error.raw_os_error() != Some(libc::ENODEV) {
+                return Err(Error::IoctlOperation("TUNGETIFF", error));
+            }
+            if_name_visible = false;
+            Vec::new()
+        } else {
+            // We only access one field of the ifru union, hence this is safe.
+            unsafe { ifreq.ifr_ifrn.ifrn_name }.to_vec()
+        };
+
+        // TUNGETIFF is fd-scoped and can still return the interface name after
+        // the fd crosses a network-namespace boundary. Verify that the name is
+        // resolvable in the current namespace before issuing name-based ioctls.
+        if !name_operations_allowed {
+            if_name_visible = false;
+        } else if if_name_visible
+            && unsafe { libc::if_nametoindex(if_name.as_ptr() as *const c_char) } == 0
+        {
+            if_name_visible = false;
         }
-        // We only access one field of the ifru union, hence this is safe.
-        let if_name = unsafe { ifreq.ifr_ifrn.ifrn_name }.to_vec();
 
         // Try and update flags. Depending on how the tap was created (macvtap
         // or via open_named()) this might return -EEXIST so we just ignore that.
@@ -329,18 +359,31 @@ impl Tap {
                 ifreq.ifr_ifru.ifru_flags |= net_gen::IFF_MULTI_QUEUE as c_short;
             }
         }
-        let ret = unsafe { ioctl_with_mut_ref(&tap_file, net_gen::TUNSETIFF(), &mut ifreq) };
-        if ret < 0 && IoError::last_os_error().raw_os_error().unwrap() != libc::EEXIST {
-            return Err(Error::ConfigureTap(IoError::last_os_error()));
+        let ret = if if_name_visible {
+            unsafe { ioctl_with_mut_ref(&tap_file, net_gen::TUNSETIFF(), &mut ifreq) }
+        } else {
+            0
+        };
+        if ret < 0 {
+            let error = IoError::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::EEXIST) => {}
+                // TUNGETIFF above proved that the FD is already attached. ENODEV
+                // here means its interface name belongs to another netns.
+                Some(libc::ENODEV) => if_name_visible = false,
+                _ => return Err(Error::ConfigureTap(error)),
+            }
         }
 
         let tap = Tap {
             tap_file,
             if_name,
             donated: false,
+            if_name_visible,
         };
-        let vnet_hdr_size = vnet_hdr_len() as i32;
-        tap.set_vnet_hdr_size(vnet_hdr_size)?;
+        if tap.if_name_visible {
+            tap.set_vnet_hdr_size(vnet_hdr_len() as i32)?;
+        }
 
         Ok(tap)
     }
@@ -451,7 +494,10 @@ impl Tap {
         // ioctl is safe. Called with a valid sock fd, and we check the return.
         let ret = unsafe { ioctl_with_ref(&sock, net_gen::sockios::SIOCGIFMTU as c_ulong, &ifreq) };
         if ret < 0 {
-            return Err(Error::IoctlError(IoError::last_os_error()));
+            return Err(Error::IoctlOperation(
+                "SIOCGIFMTU",
+                IoError::last_os_error(),
+            ));
         }
 
         let mtu = unsafe { ifreq.ifr_ifru.ifru_mtu };
@@ -468,7 +514,10 @@ impl Tap {
         // ioctl is safe. Called with a valid sock fd, and we check the return.
         let ret = unsafe { ioctl_with_ref(&sock, net_gen::sockios::SIOCSIFMTU as c_ulong, &ifreq) };
         if ret < 0 {
-            return Err(Error::IoctlError(IoError::last_os_error()));
+            return Err(Error::IoctlOperation(
+                "SIOCSIFMTU",
+                IoError::last_os_error(),
+            ));
         }
 
         Ok(())
@@ -480,7 +529,10 @@ impl Tap {
         let ret =
             unsafe { ioctl_with_val(&self.tap_file, net_gen::TUNSETOFFLOAD(), flags as c_ulong) };
         if ret < 0 {
-            return Err(Error::IoctlError(IoError::last_os_error()));
+            return Err(Error::IoctlOperation(
+                "TUNSETOFFLOAD",
+                IoError::last_os_error(),
+            ));
         }
 
         Ok(())
@@ -512,10 +564,21 @@ impl Tap {
         let ret =
             unsafe { ioctl_with_ref(&sock, net_gen::sockios::SIOCSIFFLAGS as c_ulong, &ifreq) };
         if ret < 0 {
-            return Err(Error::IoctlError(IoError::last_os_error()));
+            return Err(Error::IoctlOperation(
+                "SIOCSIFFLAGS",
+                IoError::last_os_error(),
+            ));
         }
 
         Ok(())
+    }
+
+    /// Configure fd-scoped TAP properties while the owning network
+    /// namespace is still current. Callers that later pass this fd to a
+    /// process in another netns must call this before crossing the boundary.
+    pub fn prepare_for_cross_netns(&self) -> Result<()> {
+        self.set_vnet_hdr_size(vnet_hdr_len() as i32)?;
+        self.set_offload(0)
     }
 
     /// Set the size of the vnet hdr.
@@ -523,7 +586,10 @@ impl Tap {
         // ioctl is safe. Called with a valid tap fd, and we check the return.
         let ret = unsafe { ioctl_with_ref(&self.tap_file, net_gen::TUNSETVNETHDRSZ(), &size) };
         if ret < 0 {
-            return Err(Error::IoctlError(IoError::last_os_error()));
+            return Err(Error::IoctlOperation(
+                "TUNSETVNETHDRSZ",
+                IoError::last_os_error(),
+            ));
         }
 
         Ok(())
@@ -548,7 +614,11 @@ impl Tap {
     }
 
     pub fn is_donated(&self) -> bool {
-        return self.donated;
+        self.donated
+    }
+
+    pub fn if_name_visible(&self) -> bool {
+        self.if_name_visible
     }
 }
 
@@ -745,7 +815,7 @@ mod tests {
 
         let orig_tap = Tap::new(1).unwrap();
         let fd = orig_tap.as_raw_fd();
-        let _new_tap = Tap::from_tap_fd(fd, 1).unwrap();
+        let _new_tap = Tap::from_tap_fd(fd, 1, true).unwrap();
     }
 
     #[test]

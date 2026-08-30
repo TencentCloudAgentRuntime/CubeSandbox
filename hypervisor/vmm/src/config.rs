@@ -1272,6 +1272,7 @@ impl NetConfig {
             vhost_mode,
             id,
             fds,
+            fds_from_other_netns: false,
             rate_limiter_config,
             pci_segment,
         };

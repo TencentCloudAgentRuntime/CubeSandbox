@@ -287,6 +287,11 @@ impl VmConfig {
             //todo:handle err
             nc.mac =
                 MacAddr::from_str(&n.mac).map_err(|_| format!("New mac addr failed:{}", &n.mac))?;
+            if n.mtu > 0 {
+                nc.mtu = Some(
+                    u16::try_from(n.mtu).map_err(|_| format!("Invalid network MTU:{}", n.mtu))?,
+                );
+            }
             if let Some(q) = &n.qos {
                 let rate_limit = RateLimiterConfig {
                     bandwidth: Some(TokenBucketConfig {
@@ -481,6 +486,7 @@ mod tests {
         common::utils::DISK_DEVICE_ID_PRE,
         hypervisor::config::{VmConfig, DEFAULT_AGENT_PATH, IMAGE_PATH},
         sandbox::disk::Disk,
+        sandbox::net::{Interface, Net},
         sandbox::pmem::{HYP_AGENT_ID, HYP_OS_IMAGE_ID},
     };
     #[test]
@@ -581,6 +587,25 @@ mod tests {
         let vsock = config.vsock.unwrap();
         let vs = Utils::gen_vsock_config("ut_test");
         assert_eq!(vs, vsock)
+    }
+
+    #[test]
+    fn s0_cni_link_properties_are_propagated() {
+        let mut config = VmConfig::default();
+        let net = Net {
+            interfaces: vec![Interface {
+                name: Some("cbtap0".to_string()),
+                mac: "02:00:00:00:00:01".to_string(),
+                mtu: 1450,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        config.add_nets(&net).unwrap();
+        let configured_net = &config.nets.as_ref().unwrap()[0];
+        assert_eq!(configured_net.mac.to_string(), "02:00:00:00:00:01");
+        assert_eq!(configured_net.mtu, Some(1450));
     }
 
     #[test]

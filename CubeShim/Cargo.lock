@@ -433,6 +433,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
+ "net_util",
  "nix 0.29.0",
  "oci-spec 0.6.8",
  "protobuf 3.7.2",

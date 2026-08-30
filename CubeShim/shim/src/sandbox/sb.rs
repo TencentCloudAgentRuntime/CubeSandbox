@@ -865,13 +865,24 @@ impl SandBox {
     }
     async fn start_vm(&mut self) -> CResult<bool> {
         infof!(self.log, "start vm start");
+        let by_snapshot = self.by_snapshot();
+        let s0_prepared_boot = if super::s0_cni::PreparedNetwork::requested(&self.spec) {
+            if by_snapshot {
+                return Err("S0 CNI adapter does not support snapshot restore".to_string());
+            }
+            let mut config = self.prepare_resource().await?;
+            let network = super::s0_cni::PreparedNetwork::prepare(&self.spec, &mut config)?;
+            Some((config, network))
+        } else {
+            None
+        };
         {
             let mut ch = self.ch.as_mut().unwrap().lock().await;
             ch.launch_vmm().await?;
         }
         let mut snapshot = false;
 
-        if self.by_snapshot() {
+        if by_snapshot {
             match self.restore_vm().await {
                 Ok(_) => {
                     snapshot = true;
@@ -889,7 +900,11 @@ impl SandBox {
         }
 
         if !snapshot {
-            self.boot_vm().await?;
+            if let Some((config, _network)) = s0_prepared_boot.as_ref() {
+                self.boot_vm_with_config(config).await?;
+            } else {
+                self.boot_vm().await?;
+            }
         }
 
         {
@@ -914,8 +929,12 @@ impl SandBox {
 
     async fn boot_vm(&mut self) -> CResult<()> {
         let config = self.prepare_resource().await?;
+        self.boot_vm_with_config(&config).await
+    }
+
+    async fn boot_vm_with_config(&mut self, config: &VmConfig) -> CResult<()> {
         let mut ch = self.ch.as_mut().unwrap().lock().await;
-        ch.create_vm(&config).await?;
+        ch.create_vm(config).await?;
         ch.boot_vm().await?;
         Ok(())
     }

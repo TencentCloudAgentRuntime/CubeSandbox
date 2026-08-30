@@ -7,4 +7,5 @@ pub mod device;
 pub mod disk;
 pub mod net;
 pub mod pmem;
+mod s0_cni;
 pub mod sb;

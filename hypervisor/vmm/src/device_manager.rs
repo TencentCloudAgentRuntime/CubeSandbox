@@ -2468,6 +2468,7 @@ impl DeviceManager {
                         fds,
                         Some(net_cfg.mac),
                         net_cfg.mtu,
+                        net_cfg.fds_from_other_netns,
                         self.force_iommu | net_cfg.iommu,
                         net_cfg.queue_size,
                         self.seccomp_action.clone(),
