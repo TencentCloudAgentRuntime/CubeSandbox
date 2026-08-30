@@ -71,7 +71,8 @@ func (r *Registry) Publish(binding Binding) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if current, ok := r.current[binding.SandboxID]; ok && current != binding {
-		return fmt.Errorf("sandbox %q already has a different published lease", binding.SandboxID)
+		delete(r.current, binding.SandboxID)
+		return fmt.Errorf("sandbox %q had a conflicting published lease; binding was removed", binding.SandboxID)
 	}
 	r.current[binding.SandboxID] = binding
 	return nil
@@ -213,6 +214,44 @@ func SendResponse(conn *net.UnixConn, response *runtimev1.FDHandoffResponseV1, f
 	}
 	if written != len(frame) || oobWritten != len(rights) {
 		return fmt.Errorf("short fd handoff response: data=%d/%d oob=%d/%d", written, len(frame), oobWritten, len(rights))
+	}
+	return nil
+}
+
+// FenceCurrent serializes a durable lifecycle transition with FD acquisition.
+// Lock order is Registry.mu followed by the durable store lock taken by persist.
+// A failed persist leaves the exact READY binding published; a successful one
+// removes it before any blocked Acquire can continue.
+func (r *Registry) FenceCurrent(binding Binding, persist func() error) error {
+	if err := validateBinding(binding); err != nil {
+		return err
+	}
+	if persist == nil {
+		return errors.New("fd handoff durable fence callback is nil")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current, ok := r.current[binding.SandboxID]
+	if !ok || current != binding {
+		return ErrStaleLease
+	}
+	if err := persist(); err != nil {
+		return err
+	}
+	delete(r.current, binding.SandboxID)
+	return nil
+}
+
+// EnsureAbsent verifies that restart recovery did not publish a non-READY
+// sandbox. A newly constructed Registry is empty; READY recovery uses Publish.
+func (r *Registry) EnsureAbsent(sandboxID string) error {
+	if sandboxID == "" {
+		return fmt.Errorf("%w: sandbox id is empty", ErrMalformedRequest)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.current[sandboxID]; ok {
+		return fmt.Errorf("sandbox %q unexpectedly has a published FD binding", sandboxID)
 	}
 	return nil
 }

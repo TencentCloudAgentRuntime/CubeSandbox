@@ -26,13 +26,17 @@ func ServeConn(conn *net.UnixConn, registry *Registry, authorize PeerAuthorizer)
 	if err := conn.SetDeadline(time.Now().Add(DefaultIOTimeout)); err != nil {
 		return err
 	}
-	if authorize != nil {
-		if err := authorize(conn); err != nil {
-			return SendResponse(conn, &runtimev1.FDHandoffResponseV1{
-				Code:    runtimev1.FDHandoffCode_FD_HANDOFF_CODE_UNAUTHORIZED,
-				Message: err.Error(),
-			}, nil)
-		}
+	if authorize == nil {
+		return SendResponse(conn, &runtimev1.FDHandoffResponseV1{
+			Code:    runtimev1.FDHandoffCode_FD_HANDOFF_CODE_UNAUTHORIZED,
+			Message: "unix peer authorizer is required",
+		}, nil)
+	}
+	if err := authorize(conn); err != nil {
+		return SendResponse(conn, &runtimev1.FDHandoffResponseV1{
+			Code:    runtimev1.FDHandoffCode_FD_HANDOFF_CODE_UNAUTHORIZED,
+			Message: err.Error(),
+		}, nil)
 	}
 
 	request, err := ReadRequest(conn)

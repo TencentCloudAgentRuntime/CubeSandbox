@@ -319,6 +319,10 @@ func TestServeConnErrorsNeverCarryFD(t *testing.T) {
 		wantCode  runtimev1.FDHandoffCode
 	}{
 		{
+			name:     "missing authorizer",
+			wantCode: runtimev1.FDHandoffCode_FD_HANDOFF_CODE_UNAUTHORIZED,
+		},
+		{
 			name: "unauthorized",
 			authorize: func(*net.UnixConn) error {
 				return errors.New("peer denied")
@@ -326,7 +330,8 @@ func TestServeConnErrorsNeverCarryFD(t *testing.T) {
 			wantCode: runtimev1.FDHandoffCode_FD_HANDOFF_CODE_UNAUTHORIZED,
 		},
 		{
-			name: "malformed frame",
+			name:      "malformed frame",
+			authorize: func(*net.UnixConn) error { return nil },
 			write: func(conn *net.UnixConn) error {
 				_, err := conn.Write([]byte{0, 0, 0, 1, 0xff})
 				return err
@@ -337,7 +342,11 @@ func TestServeConnErrorsNeverCarryFD(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			registry, err := NewRegistry(devNullOpener)
+			openerCalls := 0
+			registry, err := NewRegistry(func(binding Binding) (*os.File, error) {
+				openerCalls++
+				return devNullOpener(binding)
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -364,6 +373,9 @@ func TestServeConnErrorsNeverCarryFD(t *testing.T) {
 			}
 			if err := <-serveErr; err != nil {
 				t.Fatal(err)
+			}
+			if openerCalls != 0 {
+				t.Fatalf("error path called TAP opener %d times", openerCalls)
 			}
 		})
 	}
@@ -425,5 +437,104 @@ func TestRegistryAcquireIsAtomicWithReplacement(t *testing.T) {
 	file, code, err := registry.Acquire(requestFor(oldBinding))
 	if file != nil || code != runtimev1.FDHandoffCode_FD_HANDOFF_CODE_STALE || !errors.Is(err, ErrStaleLease) {
 		t.Fatalf("post-replacement old acquire=(%v,%s,%v), want STALE without file", file, code, err)
+	}
+}
+
+func TestServeConnUsesRealPeerCredentialsBeforeOpeningFD(t *testing.T) {
+	binding := testBinding(12, "lease-12", "network-12", "token-12", true)
+	tests := []struct {
+		name      string
+		authorize PeerAuthorizer
+		send      bool
+		wantCode  runtimev1.FDHandoffCode
+		wantFDs   int
+		wantOpens int
+	}{
+		{
+			name: "allowed uid gid",
+			authorize: AuthorizePeerIDs(syscall.Ucred{
+				Uid: uint32(os.Getuid()),
+				Gid: uint32(os.Getgid()),
+			}),
+			send:      true,
+			wantCode:  runtimev1.FDHandoffCode_FD_HANDOFF_CODE_OK,
+			wantFDs:   1,
+			wantOpens: 1,
+		},
+		{
+			name: "denied uid gid",
+			authorize: AuthorizePeerIDs(syscall.Ucred{
+				Uid: ^uint32(0),
+				Gid: ^uint32(0),
+			}),
+			wantCode: runtimev1.FDHandoffCode_FD_HANDOFF_CODE_UNAUTHORIZED,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			openerCalls := 0
+			registry, err := NewRegistry(func(Binding) (*os.File, error) {
+				openerCalls++
+				return os.Open("/dev/null")
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := registry.Publish(binding); err != nil {
+				t.Fatal(err)
+			}
+			server, client := unixConnPair(t)
+			defer server.Close()
+			defer client.Close()
+			serveErr := make(chan error, 1)
+			go func() { serveErr <- ServeConn(server, registry, test.authorize) }()
+			if test.send {
+				frame, err := marshalFrame(requestFor(binding))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := client.Write(frame); err != nil {
+					t.Fatal(err)
+				}
+			}
+			response, fds := readResponse(t, client)
+			defer func() {
+				for _, fd := range fds {
+					syscall.Close(fd)
+				}
+			}()
+			if err := <-serveErr; err != nil {
+				t.Fatal(err)
+			}
+			if response.GetCode() != test.wantCode || int(response.GetFdCount()) != test.wantFDs || len(fds) != test.wantFDs {
+				t.Fatalf("response=(%s, fd_count=%d, rights=%v), want %s and %d FD",
+					response.GetCode(), response.GetFdCount(), fds, test.wantCode, test.wantFDs)
+			}
+			if openerCalls != test.wantOpens {
+				t.Fatalf("TAP opener calls=%d, want %d", openerCalls, test.wantOpens)
+			}
+		})
+	}
+}
+
+func TestPublishConflictFailsClosed(t *testing.T) {
+	registry, err := NewRegistry(devNullOpener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBinding := testBinding(1, "lease-1", "network-1", "token-1", true)
+	newBinding := testBinding(2, "lease-2", "network-2", "token-2", true)
+	if err := registry.Publish(oldBinding); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Publish(newBinding); err == nil {
+		t.Fatal("conflicting publish unexpectedly succeeded")
+	}
+	for _, binding := range []Binding{oldBinding, newBinding} {
+		file, code, err := registry.Acquire(requestFor(binding))
+		if file != nil || code != runtimev1.FDHandoffCode_FD_HANDOFF_CODE_STALE || !errors.Is(err, ErrStaleLease) {
+			t.Fatalf("conflict acquire %d=(%v,%s,%v), want fail-closed STALE", binding.Generation, file, code, err)
+		}
 	}
 }
