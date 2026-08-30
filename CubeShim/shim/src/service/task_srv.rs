@@ -40,6 +40,20 @@ const INTERNAL_PROBE_EXEC_ID_PREFIX: &str = "cubesandbox-internal-probe-";
 const CGROUP_V1_METRICS_TYPE_URL: &str = "io.containerd.cgroups.v1.Metrics";
 const RESOURCE_METRICS_VERSION_V1: u32 = 1;
 
+fn create_error_with_rootfs_cleanup(
+    prepared_rootfs: &mut Option<PreparedRootfs>,
+    message: String,
+) -> Error {
+    if let Some(rootfs) = prepared_rootfs.take() {
+        if let Err(cleanup_error) = rootfs.cleanup() {
+            return Error::Other(format!(
+                "{message}; cleanup S0 standard rootfs failed:{cleanup_error}"
+            ));
+        }
+    }
+    Error::Other(message)
+}
+
 fn normalize_guest_stats(stats: &protoc::agent::StatsContainerResponse) -> Result<Metrics, String> {
     let version = stats.get_resource_metrics_version();
     if version != RESOURCE_METRICS_VERSION_V1 {
@@ -345,8 +359,8 @@ impl Task for TaskService {
             errf!(self.log, "Load spec failed:{}", e.clone());
             Others(format!("Load spec failed:{}", e))
         })?;
-        let prepared_rootfs = s0_rootfs::prepare(&self.sandbox_id, &req.id, &req.rootfs, &mut spec)
-            .map_err(|e| {
+        let mut prepared_rootfs =
+            s0_rootfs::prepare(&self.sandbox_id, &req.id, &req.rootfs, &mut spec).map_err(|e| {
                 errf!(self.log, "Prepare S0 standard rootfs failed:{}", e);
                 Error::Other(format!("Prepare S0 standard rootfs failed:{}", e))
             })?;
@@ -366,25 +380,29 @@ impl Task for TaskService {
 
         let mut sb = self.sandbox.lock().await;
         if sb.paused().await {
-            errf!(self.log, "sandbox not in normal state");
-            return Err(Others(format!("sandbox not in normal state")));
+            let message = "sandbox not in normal state".to_string();
+            errf!(self.log, "{}", message);
+            return Err(create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into());
         }
         if !sb.inited() {
             stat.set_callee_act(stat_defer::CALLEE_ACT_CREATE_POD_SANDBOX.to_string());
             infof!(self.log, "shim pid {}", std::process::id());
             if let Err(e) = Utils::record_pid() {
-                errf!(self.log, "Create pid file failed:{}", e);
-                return Err(Others(format!("Create pid file failed:{}", e)));
+                let message = format!("Create pid file failed:{}", e);
+                errf!(self.log, "{}", message);
+                return Err(create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into());
             }
-            sb.init(spec.clone()).map_err(|e| {
-                errf!(self.log, "Init sandbox config failed:{}", e.clone());
-                Error::Other(format!("Init sandbox config failed:{}", e))
-            })?;
+            if let Err(e) = sb.init(spec.clone()) {
+                let message = format!("Init sandbox config failed:{}", e);
+                errf!(self.log, "{}", message);
+                return Err(create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into());
+            }
 
-            sb.create_sandbox().await.map_err(|e| {
-                errf!(self.log, "Create sandbox failed:{}", e.clone());
-                Error::Other(format!("Create sandbox failed:{}", e))
-            })?;
+            if let Err(e) = sb.create_sandbox().await {
+                let message = format!("Create sandbox failed:{}", e);
+                errf!(self.log, "{}", message);
+                return Err(create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into());
+            }
         }
 
         infof!(
@@ -401,12 +419,11 @@ impl Task for TaskService {
             terminal: req.terminal,
             ..Default::default()
         };
-        sb.create_container(req.id.clone(), spec, info)
-            .await
-            .map_err(|e| {
-                errf!(self.log, "Create container failed:{}", e.clone());
-                Error::Other(format!("Create container failed:{}", e))
-            })?;
+        if let Err(e) = sb.create_container(req.id.clone(), spec, info).await {
+            let message = format!("Create container failed:{}", e);
+            errf!(self.log, "{}", message);
+            return Err(create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into());
+        }
         if let Some(rootfs) = prepared_rootfs {
             self.s0_rootfs.lock().await.insert(req.id.clone(), rootfs);
         }

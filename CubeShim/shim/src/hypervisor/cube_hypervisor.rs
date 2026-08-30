@@ -24,6 +24,21 @@ use super::config::PciDeviceInfo;
 
 const CALLE_ACTION_ADD_DEV_PRE: &str = "AddDevice";
 
+pub(crate) fn runtime_seccomp_syscalls() -> Vec<i64> {
+    vec![
+        #[cfg(target_arch = "x86_64")]
+        libc::SYS_mkdir,
+        #[cfg(target_arch = "aarch64")]
+        libc::SYS_mkdirat,
+        libc::SYS_getsockopt,
+        libc::SYS_setsockopt,
+        libc::SYS_faccessat2,
+        // PoC trade-off: the embedded VMM applies its Thread::All filter to
+        // the shim process, which must still clean host-side OCI rootfs binds.
+        libc::SYS_umount2,
+    ]
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum HypStatus {
     Init,
@@ -76,15 +91,12 @@ impl CubeHypervisor {
         if let Some(_ch) = &self.ch {
             return Err(self.status_err("oops: ch is not None".to_string()));
         }
-        cube_hypervisor::set_runtime_seccomp_rules(vec![
-            #[cfg(target_arch = "x86_64")]
-            (libc::SYS_mkdir, vec![]),
-            #[cfg(target_arch = "aarch64")]
-            (libc::SYS_mkdirat, vec![]),
-            (libc::SYS_getsockopt, vec![]),
-            (libc::SYS_setsockopt, vec![]),
-            (libc::SYS_faccessat2, vec![]),
-        ]);
+        cube_hypervisor::set_runtime_seccomp_rules(
+            runtime_seccomp_syscalls()
+                .into_iter()
+                .map(|syscall| (syscall, vec![]))
+                .collect(),
+        );
         let mut vmm_config = self.config.to_vmm_config();
         let (sender, receiver) = channel::<NotifyEvent>();
         let notifier = vmm_config::EventNotifyConfig { notifier: sender };
@@ -336,5 +348,15 @@ impl CubeHypervisor {
             .map_err(|e| self.status_err(format!("resume vm from snapshot failed:{}", e)))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_seccomp_syscalls;
+
+    #[test]
+    fn runtime_seccomp_allows_s0_rootfs_cleanup() {
+        assert!(runtime_seccomp_syscalls().contains(&libc::SYS_umount2));
     }
 }

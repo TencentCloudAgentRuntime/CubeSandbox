@@ -65,10 +65,17 @@ impl PreparedRootfs {
         let rootfs_dir = self.target.parent();
         let _ = fs::remove_dir_all(&self.target);
         if let Some(rootfs_dir) = rootfs_dir {
-            let _ = fs::remove_dir(rootfs_dir);
+            remove_empty_dir(rootfs_dir);
         }
-        let _ = fs::remove_dir(&self.share_root);
+        remove_empty_dir(&self.share_root);
     }
+}
+
+fn remove_empty_dir(path: &Path) {
+    let Ok(path) = path_cstring(path) else {
+        return;
+    };
+    let _ = unsafe { libc::unlinkat(libc::AT_FDCWD, path.as_ptr(), libc::AT_REMOVEDIR) };
 }
 
 impl Drop for PreparedRootfs {
@@ -108,7 +115,12 @@ pub fn prepare(
     }
 
     let share_root = Path::new(SHARE_BASE).join(sandbox_id);
-    let target = share_root.join("rootfs").join(task_id);
+    // A previous shim may still be running its deferred cleanup while
+    // containerd starts a replacement with the same task ID. Give every
+    // shim process its own export directory so the old generation cannot
+    // remove the new generation between mkdir(2) and mount(2).
+    let export_id = export_generation(task_id, std::process::id());
+    let target = share_root.join("rootfs").join(&export_id);
     fs::create_dir_all(&target)
         .map_err(|e| format!("create rootfs export {} failed: {e}", target.display()))?;
 
@@ -119,7 +131,7 @@ pub fn prepare(
     };
     let guest_lowerdirs = export_rootfs(
         sandbox_id,
-        task_id,
+        &export_id,
         &mounts[0],
         &target,
         &mut prepared.mounts,
@@ -127,6 +139,10 @@ pub fn prepare(
 
     inject_annotations(spec, &share_root, guest_lowerdirs)?;
     Ok(Some(prepared))
+}
+
+fn export_generation(task_id: &str, pid: u32) -> String {
+    format!("{task_id}-{pid}")
 }
 
 fn validate_id(kind: &str, id: &str) -> Result<(), String> {
@@ -381,6 +397,11 @@ mod tests {
     fn rejects_path_components() {
         assert!(validate_id("task", "../escape").is_err());
         assert!(validate_id("task", "ok-task_1").is_ok());
+    }
+
+    #[test]
+    fn export_generation_is_process_scoped() {
+        assert_eq!(export_generation("task-a", 42), "task-a-42");
     }
 
     #[test]
