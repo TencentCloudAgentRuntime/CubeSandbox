@@ -31,9 +31,16 @@ message HealthCheckResponse {
 	ServingStatus status = 1;
 }
 
+message AgentCapability {
+	string name = 1;
+	uint32 version = 2;
+}
+
 message VersionCheckResponse {
 	string grpc_version = 1;
 	string agent_version = 2;
+	uint32 protocol_version = 3;
+	repeated AgentCapability capabilities = 4;
 }
 
 service Health {

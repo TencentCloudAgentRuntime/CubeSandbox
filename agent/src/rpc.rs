@@ -50,7 +50,7 @@ use protocols::agent::{
 use protocols::csi::{volume_usage, VolumeCondition, VolumeStatsResponse, VolumeUsage};
 use protocols::empty::Empty;
 use protocols::health::health_check_response::ServingStatus;
-use protocols::health::{HealthCheckResponse, VersionCheckResponse};
+use protocols::health::{AgentCapability, HealthCheckResponse, VersionCheckResponse};
 use protocols::types::Interface;
 use rustjail::cgroups::notifier;
 use rustjail::cgroups::Manager;
@@ -1786,6 +1786,36 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
     }
 }
 
+const AGENT_PROTOCOL_VERSION: u32 = 1;
+const AGENT_CAPABILITIES: &[(&str, u32)] = &[
+    ("io.cubesandbox.agent.sandbox.lifecycle", 1),
+    ("io.cubesandbox.agent.container.lifecycle", 1),
+    ("io.cubesandbox.agent.container.exec", 1),
+    ("io.cubesandbox.agent.container.stats", 1),
+    ("io.cubesandbox.agent.sandbox.shared-pidns", 1),
+    ("io.cubesandbox.agent.mount.dynamic", 1),
+    ("io.cubesandbox.agent.stdio.passfd", 1),
+];
+
+fn agent_version_response() -> VersionCheckResponse {
+    let mut response = VersionCheckResponse::new();
+    response.set_agent_version(AGENT_VERSION.to_string());
+    response.set_grpc_version(API_VERSION.to_string());
+    response.set_protocol_version(AGENT_PROTOCOL_VERSION);
+    response.set_capabilities(
+        AGENT_CAPABILITIES
+            .iter()
+            .map(|(name, version)| {
+                let mut capability = AgentCapability::new();
+                capability.set_name((*name).to_string());
+                capability.set_version(*version);
+                capability
+            })
+            .collect(),
+    );
+    response
+}
+
 #[derive(Clone)]
 struct HealthService;
 
@@ -1808,11 +1838,7 @@ impl protocols::health_ttrpc::Health for HealthService {
         req: protocols::health::CheckRequest,
     ) -> ttrpc::Result<VersionCheckResponse> {
         info!(sl!(), "version {:?}", req);
-        let mut rep = protocols::health::VersionCheckResponse::new();
-        rep.agent_version = AGENT_VERSION.to_string();
-        rep.grpc_version = API_VERSION.to_string();
-
-        Ok(rep)
+        Ok(agent_version_response())
     }
 }
 
@@ -2423,6 +2449,19 @@ mod tests {
         skip_if_no_cap, skip_if_not_root,
     };
     use capctl::caps::Cap;
+
+    #[test]
+    fn version_response_advertises_versioned_unique_capabilities() {
+        let response = agent_version_response();
+        assert_eq!(response.protocol_version(), AGENT_PROTOCOL_VERSION);
+        assert!(!response.agent_version().is_empty());
+        let mut names = std::collections::HashSet::new();
+        for capability in response.capabilities() {
+            assert!(capability.version() > 0);
+            assert!(names.insert(capability.name().to_string()));
+        }
+        assert_eq!(names.len(), AGENT_CAPABILITIES.len());
+    }
 
     fn mk_ttrpc_context() -> TtrpcContext {
         TtrpcContext {

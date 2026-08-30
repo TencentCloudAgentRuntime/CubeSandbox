@@ -49,6 +49,60 @@ use crate::{debugf, errf, infof, warnf};
 const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
 const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
+const AGENT_PROTOCOL_VERSION_LEGACY: u32 = 0;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct AgentCapabilities {
+    protocol_version: u32,
+    agent_version: String,
+    versions: HashMap<String, u32>,
+}
+
+impl AgentCapabilities {
+    fn from_response(response: &health::VersionCheckResponse) -> CResult<Self> {
+        let protocol_version = response.get_protocol_version();
+        if protocol_version == AGENT_PROTOCOL_VERSION_LEGACY
+            && response.get_capabilities().is_empty()
+        {
+            return Ok(Self {
+                protocol_version,
+                agent_version: response.get_agent_version().to_string(),
+                versions: HashMap::new(),
+            });
+        }
+        if protocol_version == AGENT_PROTOCOL_VERSION_LEGACY {
+            return Err("agent advertised capabilities without a protocol version".to_string());
+        }
+        if response.get_agent_version().trim().is_empty() {
+            return Err("versioned agent capability response has no agent version".to_string());
+        }
+
+        let mut versions = HashMap::new();
+        for capability in response.get_capabilities() {
+            let name = capability.get_name().trim();
+            if name.is_empty() || capability.get_version() == 0 {
+                return Err("agent capability name and version must be non-zero".to_string());
+            }
+            if versions
+                .insert(name.to_string(), capability.get_version())
+                .is_some()
+            {
+                return Err(format!("agent capability {name} is duplicated"));
+            }
+        }
+        Ok(Self {
+            protocol_version,
+            agent_version: response.get_agent_version().to_string(),
+            versions,
+        })
+    }
+
+    fn supports(&self, name: &str, minimum_version: u32) -> bool {
+        self.versions
+            .get(name)
+            .is_some_and(|version| *version >= minimum_version)
+    }
+}
 
 #[derive(PartialEq, Eq)]
 enum SandBoxState {
@@ -62,6 +116,7 @@ pub struct SandBox {
     id: String,
     conn: Option<Arc<Mutex<Client>>>,
     pub(super) client: Option<Arc<Mutex<agent_ttrpc::AgentServiceClient>>>,
+    agent_capabilities: Option<AgentCapabilities>,
     spec: Spec,
     conf: config::Config,
     pub(super) ctx: Context,
@@ -102,6 +157,7 @@ impl SandBox {
             id,
             conn: None,
             client: None,
+            agent_capabilities: None,
             spec: Spec::default(),
             conf: config::Config::default(),
             ctx: context::with_timeout(1000 * 1000 * 1000 * 3),
@@ -221,11 +277,55 @@ impl SandBox {
 
     async fn connect_agent(&mut self) -> CResult<()> {
         let conn = AsyncUtils::connect_agent(&self.id).await?;
+        let health_client = health_ttrpc::HealthClient::new(conn.clone());
+        let request = health::CheckRequest {
+            service: "io.cubesandbox.agent".to_string(),
+            ..Default::default()
+        };
+        self.agent_capabilities = match health_client
+            .version(context::with_timeout(1000 * 1000 * 1000), &request)
+            .await
+        {
+            Ok(response) => match AgentCapabilities::from_response(&response) {
+                Ok(capabilities) => {
+                    infof!(
+                        self.log,
+                        "agent capability negotiation: protocol={}, agent={}, capabilities={:?}",
+                        capabilities.protocol_version,
+                        capabilities.agent_version,
+                        capabilities.versions
+                    );
+                    Some(capabilities)
+                }
+                Err(error) => {
+                    warnf!(self.log, "invalid agent capability response: {}", error);
+                    None
+                }
+            },
+            Err(error) => {
+                // Legacy Cube images may not implement Health.Version. The
+                // Kubernetes handler introduced by S1 will require explicit
+                // capabilities; the legacy Cubebox path remains compatible.
+                warnf!(
+                    self.log,
+                    "agent capability negotiation unavailable: {}",
+                    error
+                );
+                None
+            }
+        };
+
         let client = agent_ttrpc::AgentServiceClient::new(conn.clone());
         self.conn = Some(Arc::new(Mutex::new(conn)));
         self.client = Some(Arc::new(Mutex::new(client)));
 
         Ok(())
+    }
+
+    pub fn agent_supports(&self, name: &str, minimum_version: u32) -> bool {
+        self.agent_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.supports(name, minimum_version))
     }
 
     async fn pause_vm_forbidding(&self) -> bool {
@@ -1641,9 +1741,49 @@ mod tests {
     use super::agent;
     use super::agent_ttrpc;
     use super::config;
+    use super::health;
     use super::normalize_dns_for_agent;
+    use super::AgentCapabilities;
     use super::Log;
     use super::SandBox;
+    use super::AGENT_PROTOCOL_VERSION_LEGACY;
+
+    fn capability(name: &str, version: u32) -> health::AgentCapability {
+        let mut capability = health::AgentCapability::new();
+        capability.set_name(name.to_string());
+        capability.set_version(version);
+        capability
+    }
+
+    #[test]
+    fn agent_capabilities_accept_legacy_version_response() {
+        let mut response = health::VersionCheckResponse::new();
+        response.set_agent_version("legacy".to_string());
+        let parsed = AgentCapabilities::from_response(&response).unwrap();
+        assert_eq!(parsed.protocol_version, AGENT_PROTOCOL_VERSION_LEGACY);
+        assert!(!parsed.supports("io.cubesandbox.agent.container.lifecycle", 1));
+    }
+
+    #[test]
+    fn agent_capabilities_parse_versions_and_reject_duplicates() {
+        let mut response = health::VersionCheckResponse::new();
+        response.set_agent_version("v1".to_string());
+        response.set_protocol_version(1);
+        response
+            .mut_capabilities()
+            .push(capability("io.cubesandbox.agent.container.lifecycle", 2));
+        let parsed = AgentCapabilities::from_response(&response).unwrap();
+        assert!(parsed.supports("io.cubesandbox.agent.container.lifecycle", 1));
+        assert!(parsed.supports("io.cubesandbox.agent.container.lifecycle", 2));
+        assert!(!parsed.supports("io.cubesandbox.agent.container.lifecycle", 3));
+
+        response
+            .mut_capabilities()
+            .push(capability("io.cubesandbox.agent.container.lifecycle", 1));
+        assert!(AgentCapabilities::from_response(&response)
+            .unwrap_err()
+            .contains("duplicated"));
+    }
 
     #[tokio::test]
     async fn test_sandbox_prepare_resource() {

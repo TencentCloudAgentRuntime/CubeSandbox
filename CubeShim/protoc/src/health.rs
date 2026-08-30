@@ -397,10 +397,210 @@ impl ::protobuf::reflect::ProtobufValue for HealthCheckResponse_ServingStatus {
 #[derive(PartialEq,Clone,Default)]
 #[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(feature = "with-serde", serde(default))]
+pub struct AgentCapability {
+    // message fields
+    pub name: ::std::string::String,
+    pub version: u32,
+    // special fields
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub unknown_fields: ::protobuf::UnknownFields,
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a AgentCapability {
+    fn default() -> &'a AgentCapability {
+        <AgentCapability as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl AgentCapability {
+    pub fn new() -> AgentCapability {
+        ::std::default::Default::default()
+    }
+
+    // string name = 1;
+
+
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+    pub fn clear_name(&mut self) {
+        self.name.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_name(&mut self, v: ::std::string::String) {
+        self.name = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_name(&mut self) -> &mut ::std::string::String {
+        &mut self.name
+    }
+
+    // Take field
+    pub fn take_name(&mut self) -> ::std::string::String {
+        ::std::mem::replace(&mut self.name, ::std::string::String::new())
+    }
+
+    // uint32 version = 2;
+
+
+    pub fn get_version(&self) -> u32 {
+        self.version
+    }
+    pub fn clear_version(&mut self) {
+        self.version = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_version(&mut self, v: u32) {
+        self.version = v;
+    }
+}
+
+impl ::protobuf::Message for AgentCapability {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    ::protobuf::rt::read_singular_proto3_string_into(wire_type, is, &mut self.name)?;
+                },
+                2 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.version = tmp;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if !self.name.is_empty() {
+            my_size += ::protobuf::rt::string_size(1, &self.name);
+        }
+        if self.version != 0 {
+            my_size += ::protobuf::rt::value_size(2, self.version, ::protobuf::wire_format::WireTypeVarint);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        if !self.name.is_empty() {
+            os.write_string(1, &self.name)?;
+        }
+        if self.version != 0 {
+            os.write_uint32(2, self.version)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: ::std::boxed::Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> AgentCapability {
+        AgentCapability::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
+        descriptor.get(|| {
+            let mut fields = ::std::vec::Vec::new();
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                "name",
+                |m: &AgentCapability| { &m.name },
+                |m: &mut AgentCapability| { &mut m.name },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                "version",
+                |m: &AgentCapability| { &m.version },
+                |m: &mut AgentCapability| { &mut m.version },
+            ));
+            ::protobuf::reflect::MessageDescriptor::new_pb_name::<AgentCapability>(
+                "AgentCapability",
+                fields,
+                file_descriptor_proto()
+            )
+        })
+    }
+
+    fn default_instance() -> &'static AgentCapability {
+        static instance: ::protobuf::rt::LazyV2<AgentCapability> = ::protobuf::rt::LazyV2::INIT;
+        instance.get(AgentCapability::new)
+    }
+}
+
+impl ::protobuf::Clear for AgentCapability {
+    fn clear(&mut self) {
+        self.name.clear();
+        self.version = 0;
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::std::fmt::Debug for AgentCapability {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::protobuf::text_format::fmt(self, f)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for AgentCapability {
+    fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
+        ::protobuf::reflect::ReflectValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+#[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "with-serde", serde(default))]
 pub struct VersionCheckResponse {
     // message fields
     pub grpc_version: ::std::string::String,
     pub agent_version: ::std::string::String,
+    pub protocol_version: u32,
+    pub capabilities: ::protobuf::RepeatedField<AgentCapability>,
     // special fields
     #[cfg_attr(feature = "with-serde", serde(skip))]
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -470,10 +670,55 @@ impl VersionCheckResponse {
     pub fn take_agent_version(&mut self) -> ::std::string::String {
         ::std::mem::replace(&mut self.agent_version, ::std::string::String::new())
     }
+
+    // uint32 protocol_version = 3;
+
+
+    pub fn get_protocol_version(&self) -> u32 {
+        self.protocol_version
+    }
+    pub fn clear_protocol_version(&mut self) {
+        self.protocol_version = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_protocol_version(&mut self, v: u32) {
+        self.protocol_version = v;
+    }
+
+    // repeated .grpc.AgentCapability capabilities = 4;
+
+
+    pub fn get_capabilities(&self) -> &[AgentCapability] {
+        &self.capabilities
+    }
+    pub fn clear_capabilities(&mut self) {
+        self.capabilities.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_capabilities(&mut self, v: ::protobuf::RepeatedField<AgentCapability>) {
+        self.capabilities = v;
+    }
+
+    // Mutable pointer to the field.
+    pub fn mut_capabilities(&mut self) -> &mut ::protobuf::RepeatedField<AgentCapability> {
+        &mut self.capabilities
+    }
+
+    // Take field
+    pub fn take_capabilities(&mut self) -> ::protobuf::RepeatedField<AgentCapability> {
+        ::std::mem::replace(&mut self.capabilities, ::protobuf::RepeatedField::new())
+    }
 }
 
 impl ::protobuf::Message for VersionCheckResponse {
     fn is_initialized(&self) -> bool {
+        for v in &self.capabilities {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
         true
     }
 
@@ -486,6 +731,16 @@ impl ::protobuf::Message for VersionCheckResponse {
                 },
                 2 => {
                     ::protobuf::rt::read_singular_proto3_string_into(wire_type, is, &mut self.agent_version)?;
+                },
+                3 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.protocol_version = tmp;
+                },
+                4 => {
+                    ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.capabilities)?;
                 },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
@@ -505,6 +760,13 @@ impl ::protobuf::Message for VersionCheckResponse {
         if !self.agent_version.is_empty() {
             my_size += ::protobuf::rt::string_size(2, &self.agent_version);
         }
+        if self.protocol_version != 0 {
+            my_size += ::protobuf::rt::value_size(3, self.protocol_version, ::protobuf::wire_format::WireTypeVarint);
+        }
+        for value in &self.capabilities {
+            let len = value.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        };
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -517,6 +779,14 @@ impl ::protobuf::Message for VersionCheckResponse {
         if !self.agent_version.is_empty() {
             os.write_string(2, &self.agent_version)?;
         }
+        if self.protocol_version != 0 {
+            os.write_uint32(3, self.protocol_version)?;
+        }
+        for v in &self.capabilities {
+            os.write_tag(4, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        };
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -565,6 +835,16 @@ impl ::protobuf::Message for VersionCheckResponse {
                 |m: &VersionCheckResponse| { &m.agent_version },
                 |m: &mut VersionCheckResponse| { &mut m.agent_version },
             ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                "protocol_version",
+                |m: &VersionCheckResponse| { &m.protocol_version },
+                |m: &mut VersionCheckResponse| { &mut m.protocol_version },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_repeated_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<AgentCapability>>(
+                "capabilities",
+                |m: &VersionCheckResponse| { &m.capabilities },
+                |m: &mut VersionCheckResponse| { &mut m.capabilities },
+            ));
             ::protobuf::reflect::MessageDescriptor::new_pb_name::<VersionCheckResponse>(
                 "VersionCheckResponse",
                 fields,
@@ -583,6 +863,8 @@ impl ::protobuf::Clear for VersionCheckResponse {
     fn clear(&mut self) {
         self.grpc_version.clear();
         self.agent_version.clear();
+        self.protocol_version = 0;
+        self.capabilities.clear();
         self.unknown_fields.clear();
     }
 }
@@ -605,10 +887,14 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \0:\0\"\x98\x01\n\x13HealthCheckResponse\x12A\n\x06status\x18\x01\x20\
     \x01(\x0e2'.grpc.HealthCheckResponse.ServingStatusR\x06statusB\0\"<\n\rS\
     ervingStatus\x12\x0b\n\x07UNKNOWN\x10\0\x12\x0b\n\x07SERVING\x10\x01\x12\
-    \x0f\n\x0bNOT_SERVING\x10\x02\x1a\0:\0\"d\n\x14VersionCheckResponse\x12#\
-    \n\x0cgrpc_version\x18\x01\x20\x01(\tR\x0bgrpcVersionB\0\x12%\n\ragent_v\
-    ersion\x18\x02\x20\x01(\tR\x0cagentVersionB\0:\0B\x10\xf8\xe1\x1e\x01\
-    \xa8\xe2\x1e\x01\xc0\xe2\x1e\x01\xb8\xe2\x1e\x01b\x06proto3\
+    \x0f\n\x0bNOT_SERVING\x10\x02\x1a\0:\0\"E\n\x0fAgentCapability\x12\x14\n\
+    \x04name\x18\x01\x20\x01(\tR\x04nameB\0\x12\x1a\n\x07version\x18\x02\x20\
+    \x01(\rR\x07versionB\0:\0\"\xce\x01\n\x14VersionCheckResponse\x12#\n\x0c\
+    grpc_version\x18\x01\x20\x01(\tR\x0bgrpcVersionB\0\x12%\n\ragent_version\
+    \x18\x02\x20\x01(\tR\x0cagentVersionB\0\x12+\n\x10protocol_version\x18\
+    \x03\x20\x01(\rR\x0fprotocolVersionB\0\x12;\n\x0ccapabilities\x18\x04\
+    \x20\x03(\x0b2\x15.grpc.AgentCapabilityR\x0ccapabilitiesB\0:\0B\x10\xf8\
+    \xe1\x1e\x01\xa8\xe2\x1e\x01\xc0\xe2\x1e\x01\xb8\xe2\x1e\x01b\x06proto3\
 ";
 
 static file_descriptor_proto_lazy: ::protobuf::rt::LazyV2<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::rt::LazyV2::INIT;
