@@ -6,7 +6,7 @@
 | K8S-OQ-002 | VM 启动后新增 bind mount 是否能被固定 virtiofs shared root 稳定看到？ | 每 Pod 一个固定 shared root 可支持动态容器/卷 | Codex | S0 | DECIDED | `cache=never/read_only=true/announce_submounts=false` 下 bind、rename、只读立即可见；普通 live unmount 可能因 virtiofsd inode 引用 `EBUSY`，必须 Guest-first 解除消费、Host `MNT_DETACH`、generation 路径不复用。Task/VM 删除后引用及 mount 为 0；证据 `inv-9827ikgt4f` |
 | K8S-OQ-003 | PoC 网络首先采用哪种数据面？ | 先用 Cilium，保留 VPC-CNI/Global Router adapter | Codex | S0 | DECIDED | Cilium 1.20.0 tcfilter 已实测 Pod IP/MAC/MTU、Cluster DNS、Service ClusterIP、跨节点 PodIP 和 egress NetworkPolicy；成功/失败资源残留均为 0。VPC-CNI/Global Router 作为后续 adapter 兼容项；证据 `inv-a82g9g0x1f` 和 `evidence/s0.3/` |
 | K8S-OQ-004 | Kubernetes 路径能否完全使用标准 `CreateTaskRequest.rootfs`？ | 可以，legacy 私有注解只服务原链路 | Codex | S0 | DECIDED | 可以。CubeShim 解析标准 overlay active snapshot，按 active upper + image lowers 原序导出并内部适配当前 Agent；CRI/containerd 不提供私有 rootfs 输入。20/20 创建删除无残留。Guest 临时 upper 不回写 containerd 的限制在 S3 处理；证据 `inv-9827ikgt4f` |
-| K8S-OQ-005 | Cubelet 节点 RPC 的最小边界是什么？ | 只做 VM/网络资产准备、释放和对账 | 待指定 | S1 | OPEN | 接口草案和现有插件复用评审 |
+| K8S-OQ-005 | Cubelet 节点 RPC 的最小边界是什么？ | 只做 VM/网络资产准备、释放和对账 | Codex | S0 | DECIDED | `runtime.v1.RuntimeResource` 仅含 capability、Prepare、Release、Inspect 和 report-only Reconcile；host containerd 独占 CRI/image/snapshot/Sandbox/Task，Cubelet service 禁止回入内嵌 containerd；TAP FD 经 cubetap `SCM_RIGHTS` 交付。证据 `40f4389a` 和 `evidence/s0.4/` |
 | K8S-OQ-006 | PoC VM 规格如何确定？ | 固定 1 vCPU/256 MiB；生产再做资源聚合 | 待指定 | S1 | OPEN | 最小 Guest 开销和典型 workload 测量 |
 | K8S-OQ-007 | ConfigMap/Secret 动态更新能否透过 virtiofs 保持语义？ | PoC 先保证启动注入 | 待指定 | S3 | DEFERRED | symlink swap、cache、inotify 与更新延迟测试 |
 | K8S-OQ-008 | Snapshot/Restore CRD 和 artifact 格式如何定版？ | 二期优先从快照创建新 Pod | 待指定 | S6 | DEFERRED | 多容器一致性、远端存储和 CSI snapshot PoC |

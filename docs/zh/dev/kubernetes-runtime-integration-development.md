@@ -1,6 +1,6 @@
 # CubeSandbox Kubernetes RuntimeClass PoC 开发计划
 
-> 状态：执行中（S0.4 组件接口）
+> 状态：执行中（S0.4 组件接口验收）
 > 日期：2026-08-30  
 > 总体设计：[CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)  
 > 活动交接：[Kubernetes RuntimeClass PoC Handoff](../../../docs/handoffs/kubernetes-runtime/README.md)
@@ -127,7 +127,7 @@ tests/e2e/kubernetes-runtime/
 | S0.1 Sandbox API | `DONE` | Codex | 双服务探针、独立配置、固定 CRI 输入和一键验收脚本已提交；真实正常链路及四类明确异常通过，10 类残留均为 0 | 实现 `f38622c2`、`6a53a52d`、`33dbf479`；TAT `inv-68246d0jt1`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.1/README.md)；subagent `APPROVE` | S0.2 RootFS/virtiofs |
 | S0.2 RootFS/virtiofs | `DONE` | Codex | 标准 OCI active snapshot 已在真实 Cube Guest 运行；动态 bind/rename/只读与卸载约束已验证；20 次创建删除无残留 | 实现 `c014d3c6`；TAT `inv-9827ikgt4f`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.2/README.md)；subagent `APPROVE` | S0.3 CNI 网络 |
 | S0.3 CNI 网络 | `DONE` | Codex | Cilium tcfilter/TAP 跨 netns FD 已接入；Pod IP/MAC/MTU、DNS、Service、跨节点和 NetworkPolicy 通过，成功/失败资源残留均为 0 | 实现 `e16411fd`、`80bacacb`、`168cd061`；完整验收 `inv-a82g9g0x1f`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.3/README.md)；subagent `APPROVE` | S0.4 组件接口 |
-| S0.4 组件接口 | `IN_PROGRESS` | Codex | 已冻结目标：CubeShim ↔ Cubelet 资源 RPC、CubeShim ↔ Agent capability negotiation、无递归 containerd 依赖 | — | 盘点现有接口并形成可验证的最小版本化草案 |
+| S0.4 组件接口 | `VALIDATING` | Codex | RuntimeResource v1、Agent capability negotiation、调用图与自适应契约探针已提交；完整 Shim/Agent 测试通过 | 实现 `40f4389a`、`30bf3365`、`eb7aed1a`、`2e2612a4`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s0.4/README.md) | 独立 subagent 审查至 `APPROVE` |
 
 ### S0.1 云上开发基线（2026-08-30）
 
@@ -228,6 +228,20 @@ Guest writable upper 当前不回写 containerd active upper。S0/S1 的运行�
 | 最终验收 | anchor 对照 `inv-b82g3a0mda`；无网络对照 `inv-b82fadg4xe`；Cube 完整 CNI `inv-a82g9g0x1f`；最终集群状态 `inv-682gcjgsnu`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.3/README.md) |
 
 诊断同时确认 Host 6.12/Guest 6.6 的 reset 失败与网络无关；匹配 Host/Guest 6.6.69 后无网络与完整 CNI 用例均成功。S0 只冻结 Cilium tcfilter 作为首选 PoC 路径，VPC-CNI/Global Router 留给后续 adapter 兼容验证。
+
+### S0.4 组件接口结果（2026-08-31）
+
+S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI image/snapshot、Sandbox/Task 与 CNI 状态；Cubelet `runtime.v1.RuntimeResource` 只做节点资源 Prepare/Release/Inspect/report-only Reconcile；Guest Agent 只做 VM 内容器执行。Cubelet 的新 service 不得调用内嵌 containerd 的 CRI、Task、Sandbox、Image 或 Snapshot 服务。
+
+| 项目 | 结果 |
+|---|---|
+| CubeShim ↔ Cubelet | v1 方法集与幂等 key、generation、lease、错误语义已冻结；TAP FD 继续经 cubetap Unix socket 的 `SCM_RIGHTS` 交付 |
+| CubeShim ↔ Agent | 兼容扩展 `Health.Version` field 3/4；Agent protocol 1 声明版本化能力；legacy protocol 0 仍兼容旧 Cubebox，S1 Kubernetes handler 必须显式校验 capability |
+| 递归防线 | proto 与契约探针禁止暴露 CRI/Task/image/snapshot 方法，并静态检查未来 `Cubelet/services/runtime` 不得回入 containerd |
+| 测试 | 契约探针输出 `S0_4_INTERFACE_CONTRACT_OK`；CubeShim 76 项、cube-runtime 1 项、Agent 114 项通过 |
+| 云端范围 | 本 PoC control 节点与 builder image 经 TAT 确认在线；平台在执行前拒绝本地分支归档上传，因此本纯编译契约未在云端重放且云端未被修改。S1 真实 VM 生命周期仍在云节点验收 |
+
+详细调用图、兼容规则和演进约束见 [S0.4 接口边界](./kubernetes-runtime-integration-s0.4-interface.md)，原始摘要见 [S0.4 验收证据](../../handoffs/kubernetes-runtime/evidence/s0.4/README.md)。
 
 ### 目标
 
