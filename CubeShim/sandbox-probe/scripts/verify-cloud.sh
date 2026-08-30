@@ -44,6 +44,18 @@ cleanup_current() {
 }
 trap cleanup_current EXIT
 
+wait_endpoint() {
+  local i
+  for i in $(seq 1 30); do
+    if cri info >/dev/null 2>&1 && ctr_s0 version >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  printf 'CRI/containerd endpoint is not ready: %s\n' "${containerd_address}" >&2
+  return 1
+}
+
 count_children() {
   local path="$1"
   if [[ ! -d "${path}" ]]; then
@@ -260,7 +272,7 @@ main() {
   command -v "${crictl_bin}" >/dev/null
   command -v "${ctr_bin}" >/dev/null
   command -v python3 >/dev/null
-  systemctl is-active --quiet containerd-cube-s0.service
+  wait_endpoint
   install -d -m 0755 "${artifact_dir}"
   find "${artifact_dir}" -maxdepth 1 -type f -name 's0.1-*' -delete
   : > "${artifact_dir}/s0.1-summary.txt"

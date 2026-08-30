@@ -38,8 +38,7 @@ crictl --config config/crictl.yaml runp --runtime cube-s0 pod.json
 仓库中的固定输入和云端验收脚本可重放完整正常/异常矩阵：
 
 ```bash
-sudo CRICTL_CONFIG=/etc/crictl-cube-s0.yaml \
-  ARTIFACT_DIR=/run/cube-s0/evidence scripts/verify-cloud.sh
+sudo scripts/verify-cloud.sh
 ```
 
 脚本使用 `testdata/pod.json`、`testdata/container.json`，断言 Sandbox Ready、
