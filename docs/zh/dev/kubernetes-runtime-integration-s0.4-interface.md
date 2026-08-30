@@ -25,7 +25,7 @@ kubelet
             └─ Health.Version + AgentService ──> Guest Agent
 ```
 
-创建顺序为：host containerd 执行 CNI ADD → Sandbox Create 到 CubeShim → CubeShim 调用 `PrepareSandbox` → 按响应中的 lease 描述请求 TAP FD → 启动 VM → 查询 Agent capabilities → Agent `CreateSandbox`。删除时先把该 lease 持久化为 `RELEASING` 并使 FD handoff 失效，再停止 Guest Task/Sandbox、VM 和节点资源，最后完成 tombstone；host containerd 随后执行 CNI DEL。
+创建顺序为：host containerd 执行 CNI ADD → Sandbox Create 到 CubeShim → CubeShim 调用 `PrepareSandbox` → 按响应中的 lease 描述请求 TAP FD → 启动 VM → 查询 Agent capabilities → Agent `CreateSandbox`。删除时在同一线性化区内等待已开始的 FD duplicate、把该 lease 持久化为 `RELEASING` 并在解锁前使 FD handoff 失效，再停止 Guest Task/Sandbox、VM 和节点资源，最后完成 tombstone；host containerd 随后执行 CNI DEL。
 
 Cubelet 不回调 host containerd，也不调用自身嵌入的 containerd 创建同一 sandbox。`Cubelet/services/runtime.Register` 直接接收 `grpc.ServiceRegistrar`，不接收 containerd plugin `InitContext`。其测试会解析 `go list -deps ./services/runtime/...`，禁止依赖 containerd 及 legacy Cubelet CRI/Task/Image/Snapshot 服务包。
 
@@ -57,12 +57,12 @@ Cubelet 不回调 host containerd，也不调用自身嵌入的 containerd 创�
 | 有 active | 更高 generation 的 Prepare | `FAILED_PRECONDITION`，必须先释放当前 lease |
 | 无 active | `generation <= high_watermark` 的 Prepare | `FAILED_PRECONDITION`，tombstone 防止旧请求复活 |
 | `PREPARING` | 精确 generation/lease 的 ready | 持久化 `READY + network_handle`；相同重试成功，改变 handle 返回 `FAILED_PRECONDITION` |
-| `READY/PREPARING` | 精确 generation/lease 的新 Release key | 持久化 `RELEASING` 后返回；调用方随后使 handoff 失效并清理 |
+| `READY/PREPARING` | 精确 generation/lease 的新 Release key | `BeginReleaseAndFence` 在线性化区内持久化 `RELEASING` 并删除 READY binding；返回后开始清理 |
 | current/tombstone | 原 release key + 精确 generation/lease | 幂等成功；即使已有更新 active lease，旧 tombstone 重试也不影响它 |
 | 任意 | 错误 lease/generation 或同 lease 的新 release key | `FAILED_PRECONDITION` |
 | 无记录或 future generation | Release | `NOT_FOUND`，且不得推进 high watermark |
 
-缺失字段和非法 key 复用返回 `INVALID_ARGUMENT`；状态文件读取或持久化故障返回 `UNAVAILABLE`。网络/资源准备失败时，必须先清完副作用再调用 `AbandonPrepare` 写 tombstone。释放必须按“持久化 `RELEASING` → invalidate FD binding → 清理 → `CompleteRelease` tombstone”的顺序执行。
+缺失字段和非法 key 复用返回 `INVALID_ARGUMENT`；状态文件读取或持久化故障返回 `UNAVAILABLE`。网络/资源准备失败时，必须先清完副作用再调用 `AbandonPrepare` 写 tombstone。释放通过 `BeginReleaseAndFence` 执行：固定锁序为 Coordinator → Registry → Store；在持有 Registry 锁时持久化 `RELEASING`，成功则在解锁前删除 binding，失败则保留 binding。之后才清理并写 `CompleteRelease` tombstone。
 
 进程重启后按持久化 phase 恢复：`PREPARING` 继续原 key 操作或在清理后 tombstone；`READY` 重新发布精确 FD binding；`RELEASING` 保持 fenced 并继续清理。状态库已覆盖 prepare/release 重试、错误 key/lease、重启恢复、tombstone high watermark 和旧请求不影响新 lease；S1 负责把资源 adapter 接入该状态机。
 
@@ -78,7 +78,7 @@ Kubernetes endpoint 与 legacy `/data/cubelet/cubetap.sock` JSON 协议不同，
 
 校验与 TAP FD duplicate 在同一 registry 临界区内完成，replacement/release 无法插入其间。成功响应 code 为 `OK`、`fd_count=1`，通过 `SCM_RIGHTS` 携带恰好一个 fresh duplicate；重试可再次成功，但每次是新的 duplicate。客户端收到后拥有并关闭该 FD；服务端只拥有本次 duplicate，并在发送完成后关闭。`MALFORMED`、`UNAUTHORIZED`、`STALE`、`NOT_READY`、`INTERNAL` 均强制 `fd_count=0` 且不携带 ancillary FD。
 
-监听 socket 使用文件 ACL；连接建立后用 `SO_PEERCRED` 精确匹配配置的 CubeShim UID/GID，之后才查 lease 或打开 FD。连接设置 1 秒 I/O deadline。开始 Release 后先移除精确 binding，因此延迟的旧 generation、lease、network handle 或 token 都只会得到 `STALE`。测试覆盖 replacement race、全部 fence 字段、released lease、合法重试、部分/超长/非法 frame、peer UID/GID，以及所有错误响应无 FD。
+监听 socket 使用文件 ACL；连接建立后必须提供 authorizer 并用 `SO_PEERCRED` 精确匹配配置的 CubeShim UID/GID，之后才查 lease 或打开 FD；authorizer 缺失时 fail closed。连接设置 1 秒 I/O deadline。Release 与 Acquire 的线性化点位于同一个 Registry 临界区：已进入 duplicate 的 Acquire 先完成；Release 在锁内持久化成功并删除 binding 后才返回，随后请求只得到 `STALE`。若持久化失败则 binding 保持 READY；若进程在持久化后崩溃，重启恢复不会发布 `RELEASING` binding。测试覆盖 replacement race、全部 fence 字段、released lease、合法重试、部分/超长/非法 frame、peer UID/GID，以及所有错误响应无 FD。
 
 ## Agent capability negotiation
 
