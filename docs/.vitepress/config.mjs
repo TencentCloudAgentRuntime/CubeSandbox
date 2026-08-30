@@ -503,6 +503,8 @@ export default withMermaid(defineConfig({
               text: '开发者文档',
               items: [
                 { text: '概览', link: '/zh/dev/' },
+                { text: 'Kubernetes RuntimeClass 总体方案', link: '/zh/dev/kubernetes-runtime-integration' },
+                { text: 'Kubernetes RuntimeClass PoC 开发计划', link: '/zh/dev/kubernetes-runtime-integration-development' },
                 { text: 'Redis Key 命名规范', link: '/zh/dev/redis-key-spec' }
               ]
             }

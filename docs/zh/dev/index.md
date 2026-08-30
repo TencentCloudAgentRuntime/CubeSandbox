@@ -4,6 +4,11 @@
 
 如果你是*使用* CubeSandbox（部署、制作模板、调用 API），建议从[指南](../guide/introduction)开始。[架构](../architecture/overview)章节讲解系统设计；本章节则更深入一层，聚焦代码编写与服务协作所遵循的规则。
 
+## 总体设计
+
+- [CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)——定义 Sandbox API/Task API 主架构、OCI rootfs、多容器、网络、存储、安全、恢复、测试以及二期快照设计。
+- [Kubernetes RuntimeClass PoC 开发计划](./kubernetes-runtime-integration-development)——按 S0～S6 拆分实现目标、验收标准、代码组织、handoff 和未决问题记录方式。
+
 ## 约定
 
 - [Redis Key 命名规范](./redis-key-spec)——所有服务在共享 Redis 实例上必须遵循的统一命名空间：命名格式、归属划分、已注册 Key 清单、TTL 策略，以及各服务的 key 构造模块。
@@ -16,5 +21,5 @@
 - 预留未来补充：内部 API、测试约定、贡献指南
 
 ::: tip 双语同步
-开发者文档同时维护英文（`docs/dev/`）与中文（`docs/zh/dev/`）。新增或修改页面时请保持两语言同步，并使用相同文件名以保证 URL 对齐。
+开发者文档通常同时维护英文（`docs/dev/`）与中文（`docs/zh/dev/`）。本次 Kubernetes RuntimeClass 方案按评审要求只提供中文版本；其他新增或修改页面仍应保持两语言同步，并使用相同文件名以保证 URL 对齐。
 :::

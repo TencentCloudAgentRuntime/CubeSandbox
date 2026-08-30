@@ -639,3 +639,13 @@ else
 		printf '  %-8s %s\n' "SKIP" "web (npm not available on host)"; \
 	fi
 endif
+
+HANDOFF_BUNDLE ?= docs/handoffs/kubernetes-runtime
+
+.PHONY: handoff-validate
+handoff-validate:
+	@test -f "$(HANDOFF_BUNDLE)/README.md"
+	@test -f "$(HANDOFF_BUNDLE)/open-questions.md"
+	@for heading in "当前 Stage" "基线" "已完成" "未完成" "验证" "阻塞" "受保护路径" "下一步"; do rg -q "^## $$heading$$" "$(HANDOFF_BUNDLE)/README.md" || { printf 'missing handoff heading: %s\n' "$$heading"; exit 1; }; done
+	@rg -q 'K8S-OQ-[0-9]{3}' "$(HANDOFF_BUNDLE)/open-questions.md"
+	@printf 'handoff valid: %s\n' "$(HANDOFF_BUNDLE)"

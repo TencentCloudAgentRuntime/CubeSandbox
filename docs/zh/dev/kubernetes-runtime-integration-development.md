@@ -1,0 +1,294 @@
+# CubeSandbox Kubernetes RuntimeClass PoC 开发计划
+
+> 状态：评审基线  
+> 日期：2026-08-30  
+> 总体设计：[CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)  
+> 活动交接：[Kubernetes RuntimeClass PoC Handoff](../../../docs/handoffs/kubernetes-runtime/README.md)
+
+## 1. 开发目标
+
+在不修改 Kubernetes/containerd 上游、不替换 CubeSandbox 现有产品链路的前提下，把现有 CubeShim 演进为可由 `RuntimeClass` 选择的 Pod VM runtime。PoC 最终需要证明：
+
+- 一个 Pod 对应一个 Cube VM，init、app、sidecar 和 ephemeral container 可在 VM 内动态运行。
+- 宿主机 containerd 负责标准 OCI image、snapshotter 和 CNI；CubeShim 消费标准 Sandbox/Task 输入。
+- runc 与 Cube runtime 共存，现有 CubeMaster/CubeboxMgr 链路不回归。
+- 网络、基础 PVC、常用安全字段、恢复、监控和升级路径能够被重复验证。
+- Snapshot/Pause/Resume 的接口方向被记录，但实现放在二期。
+
+## 2. 面向社区的实现原则
+
+### 2.1 沿用现有组件边界
+
+- **CubeShim** 是 containerd 适配层：承接 Sandbox/Task API，转换 OCI spec、rootfs、volume、stdio 和事件；不实现 Kubernetes controller。
+- **Cubelet** 是节点资源层：准备/释放 KVM、Guest assets 和网络 attachment，并负责残留资源对账；不实现另一套 CRI。
+- **Guest Agent** 是 VM 内容器执行层：管理 namespace、mount、cgroup 和进程；不理解 Pod、Deployment、RuntimeClass 等 Kubernetes API。
+- **containerd/kubelet** 保持标准职责：镜像、snapshotter、CNI 和 Pod 状态机不复制到 CubeSandbox。
+- **CubeMaster legacy 链路**继续可用，Kubernetes 功能通过独立入口和 feature gate 增量加入。
+
+这能把 Kubernetes 特例限制在边缘适配层，核心 VM/容器能力仍可被其他 CubeSandbox 场景复用。
+
+### 2.2 使用稳定契约而不是跨组件耦合
+
+- 优先使用 containerd Sandbox API、Task API、OCI Runtime Spec 和 CNI 结果，不 fork 上游协议。
+- CubeShim ↔ Cubelet、CubeShim ↔ Agent 的新增 RPC 必须版本化，并提供 `GetCapabilities`/feature negotiation。
+- 新 protobuf 字段保持 optional/backward-compatible；先让接收方识别，再让调用方启用。
+- 不支持的字段明确报错，不静默丢弃安全或生命周期语义。
+- 实验能力默认关闭，通过配置或 RuntimeClass handler 打开；失败时可以退回 runc 或 legacy Cube 链路。
+
+### 2.3 按组件拆 PR
+
+一个 stage 可以由多个 PR 完成，但一个 PR 尽量只改一个组件：
+
+1. 接口/文档 PR：协议、状态机、错误语义和测试计划。
+2. Agent PR：Guest 侧能力，默认不被旧 Shim 调用。
+3. CubeShim PR：Sandbox/Task 适配，通过 capability negotiation 启用。
+4. Cubelet PR：节点本地资源服务和网络 adapter。
+5. deploy/test PR：RuntimeClass、containerd 配置、安装器和 E2E。
+
+重构与行为改动分开；不要在 Kubernetes PR 中顺便改 runtime type、重命名现有模块或替换旧存储格式。跨组件必须一起验证时使用 stacked PR，但每个 PR仍应可构建并说明依赖关系。
+
+## 3. 建议代码组织
+
+尽量在现有目录中扩展，避免建立一套平行实现：
+
+```text
+CubeShim/shim/src/
+├── service/
+│   ├── srv.rs                 # Shim 进程入口
+│   ├── sandbox_srv.rs         # 新增：containerd Sandbox Service adapter
+│   └── task_srv.rs            # 现有 Task Service，改为多 Task/sandbox
+├── sandbox/                   # Pod VM 状态机、VM 生命周期、网络 attachment
+├── container/                 # 单容器生命周期、rootfs、exec、stdio
+└── recovery/                  # S4 再增加：状态持久化和 reconcile
+
+Cubelet/
+├── api/services/runtime/      # 版本化 Runtime Resource RPC 定义
+├── services/runtime/          # Prepare/Release/Inspect/Reconcile
+└── plugins/cube/runtime/      # 复用现有 KVM/资源能力的 adapter
+
+agent/
+├── protoc/protos/agent.proto  # 兼容扩展动态容器/namespace/mount RPC
+└── cube/src/                  # Guest rootfs、namespace、cgroup 和进程实现
+
+deploy/kubernetes/runtimeclass/
+├── runtimeclass.yaml
+├── containerd-config.toml
+└── README.md
+
+tests/e2e/kubernetes-runtime/
+├── manifests/
+├── lifecycle/
+├── network/
+├── storage/
+├── security/
+└── recovery/
+```
+
+目录名称在第一个接口 PR 中由维护者最终确认。必须保持的边界是：Kubernetes API 不进入 Agent/hypervisor；containerd/CNI 适配不进入 Guest；CubeMaster 不成为 Pod 创建的同步依赖。
+
+## 4. Stage 总览
+
+| Stage | 目标 | 主要产物 | 进入下一 Stage 的条件 |
+|---|---|---|---|
+| S0 | 消除四个架构风险 | 技术探针、调用 trace、接口草案 | Sandbox API、rootfs/virtiofs、CNI 和组件边界均有可行证据 |
+| S1 | 单容器纵向链路 | RuntimeClass + 单容器 Cube Pod | 创建、运行、日志、exec、停止、删除可重复通过 |
+| S2 | 完整多容器生命周期 | init/app/sidecar/ephemeral + namespace | 多容器顺序、重启、探针和退出状态正确 |
+| S3 | 存储、安全和资源 | volume/PVC、安全字段、双层 cgroup | 支持矩阵主路径通过，不支持项明确拒绝 |
+| S4 | 恢复和可观测性 | 重连、reconcile、stats、metrics | 组件故障注入后无错误状态和持久泄漏 |
+| S5 | 可部署 PoC 验收 | 安装升级、性能、兼容性、Node E2E | PoC 验收报告和已知限制完整 |
+| S6 | 二期快照能力 | Snapshot/Restore CRD、Pause/Resume | 从快照创建新 Pod 和一致性验证通过 |
+
+## 5. S0：架构技术探针
+
+### 目标
+
+只回答“主架构是否可行”，避免在调用顺序、rootfs、virtiofs 或网络尚未验证时展开完整实现。
+
+### 工作项
+
+- **S0-1 Sandbox API**：在 containerd 2.3 基线上记录 `RunPodSandbox`、Sandbox Service、Task Service、CNI 和清理的真实调用顺序；验证 `sandboxer = "shim"` 的最小配置。
+- **S0-2 RootFS/virtiofs**：让 containerd overlayfs active snapshot 通过标准 `CreateTaskRequest.rootfs` 在 Guest 中运行；验证 VM 启动后新增 bind、rename、只读 mount 和 unmount。
+- **S0-3 网络**：用一个候选 CNI 把 Pod netns/IP 接入 VM，验证 Pod-to-Pod、DNS、Service 和最小 NetworkPolicy。
+- **S0-4 接口边界**：冻结 CubeShim ↔ Cubelet 最小 RPC 与 CubeShim ↔ Agent capability negotiation 草案，确认不会递归调用 Cubelet 内置 containerd。
+
+### 验收标准
+
+- 一份可复现的 containerd 配置和调用 trace，能指出每个失败阶段由谁清理。
+- 一个标准 OCI rootfs 在 Cube VM 内运行，退出码返回 containerd；创建/删除 20 次无残留 mount。
+- VM 启动后新增的 rootfs bind 在 Guest 可见，删除后引用被释放。
+- 一个 Pod IP 对应一个 VM，基础 DNS/Service/跨节点路径至少在所选 PoC CNI 上跑通。
+- `K8S-OQ-001`～`K8S-OQ-004` 更新为 `DECIDED`，或有证据表明需要修改总体架构。
+- 不要求生产代码质量；探针代码若合入必须 feature-gated，并附删除或演进说明。
+
+## 6. S1：单容器纵向 PoC
+
+### 目标
+
+让用户通过 `runtimeClassName: cube` 运行一个标准单容器 Pod，并完成完整创建和删除闭环。
+
+### 工作项
+
+- CubeShim 实现最小 Sandbox Create/Start/Stop/Shutdown/Status。
+- Task Service 使用标准 rootfs 创建一个 Guest 容器，支持 Start/Wait/Kill/Delete。
+- Cubelet 提供最小 Prepare/Release/Inspect，返回 VM 资产和网络 attachment。
+- 支持 CRI 日志、非 TTY `exec`、grace period 和准确 exit code。
+- 提供 RuntimeClass、containerd 配置和专用节点 label/taint。
+
+### 验收标准
+
+- `Pod`、`Job`、单副本 `Deployment` 能创建并达到预期状态。
+- `kubectl logs` 和非 TTY `kubectl exec` 正常；失败进程返回准确 exit code。
+- 正常删除、强制删除和创建中取消都能最终释放 VM、tap、virtiofs、mount 和 socket。
+- 连续创建/删除 100 个单容器 Pod，无持续增长的残留资源。
+- runc 仍为默认 runtime；不指定 `runtimeClassName` 的 Pod 行为不变。
+- legacy Cubebox 创建/删除 smoke test 通过。
+
+## 7. S2：多容器与 Pod 生命周期
+
+### 目标
+
+把一个 Cube VM 从“单容器沙箱”升级为符合 Kubernetes Pod 语义的动态多容器 sandbox。
+
+### 工作项
+
+- 支持 init container、普通容器、原生 sidecar 和 ephemeral container 动态增删。
+- net/IPC/UTS 在 Pod 内共享；PID 默认隔离，支持 `shareProcessNamespace`。
+- 每容器独立 mount namespace、rootfs、cgroup、stdio、日志和退出状态。
+- 支持 startup/readiness/liveness probe、lifecycle hook、restart policy 和 graceful termination。
+- 单容器重启不得重启 VM 或影响其他容器。
+
+### 验收标准
+
+- init 顺序、sidecar 启停顺序和 app 并发行为符合 Kubernetes 预期。
+- 一个容器 crash 后只重建该容器；其他容器和 Pod IP 保持不变。
+- 多容器日志可分别读取，exec 定位到正确容器。
+- `shareProcessNamespace` 开关两种模式均有 E2E；hostPID/hostIPC/hostNetwork 明确拒绝。
+- ephemeral container 能在运行中的 sandbox 动态加入并退出。
+- 终止宽限期、SIGTERM/SIGKILL 和 TaskExit 事件时序有自动化测试。
+
+## 8. S3：存储、安全与资源
+
+### 目标
+
+覆盖用户首版要求的 volume、安全上下文和资源控制主路径。
+
+### 工作项
+
+- 支持 `emptyDir`、ConfigMap、Secret、projected volume、基础文件系统 PVC 和 allowlist `hostPath`。
+- 支持 UID/GID、supplemental groups、capabilities、只读 rootfs、`no_new_privileges` 和 seccomp。
+- privileged 使用节点开关与 Pod 请求双门禁，只在 Guest 内提权，不自动透传 Host 设备。
+- Host VM cgroup 限制总资源；Guest cgroup 限制每容器资源。
+- PoC 使用固定 VM 规格并测量开销；是否增加资源 admission 由数据决定。
+
+### 验收标准
+
+- 同一 volume 可按不同目标路径/只读属性挂载到多个容器。
+- RWO 文件系统 PVC 可挂载、读写、卸载并在 Pod 删除后无引用泄漏。
+- ConfigMap/Secret 启动注入正确；动态更新作为 `K8S-OQ-007` 单独记录，不伪装为已支持。
+- UID/GID/groups、capability add/drop、readonly rootfs、seccomp 均有正反用例。
+- privileged 未开启时请求被拒绝；开启后仍无法访问未授权 Host device/path。
+- Host/Guest CPU、内存限制在压力测试中生效，OOM 能归因到正确 Pod/容器。
+- raw block、完整 subPath、双向 mount propagation 等未实现能力返回明确结果并写入支持矩阵。
+
+## 9. S4：恢复与可观测性
+
+### 目标
+
+让 PoC 在组件重启和常见失败下保持可诊断、可清理，而不是只能在理想路径运行。
+
+### 工作项
+
+- 持久化最小 sandbox/container 状态并实现幂等操作。
+- containerd、CubeShim、Cubelet 重启后重连存活 VM；节点重启由 Kubernetes 重建。
+- 对 VM、tap、virtiofs、mount、socket 和 tombstone 做 reconcile。
+- 输出 sandbox/容器事件、结构化日志、Prometheus 指标和 CRI stats。
+- 统一 sandbox/container request ID，提供最小 inspect/diagnostic 命令。
+
+### 验收标准
+
+- 分别 kill/restart containerd、CubeShim、Cubelet，运行中的 Pod 要么恢复，要么进入明确失败并可被 kubelet 重建。
+- Agent 断连能重试；超过阈值后状态明确，不无限卡住。
+- CNI、mount、VM 删除故障可通过 reconcile 收敛，重复执行不会破坏其他 Pod。
+- 故障注入后无跨 Pod 误删，残留资源数量回到基线。
+- CRI stats 与 Host/Guest 原始数据误差在记录的容忍范围内。
+- 每种失败至少能从日志或指标定位到具体生命周期阶段。
+
+## 10. S5：PoC 集成交付
+
+### 目标
+
+形成可安装、可回滚、可重复演示的 Kubernetes runtime PoC，并给出是否进入生产化的证据。
+
+### 工作项
+
+- 节点安装/卸载、containerd 配置合并、RuntimeClass、label/taint 和版本兼容检查。
+- runc/Cube 混部、cordon/drain、滚动升级和回滚。
+- Kubernetes Node E2E/Conformance 结果分类。
+- 多容器、PVC、监控、故障恢复和升级的完整回归。
+- 性能、密度和稳定性测试。
+
+### 验收标准
+
+- 在至少 5 节点集群可重复安装、升级、回滚；现有 containerd 配置不被覆盖。
+- runc 系统 workload 与 Cube Pod 同时稳定运行。
+- 单节点 100 Cube Pods、10 并发创建完成测试，记录 P50/P95/P99、失败率和资源开销。
+- 运行 24～72 小时 churn/soak，无持续资源泄漏或状态漂移。
+- Node E2E/Conformance 每个失败项都有分类和链接，不用笼统豁免。
+- 形成 PoC 验收报告：支持矩阵、已知限制、升级/回滚步骤和生产化建议。
+- 100 节点验证是否执行取决于资源条件；未执行时明确记录为生产化前置项，不把它算作 PoC 通过证据。
+
+## 11. S6：二期 Snapshot、Restore 与 Pause/Resume
+
+### 目标
+
+在标准 Pod 生命周期稳定后，增加 Cube 特有的快照能力，优先支持从快照创建新 Pod。
+
+### 工作项
+
+- 定义 `CubeSandboxSnapshot` 和操作 CRD/controller。
+- 生成多容器 rootfs/写层、VM memory/device state 和兼容性 manifest。
+- 对接远端 artifact storage；PVC 一致性通过 CSI VolumeSnapshot 协调。
+- Pod annotation `cubesandbox.io/restore-from` 引用已授权的不可变 artifact。
+- 实现短时受控 Pause/Resume；长暂停语义最后评估。
+
+### 验收标准
+
+- 多容器 Pod 可制作快照并在兼容节点恢复为新 Pod。
+- 新 Pod 使用新 UID、sandbox ID 和 Pod IP；容器文件系统和进程状态符合定义的一致性级别。
+- Secret 不进入 artifact，PVC snapshot 引用可验证。
+- 不兼容 CPU/Guest/Agent/Shim/snapshot format 时在启动前明确拒绝。
+- 上传中断、恢复失败和 artifact 损坏均有回滚/错误状态。
+- Pause 超时后能够恢复或失败收敛，不让 Pod 永久卡在中间状态。
+
+## 12. Stage 执行与 Handoff
+
+每个 stage 只维护三类状态：代码/PR、活动 handoff、未决问题表。详细规则见 [PoC Handoff 规则](../../dev/handoff-policy.md)，交接时最少完成：
+
+1. 在 `docs/handoffs/kubernetes-runtime/README.md` 写当前 stage、基线 commit、已完成/未完成、实际验证、阻塞和下一步。
+2. 在 `open-questions.md` 更新本 stage 必须关闭的问题。
+3. 附可复现命令和结果摘要；大日志放 CI/制品系统，只记录链接或 digest。
+4. 接手者复现上一项关键验证后，再开始新范围。
+
+Stage 未达到验收标准时不标记完成。允许以 `DEFERRED` 延期非关键项，但必须注明新的最迟 stage；会改变主架构或公共接口的问题不能带入不可逆实现。
+
+## 13. 未确认问题记录规则
+
+权威清单是 `docs/handoffs/kubernetes-runtime/open-questions.md`。新增问题使用连续 ID：
+
+```text
+K8S-OQ-009 | 问题 | 当前假设 | Owner | 最迟 Stage | OPEN | 需要的证据
+```
+
+状态流转：
+
+```text
+OPEN -> VALIDATING -> DECIDED
+  └----------------> DEFERRED -> OPEN
+```
+
+- `OPEN`：知道问题，但还没有足够证据。
+- `VALIDATING`：已经有 owner 和正在执行的探针/测试。
+- `DECIDED`：证据和最终选择已写入最后一列，历史行保留。
+- `DEFERRED`：当前 stage 不阻塞，并明确了新的解决 stage。
+
+如果实测推翻本文档的假设，先更新问题记录和总体设计，再改实现；不允许让代码成为唯一的事实来源。
