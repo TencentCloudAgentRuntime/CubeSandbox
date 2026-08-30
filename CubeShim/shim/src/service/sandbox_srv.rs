@@ -77,7 +77,33 @@ pub(crate) enum TaskMode {
     ManagedReady,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShutdownAction {
+    AlreadyComplete,
+    WaitForExisting,
+    Run,
+}
+
 impl SandboxLifecycle {
+    async fn begin_shutdown(&self) -> ShutdownAction {
+        loop {
+            let notified = self.changed.notified();
+            let mut state = self.state.lock().await;
+            match state.phase {
+                Phase::Creating | Phase::Starting | Phase::Stopping => {
+                    drop(state);
+                    notified.await;
+                }
+                Phase::Shutdown => return ShutdownAction::AlreadyComplete,
+                Phase::ShuttingDown => return ShutdownAction::WaitForExisting,
+                _ => {
+                    state.phase = Phase::ShuttingDown;
+                    return ShutdownAction::Run;
+                }
+            }
+        }
+    }
+
     pub(crate) async fn task_mode(&self) -> Result<TaskMode, String> {
         match self.state.lock().await.phase {
             Phase::Unmanaged => Ok(TaskMode::Legacy),
@@ -733,21 +759,10 @@ impl Sandbox for SandboxService {
         req: api::ShutdownSandboxRequest,
     ) -> TtrpcResult<api::ShutdownSandboxResponse> {
         self.validate_id(&req.sandbox_id)?;
-        let should_shutdown = loop {
-            let notified = self.lifecycle.changed.notified();
-            let mut state = self.lifecycle.state.lock().await;
-            match state.phase {
-                Phase::Creating | Phase::Starting | Phase::Stopping => {
-                    drop(state);
-                    notified.await;
-                }
-                Phase::Shutdown => return Ok(api::ShutdownSandboxResponse::new()),
-                Phase::ShuttingDown => break false,
-                _ => {
-                    state.phase = Phase::ShuttingDown;
-                    break true;
-                }
-            }
+        let should_shutdown = match self.lifecycle.begin_shutdown().await {
+            ShutdownAction::AlreadyComplete => return Ok(api::ShutdownSandboxResponse::new()),
+            ShutdownAction::WaitForExisting => false,
+            ShutdownAction::Run => true,
         };
         if should_shutdown {
             tokio::spawn(self.clone().run_shutdown());
@@ -812,6 +827,27 @@ mod tests {
             .contains("not ready"));
         lifecycle.state.lock().await.phase = Phase::Ready;
         assert_eq!(lifecycle.task_mode().await.unwrap(), TaskMode::ManagedReady);
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_detached_operation_before_transitioning() {
+        let lifecycle = Arc::new(SandboxLifecycle::default());
+        lifecycle.state.lock().await.phase = Phase::Creating;
+        let waiter = {
+            let lifecycle = lifecycle.clone();
+            tokio::spawn(async move { lifecycle.begin_shutdown().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        lifecycle.state.lock().await.phase = Phase::Created;
+        lifecycle.changed.notify_waiters();
+        assert_eq!(waiter.await.unwrap(), ShutdownAction::Run);
+        assert_eq!(lifecycle.state.lock().await.phase, Phase::ShuttingDown);
+        assert_eq!(
+            lifecycle.begin_shutdown().await,
+            ShutdownAction::WaitForExisting
+        );
     }
 
     #[test]
