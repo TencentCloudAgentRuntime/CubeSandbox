@@ -220,8 +220,8 @@ func SendResponse(conn *net.UnixConn, response *runtimev1.FDHandoffResponseV1, f
 
 // FenceCurrent serializes a durable lifecycle transition with FD acquisition.
 // Lock order is Registry.mu followed by the durable store lock taken by persist.
-// A failed persist leaves the exact READY binding published; a successful one
-// removes it before any blocked Acquire can continue.
+// A definitely-uncommitted failure leaves READY published. A commit-unknown
+// failure removes it fail-closed; success also removes it before blocked Acquire continues.
 func (r *Registry) FenceCurrent(binding Binding, persist func() error) error {
 	if err := validateBinding(binding); err != nil {
 		return err
@@ -236,6 +236,10 @@ func (r *Registry) FenceCurrent(binding Binding, persist func() error) error {
 		return ErrStaleLease
 	}
 	if err := persist(); err != nil {
+		var outcome interface{ CommitUnknown() bool }
+		if errors.As(err, &outcome) && outcome.CommitUnknown() {
+			delete(r.current, binding.SandboxID)
+		}
 		return err
 	}
 	delete(r.current, binding.SandboxID)

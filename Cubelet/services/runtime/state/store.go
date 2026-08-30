@@ -97,13 +97,57 @@ type ReleaseResult struct {
 // tests inject a deterministic generator.
 type ValueGenerator func() (string, error)
 
+// PersistenceHooks are deterministic durability fault-injection points. A
+// BeforeRename failure is definitely not committed; BeforeParentSync runs
+// after rename and therefore produces a commit-unknown result.
+type PersistenceHooks struct {
+	BeforeRename     func() error
+	BeforeParentSync func() error
+}
+
+type OpenOption func(*Store)
+
+func WithPersistenceHooks(hooks PersistenceHooks) OpenOption {
+	return func(store *Store) { store.hooks = hooks }
+}
+
+// PersistenceError preserves whether a failed durable write may already be
+// visible. It also maps to gRPC UNAVAILABLE without losing outcome metadata.
+type PersistenceError struct {
+	stage         string
+	cause         error
+	commitUnknown bool
+}
+
+func (e *PersistenceError) Error() string {
+	return fmt.Sprintf("persist runtime state at %s (commit_unknown=%t): %v", e.stage, e.commitUnknown, e.cause)
+}
+
+func (e *PersistenceError) Unwrap() error { return e.cause }
+
+func (e *PersistenceError) CommitUnknown() bool { return e.commitUnknown }
+
+func (e *PersistenceError) GRPCStatus() *status.Status {
+	return status.New(codes.Unavailable, e.Error())
+}
+
+func IsCommitUnknown(err error) bool {
+	var persistenceError *PersistenceError
+	return errors.As(err, &persistenceError) && persistenceError.CommitUnknown()
+}
+
+func persistenceFailure(stage string, commitUnknown bool, err error) error {
+	return &PersistenceError{stage: stage, cause: err, commitUnknown: commitUnknown}
+}
+
 type Store struct {
 	dir      string
 	generate ValueGenerator
+	hooks    PersistenceHooks
 	mu       sync.Mutex
 }
 
-func Open(dir string, generator ValueGenerator) (*Store, error) {
+func Open(dir string, generator ValueGenerator, options ...OpenOption) (*Store, error) {
 	if dir == "" {
 		return nil, errors.New("runtime state directory is empty")
 	}
@@ -113,7 +157,13 @@ func Open(dir string, generator ValueGenerator) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return &Store{dir: dir, generate: generator}, nil
+	store := &Store{dir: dir, generate: generator}
+	for _, option := range options {
+		if option != nil {
+			option(store)
+		}
+	}
+	return store, nil
 }
 
 func randomValue() (string, error) {
@@ -191,7 +241,7 @@ func (s *Store) Prepare(request PrepareRequest) (*PrepareResult, error) {
 		PayloadDigest: request.PayloadDigest,
 	}
 	if err := s.persist(record); err != nil {
-		return nil, status.Error(codes.Unavailable, err.Error())
+		return nil, err
 	}
 	return &PrepareResult{Lease: *lease}, nil
 }
@@ -224,7 +274,7 @@ func (s *Store) MarkReady(sandboxID string, generation uint64, leaseID, networkH
 		return nil, status.Error(codes.FailedPrecondition, "releasing lease cannot become ready")
 	}
 	if err := s.persist(record); err != nil {
-		return nil, status.Error(codes.Unavailable, err.Error())
+		return nil, err
 	}
 	return cloneLease(record.Active), nil
 }
@@ -275,7 +325,7 @@ func (s *Store) BeginRelease(request ReleaseRequest) (*ReleaseResult, error) {
 		LeaseID:    request.LeaseID,
 	}
 	if err := s.persist(record); err != nil {
-		return nil, status.Error(codes.Unavailable, err.Error())
+		return nil, err
 	}
 	return &ReleaseResult{Lease: *record.Active}, nil
 }
@@ -312,7 +362,7 @@ func (s *Store) CompleteRelease(request ReleaseRequest) error {
 	}
 	record.Active = nil
 	if err := s.persist(record); err != nil {
-		return status.Error(codes.Unavailable, err.Error())
+		return err
 	}
 	return nil
 }
@@ -341,7 +391,7 @@ func (s *Store) AbandonPrepare(sandboxID string, generation uint64, leaseID stri
 	}
 	record.Active = nil
 	if err := s.persist(record); err != nil {
-		return status.Error(codes.Unavailable, err.Error())
+		return err
 	}
 	return nil
 }
@@ -404,38 +454,51 @@ func (s *Store) load(sandboxID string) (*Record, error) {
 func (s *Store) persist(record *Record) error {
 	data, err := json.Marshal(record)
 	if err != nil {
-		return err
+		return persistenceFailure("encode", false, err)
 	}
 	temp, err := os.CreateTemp(s.dir, ".runtime-state-*")
 	if err != nil {
-		return err
+		return persistenceFailure("create-temp", false, err)
 	}
 	tempName := temp.Name()
 	defer os.Remove(tempName)
 	if err := temp.Chmod(0o600); err != nil {
 		temp.Close()
-		return err
+		return persistenceFailure("chmod-temp", false, err)
 	}
 	if _, err := temp.Write(data); err != nil {
 		temp.Close()
-		return err
+		return persistenceFailure("write-temp", false, err)
 	}
 	if err := temp.Sync(); err != nil {
 		temp.Close()
-		return err
+		return persistenceFailure("sync-temp", false, err)
 	}
 	if err := temp.Close(); err != nil {
-		return err
+		return persistenceFailure("close-temp", false, err)
+	}
+	if s.hooks.BeforeRename != nil {
+		if err := s.hooks.BeforeRename(); err != nil {
+			return persistenceFailure("before-rename", false, err)
+		}
 	}
 	if err := os.Rename(tempName, s.recordPath(record.SandboxID)); err != nil {
-		return err
+		return persistenceFailure("rename", false, err)
+	}
+	if s.hooks.BeforeParentSync != nil {
+		if err := s.hooks.BeforeParentSync(); err != nil {
+			return persistenceFailure("before-parent-sync", true, err)
+		}
 	}
 	dir, err := os.Open(s.dir)
 	if err != nil {
-		return err
+		return persistenceFailure("open-parent", true, err)
 	}
 	defer dir.Close()
-	return dir.Sync()
+	if err := dir.Sync(); err != nil {
+		return persistenceFailure("sync-parent", true, err)
+	}
+	return nil
 }
 
 func (s *Store) recordPath(sandboxID string) string {

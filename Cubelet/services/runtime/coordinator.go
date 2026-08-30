@@ -9,6 +9,8 @@ import (
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // LifecycleStore is the durable half of the RuntimeResource lifecycle.
@@ -26,16 +28,19 @@ type LifecycleStore interface {
 //
 // Acquire takes only Registry.mu. Store methods never call back into Registry.
 type Coordinator struct {
-	mu      sync.Mutex
-	store   LifecycleStore
-	handoff *handoff.Registry
+	mu        sync.Mutex
+	store     LifecycleStore
+	handoff   *handoff.Registry
+	uncertain map[string]state.ReleaseRequest
 }
 
 func NewCoordinator(store LifecycleStore, registry *handoff.Registry) (*Coordinator, error) {
 	if store == nil || registry == nil {
 		return nil, errors.New("runtime lifecycle store/registry is nil")
 	}
-	return &Coordinator{store: store, handoff: registry}, nil
+	return &Coordinator{
+		store: store, handoff: registry, uncertain: make(map[string]state.ReleaseRequest),
+	}, nil
 }
 
 func (c *Coordinator) Prepare(request state.PrepareRequest) (*state.PrepareResult, error) {
@@ -80,18 +85,31 @@ func (c *Coordinator) BeginReleaseAndFence(request state.ReleaseRequest) (*state
 			result, persistErr = c.store.BeginRelease(request)
 			return persistErr
 		}); err != nil {
+			if state.IsCommitUnknown(err) {
+				c.uncertain[request.SandboxID] = request
+			}
 			return nil, err
 		}
+		delete(c.uncertain, request.SandboxID)
 		return result, nil
 	}
 	// PREPARING has never been published. RELEASING and tombstone retries are
 	// already fenced. Mismatched requests are rejected by the durable store.
-	return c.store.BeginRelease(request)
+	result, err := c.store.BeginRelease(request)
+	if err == nil {
+		if uncertain, ok := c.uncertain[request.SandboxID]; ok && uncertain == request {
+			delete(c.uncertain, request.SandboxID)
+		}
+	}
+	return result, err
 }
 
 func (c *Coordinator) CompleteRelease(request state.ReleaseRequest) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if _, ok := c.uncertain[request.SandboxID]; ok {
+		return status.Error(codes.FailedPrecondition, "release durability is commit-unknown; resynchronize before cleanup")
+	}
 	return c.store.CompleteRelease(request)
 }
 
@@ -106,9 +124,17 @@ func (c *Coordinator) RecoverSandbox(sandboxID string) error {
 		return err
 	}
 	if record.Active != nil && record.Active.Phase == state.PhaseReady {
-		return c.handoff.Publish(bindingFromLease(sandboxID, record.Active))
+		if err := c.handoff.Publish(bindingFromLease(sandboxID, record.Active)); err != nil {
+			return err
+		}
+		delete(c.uncertain, sandboxID)
+		return nil
 	}
-	return c.handoff.EnsureAbsent(sandboxID)
+	if err := c.handoff.EnsureAbsent(sandboxID); err != nil {
+		return err
+	}
+	delete(c.uncertain, sandboxID)
+	return nil
 }
 
 func bindingFromLease(sandboxID string, lease *state.Lease) handoff.Binding {

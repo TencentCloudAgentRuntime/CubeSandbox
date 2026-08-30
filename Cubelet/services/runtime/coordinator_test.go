@@ -36,9 +36,9 @@ func handoffRequest(binding handoff.Binding) *runtimev1.FDHandoffRequestV1 {
 	}
 }
 
-func readyCoordinator(t *testing.T, opener handoff.TapOpener) (*Coordinator, *state.Store, *handoff.Registry, handoff.Binding, state.ReleaseRequest) {
+func readyCoordinator(t *testing.T, opener handoff.TapOpener, options ...state.OpenOption) (*Coordinator, *state.Store, *handoff.Registry, handoff.Binding, state.ReleaseRequest) {
 	t.Helper()
-	store, err := state.Open(t.TempDir(), coordinatorGenerator())
+	store, err := state.Open(t.TempDir(), coordinatorGenerator(), options...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,28 +128,29 @@ func TestCoordinatorReleaseLinearizesWithInFlightFDDuplicate(t *testing.T) {
 	}
 }
 
-type failingReleaseStore struct {
-	LifecycleStore
-}
-
-func (f failingReleaseStore) BeginRelease(state.ReleaseRequest) (*state.ReleaseResult, error) {
-	return nil, status.Error(codes.Unavailable, "injected durable persist failure")
-}
-
-func TestCoordinatorPersistFailureRetainsBindingAndReadyRecovery(t *testing.T) {
+func TestCoordinatorPreRenameFailureRetainsReadyBinding(t *testing.T) {
 	opener := func(handoff.Binding) (*os.File, error) { return os.Open("/dev/null") }
-	_, store, registry, binding, release := readyCoordinator(t, opener)
-	failing, err := NewCoordinator(failingReleaseStore{LifecycleStore: store}, registry)
-	if err != nil {
-		t.Fatal(err)
+	armed := false
+	hooks := state.PersistenceHooks{
+		BeforeRename: func() error {
+			if armed {
+				return errors.New("injected pre-rename failure")
+			}
+			return nil
+		},
 	}
-	if _, err := failing.BeginReleaseAndFence(release); status.Code(err) != codes.Unavailable {
-		t.Fatalf("release error=%v code=%s, want Unavailable", err, status.Code(err))
+	coordinator, store, registry, binding, release := readyCoordinator(
+		t, opener, state.WithPersistenceHooks(hooks),
+	)
+	armed = true
+	_, err := coordinator.BeginReleaseAndFence(release)
+	if status.Code(err) != codes.Unavailable || state.IsCommitUnknown(err) {
+		t.Fatalf("pre-rename error=%v code=%s commitUnknown=%t", err, status.Code(err), state.IsCommitUnknown(err))
 	}
 
-	file, code, err := registry.Acquire(handoffRequest(binding))
-	if err != nil || code != runtimev1.FDHandoffCode_FD_HANDOFF_CODE_OK || file == nil {
-		t.Fatalf("binding after persist failure=(%v,%s,%v), want READY FD", file, code, err)
+	file, code, acquireErr := registry.Acquire(handoffRequest(binding))
+	if acquireErr != nil || code != runtimev1.FDHandoffCode_FD_HANDOFF_CODE_OK || file == nil {
+		t.Fatalf("binding after pre-rename failure=(%v,%s,%v), want READY FD", file, code, acquireErr)
 	}
 	file.Close()
 	record, err := store.Inspect("sandbox-a")
@@ -157,7 +158,7 @@ func TestCoordinatorPersistFailureRetainsBindingAndReadyRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	if record.Active == nil || record.Active.Phase != state.PhaseReady {
-		t.Fatalf("state after persist failure=%+v, want READY", record.Active)
+		t.Fatalf("state after pre-rename failure=%+v, want READY", record.Active)
 	}
 
 	restartedRegistry, err := handoff.NewRegistry(opener)
@@ -171,11 +172,70 @@ func TestCoordinatorPersistFailureRetainsBindingAndReadyRecovery(t *testing.T) {
 	if err := restarted.RecoverSandbox("sandbox-a"); err != nil {
 		t.Fatal(err)
 	}
-	file, code, err = restartedRegistry.Acquire(handoffRequest(binding))
-	if err != nil || code != runtimev1.FDHandoffCode_FD_HANDOFF_CODE_OK || file == nil {
-		t.Fatalf("READY recovery=(%v,%s,%v), want published FD", file, code, err)
+	file, code, acquireErr = restartedRegistry.Acquire(handoffRequest(binding))
+	if acquireErr != nil || code != runtimev1.FDHandoffCode_FD_HANDOFF_CODE_OK || file == nil {
+		t.Fatalf("READY recovery=(%v,%s,%v), want published FD", file, code, acquireErr)
 	}
 	file.Close()
+}
+
+func TestCoordinatorParentSyncCommitUnknownFailsClosedUntilResync(t *testing.T) {
+	opener := func(handoff.Binding) (*os.File, error) { return os.Open("/dev/null") }
+	armed := false
+	hooks := state.PersistenceHooks{
+		BeforeParentSync: func() error {
+			if armed {
+				return errors.New("injected post-rename parent-sync failure")
+			}
+			return nil
+		},
+	}
+	coordinator, store, registry, binding, release := readyCoordinator(
+		t, opener, state.WithPersistenceHooks(hooks),
+	)
+	armed = true
+	_, err := coordinator.BeginReleaseAndFence(release)
+	if status.Code(err) != codes.Unavailable || !state.IsCommitUnknown(err) {
+		t.Fatalf("post-rename error=%v code=%s commitUnknown=%t", err, status.Code(err), state.IsCommitUnknown(err))
+	}
+	file, code, acquireErr := registry.Acquire(handoffRequest(binding))
+	if file != nil || code != runtimev1.FDHandoffCode_FD_HANDOFF_CODE_STALE || !errors.Is(acquireErr, handoff.ErrStaleLease) {
+		t.Fatalf("commit-unknown acquire=(%v,%s,%v), want fail-closed STALE", file, code, acquireErr)
+	}
+	record, err := store.Inspect("sandbox-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Active == nil || record.Active.Phase != state.PhaseReleasing {
+		t.Fatalf("post-rename visible state=%+v, want RELEASING", record.Active)
+	}
+	if err := coordinator.CompleteRelease(release); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("cleanup before durability resync error=%v code=%s, want FailedPrecondition", err, status.Code(err))
+	}
+
+	restartedRegistry, err := handoff.NewRegistry(opener)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewCoordinator(store, restartedRegistry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.RecoverSandbox("sandbox-a"); err != nil {
+		t.Fatal(err)
+	}
+	file, code, acquireErr = restartedRegistry.Acquire(handoffRequest(binding))
+	if file != nil || code != runtimev1.FDHandoffCode_FD_HANDOFF_CODE_STALE || !errors.Is(acquireErr, handoff.ErrStaleLease) {
+		t.Fatalf("RELEASING recovery acquire=(%v,%s,%v), want STALE", file, code, acquireErr)
+	}
+	retry, err := restarted.BeginReleaseAndFence(release)
+	if err != nil || !retry.Reused {
+		t.Fatalf("durable resync retry=(%+v,%v), want reused", retry, err)
+	}
+	armed = false
+	if err := restarted.CompleteRelease(release); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestCoordinatorRestartKeepsReleasingFencedAndReplacementStale(t *testing.T) {
