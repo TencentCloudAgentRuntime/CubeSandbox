@@ -63,7 +63,7 @@ Cubelet 不回调 host containerd，也不调用自身嵌入的 containerd 创�
 | 任意 | 错误 lease/generation 或同 lease 的新 release key | `FAILED_PRECONDITION` |
 | 无记录或 future generation | Release | `NOT_FOUND`，且不得推进 high watermark |
 
-缺失字段和非法 key 复用返回 `INVALID_ARGUMENT`；状态文件读取或持久化故障返回 `UNAVAILABLE`。网络/资源准备失败时，必须先清完副作用再调用 `AbandonPrepare` 写 tombstone。释放通过 `BeginReleaseAndFence` 执行：固定锁序为 Coordinator → Registry → Store；在持有 Registry 锁时持久化 `RELEASING`，成功则在解锁前删除 binding。rename 前的确定未提交失败保留 READY；rename 后的 open-parent/parent-fsync 失败标为 commit-unknown，立即删除 binding 并禁止 `CompleteRelease`，直到重试或 `RecoverSandbox` 读取持久状态完成重同步。之后才允许清理并写 tombstone。
+缺失字段和非法 key 复用返回 `INVALID_ARGUMENT`；状态文件读取或持久化故障返回 `UNAVAILABLE`。网络/资源准备失败时，必须先清完副作用再调用 `AbandonPrepare` 写 tombstone。释放通过 `BeginReleaseAndFence` 执行：固定锁序为 Coordinator → Registry → Store；在持有 Registry 锁时持久化 `RELEASING`，成功则在解锁前删除 binding。rename 前的确定未提交失败保留 READY；rename 后的 open-parent/parent-fsync 失败标为 commit-unknown，立即删除 binding 并禁止 `CompleteRelease`，直到重试或 `RecoverSandbox` 精确校验 release identity 并成功执行 parent-directory fsync。之后才允许清理并写 tombstone。
 
 进程重启后按持久化 phase 恢复：`PREPARING` 继续原 key 操作或在清理后 tombstone；`READY` 重新发布精确 FD binding；`RELEASING` 保持 fenced 并继续清理。状态库已覆盖 prepare/release 重试、错误 key/lease、重启恢复、tombstone high watermark 和旧请求不影响新 lease；S1 负责把资源 adapter 接入该状态机。
 
@@ -79,7 +79,7 @@ Kubernetes endpoint 与 legacy `/data/cubelet/cubetap.sock` JSON 协议不同，
 
 校验与 TAP FD duplicate 在同一 registry 临界区内完成，replacement/release 无法插入其间。成功响应 code 为 `OK`、`fd_count=1`，通过 `SCM_RIGHTS` 携带恰好一个 fresh duplicate；重试可再次成功，但每次是新的 duplicate。客户端收到后拥有并关闭该 FD；服务端只拥有本次 duplicate，并在发送完成后关闭。`MALFORMED`、`UNAUTHORIZED`、`STALE`、`NOT_READY`、`INTERNAL` 均强制 `fd_count=0` 且不携带 ancillary FD。
 
-监听 socket 使用文件 ACL；连接建立后必须提供 authorizer 并用 `SO_PEERCRED` 精确匹配配置的 CubeShim UID/GID，之后才查 lease 或打开 FD；authorizer 缺失时 fail closed。连接设置 1 秒 I/O deadline。Release 与 Acquire 的线性化点位于同一个 Registry 临界区：已进入 duplicate 的 Acquire 先完成；Release 在锁内持久化成功并删除 binding 后才返回，随后请求只得到 `STALE`。确定未提交的 pre-rename 失败保持 READY；post-rename/parent-fsync 的 commit-unknown 立即移除 binding，并在持久状态重同步前阻止清理。若进程在持久化后崩溃，重启恢复不会发布 `RELEASING` binding。测试覆盖 replacement race、全部 fence 字段、released lease、合法重试、部分/超长/非法 frame、peer UID/GID，以及所有错误响应无 FD。
+监听 socket 使用文件 ACL；连接建立后必须提供 authorizer 并用 `SO_PEERCRED` 精确匹配配置的 CubeShim UID/GID，之后才查 lease 或打开 FD；authorizer 缺失时 fail closed。连接设置 1 秒 I/O deadline。Release 与 Acquire 的线性化点位于同一个 Registry 临界区：已进入 duplicate 的 Acquire 先完成；Release 在锁内持久化成功并删除 binding 后才返回，随后请求只得到 `STALE`。确定未提交的 pre-rename 失败保持 READY；post-rename/parent-fsync 的 commit-unknown 立即移除 binding，并在 `ConfirmReleaseDurable` 完成 parent-directory fsync 前阻止清理。若进程在持久化后崩溃，重启恢复不会发布 `RELEASING` binding。测试覆盖 replacement race、全部 fence 字段、released lease、合法重试、部分/超长/非法 frame、peer UID/GID，以及所有错误响应无 FD。
 
 ## Agent capability negotiation
 

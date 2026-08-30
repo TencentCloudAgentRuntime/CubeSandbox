@@ -2,7 +2,7 @@
 
 ## 当前结论
 
-S0.4 v1 契约已按三轮独立审查整改，当前等待第四轮复审。宿主 containerd 独占 CRI、OCI image/snapshot、Sandbox/Task 与 CNI 状态；Cubelet RuntimeResource 仅准备和释放节点资源；Guest Agent 只负责 VM 内容器执行。不得在复审 `APPROVE` 前把 S0.4 标为 `DONE`。
+S0.4 v1 契约已按四轮独立审查整改，当前等待第五轮复审。宿主 containerd 独占 CRI、OCI image/snapshot、Sandbox/Task 与 CNI 状态；Cubelet RuntimeResource 仅准备和释放节点资源；Guest Agent 只负责 VM 内容器执行。不得在复审 `APPROVE` 前把 S0.4 标为 `DONE`。
 
 ## 产物
 
@@ -11,7 +11,7 @@ S0.4 v1 契约已按三轮独立审查整改，当前等待第四轮复审。宿
 | RuntimeResource v1 proto、生成代码、descriptor 测试与 API 文档 | `40f4389a`，FD lease 扩展 `ea192ecb` |
 | Agent capability negotiation 与 CubeShim 缓存/兼容解析 | `30bf3365` |
 | 初版调用图与契约探针 | `eb7aed1a`、`2e2612a4` |
-| 持久化 lease/tombstone 状态机、FD handoff v1、direct gRPC registration 与真实 import-graph 测试 | `ea192ecb`；Release 协调器与强制 peer auth `e3205220`；commit-unknown 处理 `aace4c4a` |
+| 持久化 lease/tombstone 状态机、FD handoff v1、direct gRPC registration 与真实 import-graph 测试 | `ea192ecb`；Release 协调器与强制 peer auth `e3205220`；commit-unknown 处理 `aace4c4a`；目录持久性确认 `695fbada` |
 
 接口定义包含 `GetCapabilities`、`PrepareSandbox`、`ReleaseSandbox`、`InspectSandbox` 和只报告的 `ReconcileSandboxes`。TAP FD 不进入 protobuf；Kubernetes 专用 Unix 协议通过 `sandbox_id + generation + lease_id + network_handle + token` 精确匹配当前 READY lease 后，才使用 `SCM_RIGHTS` 发送 fresh duplicate。legacy cubetap JSON 协议未修改。
 
@@ -38,6 +38,12 @@ S0.4 v1 契约已按三轮独立审查整改，当前等待第四轮复审。宿
 
 `aace4c4a` 让 Store 的 `PersistenceError` 保留提交结果并维持 gRPC `UNAVAILABLE`：pre-rename 失败是确定未提交，Registry 保留 READY；post-rename/open-parent/parent-fsync 失败是 commit-unknown，Registry 立即删除 binding，Coordinator 禁止 `CompleteRelease`，直到重试或 `RecoverSandbox` 读取持久状态完成重同步。测试使用真实 Store 的 `BeforeRename`/`BeforeParentSync` 注入点，分别确认 READY 可恢复与 RELEASING fail-closed，20 轮 race 通过。
 
+## 第四轮独立审查与整改
+
+第四轮结果仍为 `CHANGES_REQUIRED`：retry/Recover 只读取可见 RELEASING 便解除 uncertain，没有重新 fsync 父目录；故障仍启用的旧测试反而能够成功。
+
+`695fbada` 增加真实 `Store.ConfirmReleaseDurable`：在 Store 锁内校验精确 generation/lease/release key，并执行 parent-directory fsync。Coordinator 只有 confirmation 成功才写入 confirmed 门禁；否则 binding 保持缺失，retry/同进程 Recover/新 Coordinator Recover 均返回 `UNAVAILABLE`，`CompleteRelease` 返回 `FAILED_PRECONDITION`。注入故障解除后 Recover 才成功，之后才允许 cleanup；20 轮 race 通过。
+
 精确状态迁移、gRPC code、FD ownership 和失败顺序见 [S0.4 接口边界](../../../../zh/dev/kubernetes-runtime-integration-s0.4-interface.md)。
 
 ## 验证
@@ -46,7 +52,7 @@ S0.4 v1 契约已按三轮独立审查整改，当前等待第四轮复审。宿
 |---|---|
 | `cd Cubelet && go test ./api/services/runtime/v1 ./services/runtime/...` | 通过 |
 | `cd Cubelet && go test -race ./services/runtime/...` | 通过 |
-| `cd Cubelet && go test -race ./services/runtime ./services/runtime/state ./services/runtime/handoff -run 'Coordinator|Persistence|Fence|ServeConn|RegistryAcquire|PublishConflict' -count=20` | 通过 |
+| `cd Cubelet && go test -race ./services/runtime ./services/runtime/state ./services/runtime/handoff -run 'Coordinator|Persistence|ConfirmRelease|Fence|ServeConn|RegistryAcquire|PublishConflict' -count=20` | 通过 |
 | `cd Cubelet && go vet ./services/runtime/...` | 通过 |
 | `./tests/s0-interface-contract/run.sh` | 官方 builder 内输出 `S0_4_INTERFACE_CONTRACT_OK`；Go 全部 runtime contract、Health proto 一致性、Shim/Agent 定向测试和格式检查通过 |
 | 前一轮 `make shim-test` | CubeShim 76 项、cube-runtime 1 项通过，0 失败；本次未修改 Rust 实现 |
@@ -58,4 +64,4 @@ S0.4 v1 契约已按三轮独立审查整改，当前等待第四轮复审。宿
 
 ## 审查门禁
 
-同一独立 subagent 必须复查 `ea192ecb`、`e3205220`、`aace4c4a`、本证据、接口文档与测试，并明确返回 `APPROVE`；否则继续整改和复审，不进入 S1。
+同一独立 subagent 必须复查 `ea192ecb`、`e3205220`、`aace4c4a`、`695fbada`、本证据、接口文档与测试，并明确返回 `APPROVE`；否则继续整改和复审，不进入 S1。
