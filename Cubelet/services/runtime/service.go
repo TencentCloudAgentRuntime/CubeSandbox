@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/kmutex"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
 	"google.golang.org/grpc/codes"
@@ -45,6 +46,7 @@ type Service struct {
 	store       LifecycleStore
 	adapter     Adapter
 	fdEndpoint  string
+	operations  kmutex.KeyedLocker
 }
 
 func NewService(store LifecycleStore, adapter Adapter, fdEndpoint string) (*Service, *handoff.Registry, error) {
@@ -62,7 +64,9 @@ func NewService(store LifecycleStore, adapter Adapter, fdEndpoint string) (*Serv
 	if err != nil {
 		return nil, nil, err
 	}
-	return &Service{coordinator: coordinator, store: store, adapter: adapter, fdEndpoint: fdEndpoint}, registry, nil
+	return &Service{
+		coordinator: coordinator, store: store, adapter: adapter, fdEndpoint: fdEndpoint, operations: kmutex.New(),
+	}, registry, nil
 }
 
 // Recover resolves every durable lease before either RuntimeResource RPC or FD
@@ -152,6 +156,10 @@ func (s *Service) PrepareSandbox(ctx context.Context, request *runtimev1.Prepare
 	if err := validatePrepare(request); err != nil {
 		return nil, err
 	}
+	if err := s.operations.Lock(ctx, request.GetSandboxId()); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
+	defer s.operations.Unlock(request.GetSandboxId())
 	digest, err := desiredDigest(request)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -181,12 +189,17 @@ func (s *Service) PrepareSandbox(ctx context.Context, request *runtimev1.Prepare
 	}
 	if err := validatePrepared(request, prepared); err != nil {
 		if result.Lease.Phase == state.PhasePreparing {
-			_ = s.adapter.Release(ctx, state.ReleaseRequest{
+			rollbackErr := s.adapter.Release(ctx, state.ReleaseRequest{
 				SandboxID: request.GetSandboxId(), Generation: request.GetGeneration(), LeaseID: result.Lease.LeaseID,
 			}, networkHandle(prepared))
-			_ = s.coordinator.AbandonPrepare(request.GetSandboxId(), request.GetGeneration(), result.Lease.LeaseID)
+			if rollbackErr == nil {
+				rollbackErr = s.coordinator.AbandonPrepare(request.GetSandboxId(), request.GetGeneration(), result.Lease.LeaseID)
+			}
+			if rollbackErr != nil {
+				return nil, status.Errorf(codes.Internal, "validate prepared resources: %v; rollback: %v", err, rollbackErr)
+			}
 		}
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, status.Errorf(codes.Internal, "validate prepared resources: %v", err)
 	}
 	lease, err := s.coordinator.MarkReadyAndPublish(request.GetSandboxId(), request.GetGeneration(), result.Lease.LeaseID, prepared.GetNetwork().GetNetworkHandle())
 	if err != nil {
@@ -200,6 +213,10 @@ func (s *Service) ReleaseSandbox(ctx context.Context, request *runtimev1.Release
 	if request == nil || request.GetSandboxId() == "" || request.GetLeaseId() == "" || request.GetGeneration() == 0 || request.GetIdempotencyKey() == "" {
 		return nil, status.Error(codes.InvalidArgument, "release fields must be non-zero")
 	}
+	if err := s.operations.Lock(ctx, request.GetSandboxId()); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
+	defer s.operations.Unlock(request.GetSandboxId())
 	release := state.ReleaseRequest{SandboxID: request.GetSandboxId(), Generation: request.GetGeneration(), LeaseID: request.GetLeaseId(), IdempotencyKey: request.GetIdempotencyKey()}
 	before, inspectErr := s.store.Inspect(request.GetSandboxId())
 	result, err := s.coordinator.BeginReleaseAndFence(release)

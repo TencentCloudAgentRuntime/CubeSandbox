@@ -18,6 +18,7 @@ import (
 	runtimeservice "github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
+	"golang.org/x/sys/unix"
 )
 
 type Assets struct {
@@ -33,14 +34,25 @@ type NetworkOps interface {
 	Open(string, string) (*os.File, error)
 }
 
+type prepareStage string
+
+const (
+	stageIntent     prepareStage = "INTENT"
+	stageSharedRoot prepareStage = "SHARED_ROOT"
+	stagePrepared   prepareStage = "PREPARED"
+)
+
 type adapter struct {
-	mu       sync.Mutex
-	stateDir string
-	assets   Assets
-	network  NetworkOps
+	mu          sync.Mutex
+	stateDir    string
+	assets      Assets
+	network     NetworkOps
+	persistHook func(prepareStage, *diskRecord) error
+	tapFiles    map[string]*os.File
 }
 
 type diskRecord struct {
+	Stage         prepareStage                 `json:"stage"`
 	SandboxID     string                       `json:"sandbox_id"`
 	Generation    uint64                       `json:"generation"`
 	LeaseID       string                       `json:"lease_id"`
@@ -75,7 +87,7 @@ func newAdapter(stateDir string, assets Assets, network NetworkOps) (*adapter, e
 	if err := os.MkdirAll(assets.SharedRootBase, 0o711); err != nil {
 		return nil, err
 	}
-	return &adapter{stateDir: stateDir, assets: assets, network: network}, nil
+	return &adapter{stateDir: stateDir, assets: assets, network: network, tapFiles: make(map[string]*os.File)}, nil
 }
 
 func (a *adapter) Prepare(ctx context.Context, request *runtimev1.PrepareSandboxRequest, lease state.Lease) (*runtimev1.PreparedSandbox, error) {
@@ -86,40 +98,94 @@ func (a *adapter) Prepare(ctx context.Context, request *runtimev1.PrepareSandbox
 		if record.Generation != request.GetGeneration() || record.LeaseID != lease.LeaseID {
 			return nil, errors.New("sandbox already has a different runtime resource lease")
 		}
-		return preparedFromRecord(record), nil
+		return a.resumePrepare(ctx, record)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
 
 	tapName := nameFor("cb", request.GetSandboxId(), request.GetGeneration())
 	sharedRoot := filepath.Join(a.assets.SharedRootBase, nameFor("sb-", request.GetSandboxId(), request.GetGeneration()))
-	if err := os.MkdirAll(sharedRoot, 0o711); err != nil {
-		return nil, err
-	}
-	network, err := a.network.Prepare(ctx, request.GetNetwork().GetNetnsPath(), request.GetNetwork().GetInterfaceName(), tapName)
-	if err != nil {
-		_ = a.network.Release(ctx, request.GetNetwork().GetNetnsPath(), request.GetNetwork().GetInterfaceName(), tapName)
-		_ = os.RemoveAll(sharedRoot)
-		return nil, err
-	}
 	handle := nameFor("net-", request.GetSandboxId()+lease.LeaseID, request.GetGeneration())
-	network.NetworkHandle = handle
-	network.TapName = tapName
-	if network.GuestInterfaceName == "" {
-		network.GuestInterfaceName = "eth0"
-	}
 	record := &diskRecord{
-		SandboxID: request.GetSandboxId(), Generation: request.GetGeneration(), LeaseID: lease.LeaseID,
+		Stage: stageIntent, SandboxID: request.GetSandboxId(), Generation: request.GetGeneration(), LeaseID: lease.LeaseID,
 		NetworkHandle: handle, NetNSPath: request.GetNetwork().GetNetnsPath(), InterfaceName: request.GetNetwork().GetInterfaceName(), TapName: tapName,
 		Assets:  &runtimev1.RuntimeAssets{KernelPath: a.assets.KernelPath, AgentPath: a.assets.AgentPath, GuestImagePath: a.assets.GuestImagePath, SharedRoot: sharedRoot},
-		Network: network,
+		Network: &runtimev1.NetworkAttachment{NetworkHandle: handle, TapName: tapName, GuestInterfaceName: "eth0"},
 	}
-	if err := a.persist(record); err != nil {
-		_ = a.network.Release(ctx, record.NetNSPath, record.InterfaceName, record.TapName)
-		_ = os.RemoveAll(sharedRoot)
+	if err := a.persistStage(record, stageIntent); err != nil {
 		return nil, err
 	}
+	return a.resumePrepare(ctx, record)
+}
+
+func (a *adapter) resumePrepare(ctx context.Context, record *diskRecord) (*runtimev1.PreparedSandbox, error) {
+	switch record.Stage {
+	case stageIntent:
+		if err := os.MkdirAll(record.Assets.GetSharedRoot(), 0o711); err != nil {
+			return nil, err
+		}
+		if err := a.persistStage(record, stageSharedRoot); err != nil {
+			return nil, err
+		}
+		fallthrough
+	case stageSharedRoot:
+		network, err := a.network.Prepare(ctx, record.NetNSPath, record.InterfaceName, record.TapName)
+		if err != nil {
+			if rollbackErr := a.rollbackPreparing(ctx, record); rollbackErr != nil {
+				return nil, fmt.Errorf("prepare network: %v; rollback: %v", err, rollbackErr)
+			}
+			return nil, err
+		}
+		if network == nil {
+			err := errors.New("network adapter returned no attachment")
+			if rollbackErr := a.rollbackPreparing(ctx, record); rollbackErr != nil {
+				return nil, fmt.Errorf("%v; rollback: %v", err, rollbackErr)
+			}
+			return nil, err
+		}
+		network.NetworkHandle = record.NetworkHandle
+		network.TapName = record.TapName
+		if network.GuestInterfaceName == "" {
+			network.GuestInterfaceName = "eth0"
+		}
+		record.Network = network
+		if err := a.persistStage(record, stagePrepared); err != nil {
+			return nil, err
+		}
+	case stagePrepared:
+	default:
+		return nil, fmt.Errorf("unsupported runtime resource prepare stage %q", record.Stage)
+	}
 	return preparedFromRecord(record), nil
+}
+
+func (a *adapter) rollbackPreparing(ctx context.Context, record *diskRecord) error {
+	if file := a.tapFiles[record.SandboxID]; file != nil {
+		if err := file.Close(); err != nil {
+			return err
+		}
+		delete(a.tapFiles, record.SandboxID)
+	}
+	if err := a.network.Release(ctx, record.NetNSPath, record.InterfaceName, record.TapName); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(record.Assets.GetSharedRoot()); err != nil {
+		return err
+	}
+	if err := os.Remove(a.path(record.SandboxID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncDir(a.stateDir)
+}
+
+func (a *adapter) persistStage(record *diskRecord, stage prepareStage) error {
+	record.Stage = stage
+	if a.persistHook != nil {
+		if err := a.persistHook(stage, record); err != nil {
+			return err
+		}
+	}
+	return a.persist(record)
 }
 
 func (a *adapter) Release(ctx context.Context, request state.ReleaseRequest, networkHandle string) error {
@@ -137,6 +203,12 @@ func (a *adapter) Release(ctx context.Context, request state.ReleaseRequest, net
 	}
 	if networkHandle != "" && record.NetworkHandle != networkHandle {
 		return errors.New("release network handle does not match runtime resource record")
+	}
+	if file := a.tapFiles[record.SandboxID]; file != nil {
+		if err := file.Close(); err != nil {
+			return err
+		}
+		delete(a.tapFiles, record.SandboxID)
 	}
 	if err := a.network.Release(ctx, record.NetNSPath, record.InterfaceName, record.TapName); err != nil {
 		return err
@@ -172,10 +244,26 @@ func (a *adapter) OpenTap(binding handoff.Binding) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if record.Generation != binding.Generation || record.LeaseID != binding.LeaseID || record.NetworkHandle != binding.NetworkHandle {
+	if record.Stage != stagePrepared || record.Generation != binding.Generation || record.LeaseID != binding.LeaseID || record.NetworkHandle != binding.NetworkHandle {
 		return nil, handoff.ErrStaleLease
 	}
-	return a.network.Open(record.NetNSPath, record.TapName)
+	file := a.tapFiles[binding.SandboxID]
+	if file == nil {
+		file, err = a.network.Open(record.NetNSPath, record.TapName)
+		if err != nil {
+			return nil, err
+		}
+		a.tapFiles[binding.SandboxID] = file
+	}
+	descriptor, err := unix.FcntlInt(file.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		if a.tapFiles[binding.SandboxID] == file {
+			_ = file.Close()
+			delete(a.tapFiles, binding.SandboxID)
+		}
+		return nil, err
+	}
+	return os.NewFile(uintptr(descriptor), file.Name()), nil
 }
 
 func (a *adapter) load(sandboxID string) (*diskRecord, error) {
@@ -189,6 +277,10 @@ func (a *adapter) load(sandboxID string) (*diskRecord, error) {
 	}
 	if record.SandboxID != sandboxID || record.Assets == nil || record.Network == nil {
 		return nil, errors.New("invalid runtime resource adapter record")
+	}
+	if record.Stage == "" {
+		// Records created before staged WAL support were persisted only after all side effects.
+		record.Stage = stagePrepared
 	}
 	return record, nil
 }

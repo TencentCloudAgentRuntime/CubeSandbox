@@ -111,11 +111,11 @@ func (n *linuxNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, ta
 	if err != nil {
 		return nil, err
 	}
-	routes, gateway, err := n.routes(ctx, netnsPath, interfaceName, ips)
+	routes, gateways, err := n.routes(ctx, netnsPath, interfaceName, ips)
 	if err != nil {
 		return nil, err
 	}
-	neighbors, err := n.neighbors(ctx, netnsPath, interfaceName, gateway)
+	neighbors, err := n.neighbors(ctx, netnsPath, interfaceName, gateways)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +132,7 @@ func (n *linuxNetwork) ensureIngress(ctx context.Context, netnsPath, device stri
 }
 
 func (n *linuxNetwork) addresses(ctx context.Context, netnsPath, device string) ([]string, error) {
-	output, err := n.runner.Run(ctx, netnsPath, "ip", "-j", "-4", "addr", "show", "dev", device)
+	output, err := n.runner.Run(ctx, netnsPath, "ip", "-j", "addr", "show", "dev", device)
 	if err != nil {
 		return nil, err
 	}
@@ -155,53 +155,93 @@ func (n *linuxNetwork) addresses(ctx context.Context, netnsPath, device string) 
 		}
 	}
 	if len(result) == 0 {
-		return nil, errors.New("CNI interface has no global IPv4 address")
+		return nil, errors.New("CNI interface has no global IP address")
 	}
 	return result, nil
 }
 
-func (n *linuxNetwork) routes(ctx context.Context, netnsPath, device string, ips []string) ([]*runtimev1.Route, string, error) {
-	output, err := n.runner.Run(ctx, netnsPath, "ip", "-j", "-4", "route", "show")
-	if err != nil {
-		return nil, "", err
+func addressFamily(value string) int {
+	ip := net.ParseIP(strings.SplitN(value, "/", 2)[0])
+	if ip == nil {
+		return 0
 	}
-	var entries []struct {
-		Dst     string `json:"dst"`
-		Gateway string `json:"gateway"`
-		Dev     string `json:"dev"`
-		PrefSrc string `json:"prefsrc"`
-		Scope   string `json:"scope"`
+	if ip.To4() != nil {
+		return 4
 	}
-	if err := json.Unmarshal(output, &entries); err != nil {
-		return nil, "", err
-	}
-	source := strings.SplitN(ips[0], "/", 2)[0]
-	var result []*runtimev1.Route
-	var gateway string
-	for _, entry := range entries {
-		if entry.Dev != device {
-			continue
-		}
-		destination := entry.Dst
-		if destination == "" || destination == "default" {
-			destination = "0.0.0.0/0"
-		}
-		if entry.PrefSrc == "" {
-			entry.PrefSrc = source
-		}
-		if entry.Gateway != "" && gateway == "" {
-			gateway = entry.Gateway
-		}
-		result = append(result, &runtimev1.Route{Destination: destination, Gateway: entry.Gateway, Source: entry.PrefSrc, Device: "eth0", Scope: routeScope(entry.Scope)})
-	}
-	if gateway == "" {
-		return nil, "", errors.New("CNI interface has no IPv4 default gateway")
-	}
-	result = append([]*runtimev1.Route{{Destination: gateway + "/32", Source: source, Device: "eth0", Scope: 253}}, result...)
-	return result, gateway, nil
+	return 6
 }
 
-func (n *linuxNetwork) neighbors(ctx context.Context, netnsPath, device, gateway string) ([]*runtimev1.Neighbor, error) {
+func (n *linuxNetwork) routes(ctx context.Context, netnsPath, device string, ips []string) ([]*runtimev1.Route, []string, error) {
+	sources := make(map[int]string)
+	for _, value := range ips {
+		family := addressFamily(value)
+		if family != 0 {
+			if _, exists := sources[family]; !exists {
+				sources[family] = strings.SplitN(value, "/", 2)[0]
+			}
+		}
+	}
+	var result []*runtimev1.Route
+	var gateways []string
+	for _, family := range []int{4, 6} {
+		source, present := sources[family]
+		if !present {
+			continue
+		}
+		output, err := n.runner.Run(ctx, netnsPath, "ip", "-j", "-"+strconv.Itoa(family), "route", "show")
+		if err != nil {
+			return nil, nil, err
+		}
+		var entries []struct {
+			Dst     string `json:"dst"`
+			Gateway string `json:"gateway"`
+			Dev     string `json:"dev"`
+			PrefSrc string `json:"prefsrc"`
+			Scope   string `json:"scope"`
+		}
+		if err := json.Unmarshal(output, &entries); err != nil {
+			return nil, nil, err
+		}
+		var familyRoutes []*runtimev1.Route
+		var gateway string
+		for _, entry := range entries {
+			if entry.Dev != device {
+				continue
+			}
+			destination := entry.Dst
+			if destination == "" || destination == "default" {
+				if family == 4 {
+					destination = "0.0.0.0/0"
+				} else {
+					destination = "::/0"
+				}
+			}
+			if entry.PrefSrc == "" {
+				entry.PrefSrc = source
+			}
+			if entry.Gateway != "" && gateway == "" {
+				gateway = entry.Gateway
+			}
+			familyRoutes = append(familyRoutes, &runtimev1.Route{Destination: destination, Gateway: entry.Gateway, Source: entry.PrefSrc, Device: "eth0", Scope: routeScope(entry.Scope)})
+		}
+		if gateway == "" {
+			return nil, nil, fmt.Errorf("CNI interface has no IPv%d default gateway", family)
+		}
+		prefix := "/32"
+		if family == 6 {
+			prefix = "/128"
+		}
+		result = append(result, &runtimev1.Route{Destination: gateway + prefix, Source: source, Device: "eth0", Scope: 253})
+		result = append(result, familyRoutes...)
+		gateways = append(gateways, gateway)
+	}
+	if len(gateways) == 0 {
+		return nil, nil, errors.New("CNI interface has no default gateway")
+	}
+	return result, gateways, nil
+}
+
+func (n *linuxNetwork) neighbors(ctx context.Context, netnsPath, device string, gateways []string) ([]*runtimev1.Neighbor, error) {
 	for attempt := 0; attempt < 3; attempt++ {
 		output, err := n.runner.Run(ctx, netnsPath, "ip", "-j", "neigh", "show", "dev", device)
 		if err != nil {
@@ -215,12 +255,32 @@ func (n *linuxNetwork) neighbors(ctx context.Context, netnsPath, device, gateway
 		if err := json.Unmarshal(output, &entries); err != nil {
 			return nil, err
 		}
+		byIP := make(map[string]string, len(entries))
 		for _, entry := range entries {
-			if entry.Dst == gateway && entry.LLAddr != "" {
-				return []*runtimev1.Neighbor{{Ip: gateway, Mac: entry.LLAddr, Device: "eth0"}}, nil
+			if entry.LLAddr != "" {
+				byIP[entry.Dst] = entry.LLAddr
 			}
 		}
-		_, _ = n.runner.Run(ctx, netnsPath, "ping", "-c", "1", "-W", "1", gateway)
+		neighbors := make([]*runtimev1.Neighbor, 0, len(gateways))
+		for _, gateway := range gateways {
+			if mac := byIP[gateway]; mac != "" {
+				neighbors = append(neighbors, &runtimev1.Neighbor{Ip: gateway, Mac: mac, Device: "eth0"})
+			}
+		}
+		if len(neighbors) == len(gateways) {
+			return neighbors, nil
+		}
+		for _, gateway := range gateways {
+			if byIP[gateway] != "" {
+				continue
+			}
+			args := []string{"ping"}
+			if addressFamily(gateway) == 6 {
+				args = append(args, "-6")
+			}
+			args = append(args, "-c", "1", "-W", "1", gateway)
+			_, _ = n.runner.Run(ctx, netnsPath, args...)
+		}
 	}
 	return nil, errors.New("CNI default gateway has no neighbor MAC")
 }
@@ -240,33 +300,54 @@ func (n *linuxNetwork) Release(ctx context.Context, netnsPath, interfaceName, ta
 	return nil
 }
 
-func (n *linuxNetwork) Open(netnsPath, tapName string) (*os.File, error) {
-	goruntime.LockOSThread()
-	defer goruntime.UnlockOSThread()
-	original, err := netns.Get()
-	if err != nil {
-		return nil, err
-	}
-	defer original.Close()
-	target, err := netns.GetFromPath(netnsPath)
-	if err != nil {
-		return nil, err
-	}
-	defer target.Close()
-	if err := netns.Set(target); err != nil {
-		return nil, err
-	}
+type tapOpenResult struct {
+	file *os.File
+	err  error
+}
 
-	file, openErr := openTap(tapName)
-	restoreErr := netns.Set(original)
-	if openErr != nil {
-		return nil, openErr
-	}
-	if restoreErr != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("restore network namespace: %w", restoreErr)
-	}
-	return file, nil
+func (n *linuxNetwork) Open(netnsPath, tapName string) (*os.File, error) {
+	result := make(chan tapOpenResult, 1)
+	go func() {
+		goruntime.LockOSThread()
+		terminateThread := false
+		defer func() {
+			if !terminateThread {
+				goruntime.UnlockOSThread()
+			}
+		}()
+		original, err := netns.Get()
+		if err != nil {
+			result <- tapOpenResult{err: err}
+			return
+		}
+		defer original.Close()
+		target, err := netns.GetFromPath(netnsPath)
+		if err != nil {
+			result <- tapOpenResult{err: err}
+			return
+		}
+		defer target.Close()
+		if err := netns.Set(target); err != nil {
+			result <- tapOpenResult{err: err}
+			return
+		}
+
+		file, openErr := openTap(tapName)
+		restoreErr := netns.Set(original)
+		if restoreErr != nil {
+			if file != nil {
+				_ = file.Close()
+			}
+			// Returning from a goroutine still locked to an OS thread makes the
+			// Go runtime terminate that thread instead of reusing it in the target netns.
+			terminateThread = true
+			result <- tapOpenResult{err: fmt.Errorf("restore network namespace: %w", restoreErr)}
+			return
+		}
+		result <- tapOpenResult{file: file, err: openErr}
+	}()
+	opened := <-result
+	return opened.file, opened.err
 }
 
 func openTap(tapName string) (*os.File, error) {

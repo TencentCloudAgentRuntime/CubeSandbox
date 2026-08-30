@@ -13,8 +13,10 @@ import (
 )
 
 type scriptedRunner struct {
-	commands []string
-	badLink  bool
+	commands  []string
+	badLink   bool
+	ipv6Only  bool
+	dualStack bool
 }
 
 func (r *scriptedRunner) Run(_ context.Context, _ string, command ...string) ([]byte, error) {
@@ -28,11 +30,31 @@ func (r *scriptedRunner) Run(_ context.Context, _ string, command ...string) ([]
 		return []byte(`[{"address":"02:00:00:00:00:01","mtu":1450}]`), nil
 	case "ip link show dev cb123":
 		return nil, errors.New("not found")
-	case "ip -j -4 addr show dev eth0":
+	case "ip -j addr show dev eth0":
+		if r.ipv6Only {
+			return []byte(`[{"addr_info":[{"local":"2001:db8::2","prefixlen":64,"scope":"global"}]}]`), nil
+		}
+		if r.dualStack {
+			return []byte(`[{"addr_info":[{"local":"10.0.0.2","prefixlen":24,"scope":"global"},{"local":"2001:db8::2","prefixlen":64,"scope":"global"}]}]`), nil
+		}
 		return []byte(`[{"addr_info":[{"local":"10.0.0.2","prefixlen":24,"scope":"global"}]}]`), nil
 	case "ip -j -4 route show":
+		if r.ipv6Only {
+			return []byte(`[]`), nil
+		}
 		return []byte(`[{"dst":"default","gateway":"10.0.0.1","dev":"eth0","prefsrc":"10.0.0.2"},{"dst":"10.0.0.0/24","dev":"eth0","scope":"link"}]`), nil
+	case "ip -j -6 route show":
+		if r.ipv6Only || r.dualStack {
+			return []byte(`[{"dst":"default","gateway":"fe80::1","dev":"eth0","prefsrc":"2001:db8::2"},{"dst":"2001:db8::/64","dev":"eth0","scope":"link"}]`), nil
+		}
+		return []byte(`[]`), nil
 	case "ip -j neigh show dev eth0":
+		if r.ipv6Only {
+			return []byte(`[{"dst":"fe80::1","lladdr":"02:00:00:00:00:06","dev":"eth0"}]`), nil
+		}
+		if r.dualStack {
+			return []byte(`[{"dst":"10.0.0.1","lladdr":"02:00:00:00:00:02","dev":"eth0"},{"dst":"fe80::1","lladdr":"02:00:00:00:00:06","dev":"eth0"}]`), nil
+		}
 		return []byte(`[{"dst":"10.0.0.1","lladdr":"02:00:00:00:00:02","dev":"eth0"}]`), nil
 	default:
 		return nil, nil

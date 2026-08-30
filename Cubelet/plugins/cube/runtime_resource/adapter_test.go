@@ -110,7 +110,16 @@ func TestAdapterLifecycleIsPersistentAndExactLeaseScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	firstFD := file.Fd()
+	retryFile, err := restarted.OpenTap(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retryFile.Fd() == firstFD || network.openCalls != 1 {
+		t.Fatalf("retry fd=%d first=%d open calls=%d", retryFile.Fd(), firstFD, network.openCalls)
+	}
 	file.Close()
+	retryFile.Close()
 	binding.LeaseID = "stale"
 	if _, err := restarted.OpenTap(binding); !errors.Is(err, handoff.ErrStaleLease) {
 		t.Fatalf("stale OpenTap error=%v", err)
