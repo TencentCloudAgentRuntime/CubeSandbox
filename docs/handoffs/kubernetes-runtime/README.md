@@ -2,27 +2,27 @@
 
 ## 当前 Stage
 
-S0.4 `VALIDATING`：第四轮问题已整改，等待第五轮复审。
+S1.1 `IN_PROGRESS`：实现一个 PodSandbox 对应一个 Cube VM。
 
 ## 基线
 
-commit outcome `aace4c4a`，durability confirm `695fbada`，证据 `45db504e`。
+S0.4 实现 `695fbada`，第五轮复审 `APPROVE`，S0 收口 `8db49456`。
 
 ## 已完成
 
-commit-unknown 时撤销 FD；retry/Recover 必须精确校验并 parent-dir fsync，确认前 Complete 被拒绝；真实故障已测。
+S0.1～S0.4 全部 `DONE`；Sandbox、OCI rootfs、Cilium 网络及 RuntimeResource/FD 契约均已有证据。
 
 ## 未完成
 
-同一 subagent 必须明确 `APPROVE`；否则继续整改。
+S1.1 尚未实现 Rust Sandbox Service 到 Cube VM 的完整 Create/Start/Stop/Shutdown/Wait/Status 链路。
 
 ## 验证
 
-Go test/race/vet、20 轮故障 race、官方 builder 契约、VitePress、diff check 均通过。
+S0.4 Go test/race/vet、20 轮故障 race、官方 runner、VitePress 均通过；subagent `APPROVE`。
 
 ## 阻塞
 
-无。S1 真实 VM 必须云上验收。
+无。S1.1 必须在本 PoC 云节点完成真实 VM 验收。
 
 ## 受保护路径
 
@@ -30,4 +30,4 @@ Go test/race/vet、20 轮故障 race、官方 builder 契约、VitePress、diff 
 
 ## 下一步
 
-复查上述提交；通过后标记 S0 完成并启动 S1.1。
+确认 S1.1 验收契约，移植 Sandbox Service，接入 RuntimeResource 与 Cube VM，并在云节点重放；完成后交同一 subagent 审查。
