@@ -1,0 +1,12 @@
+TAT Invocation: inv-9827fk0njh
+TAT Task: invt-9827fk0nji
+Status: SUCCESS
+ExitCode: 0
+Start: 2026-08-30T14:21:29Z
+End: 2026-08-30T14:24:21Z
+
+CubeShim tests: 68 passed, 0 failed
+cube-runtime tests: 1 passed, 0 failed
+release build: passed
+containerd-shim-cube-rs SHA256: 42540813c93a59dec90ab12c61f00457571632c9d21f1ac5ab9b18e2af31b31a
+S0_2_FINAL_BUILD_OK

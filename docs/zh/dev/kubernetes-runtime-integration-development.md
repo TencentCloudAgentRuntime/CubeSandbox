@@ -1,6 +1,6 @@
 # CubeSandbox Kubernetes RuntimeClass PoC 开发计划
 
-> 状态：执行中（S0.2）
+> 状态：执行中（S0.2 独立审查）
 > 日期：2026-08-30  
 > 总体设计：[CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)  
 > 活动交接：[Kubernetes RuntimeClass PoC Handoff](../../../docs/handoffs/kubernetes-runtime/README.md)
@@ -120,12 +120,12 @@ tests/e2e/kubernetes-runtime/
 | 方案与开发准备 | `DONE` | 总体设计、S0～S6 开发计划、轻量 handoff 和未决问题表 | `95b3164a`、`3b564b76`；VitePress 构建通过 | 从 S0.1 开始技术探针 |
 
 ## 5. S0：架构技术探针
-> Milestone 状态：`IN_PROGRESS`。S0.1 已通过独立审查，S0.2 执行中。
+> Milestone 状态：`IN_PROGRESS`。S0.1 已通过独立审查；S0.2 云上验收完成，等待独立审查。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
 | S0.1 Sandbox API | `DONE` | Codex | 双服务探针、独立配置、固定 CRI 输入和一键验收脚本已提交；真实正常链路及四类明确异常通过，10 类残留均为 0 | 实现 `f38622c2`、`6a53a52d`、`33dbf479`；TAT `inv-68246d0jt1`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.1/README.md)；subagent `APPROVE` | S0.2 RootFS/virtiofs |
-| S0.2 RootFS/virtiofs | `IN_PROGRESS` | Codex | 已接手 | — | 验证标准 rootfs 和动态 bind/unmount |
+| S0.2 RootFS/virtiofs | `VALIDATING` | Codex | 标准 OCI active snapshot 已在真实 Cube Guest 运行；动态 bind/rename/只读与卸载约束已验证；20 次创建删除无残留 | TAT `inv-9827ikgt4f`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.2/README.md) | subagent 独立审查 |
 | S0.3 CNI 网络 | `NOT_STARTED` | 待指定 | — | — | 选择首个 CNI 并建立 VM 网络原型 |
 | S0.4 组件接口 | `NOT_STARTED` | 待指定 | — | — | 形成最小版本化 RPC 草案 |
 
@@ -180,6 +180,36 @@ runc Task v3 Service。此处复用 runc 只用于隔离验证 containerd 契约
 
 S0.1 尚未证明 Cube Guest、virtiofs 或 Cube-backed Task；这些属于 S0.2，不能用本
 探针中的 runc 成功结果代替。
+
+### S0.2 RootFS/virtiofs 探针结果（2026-08-30）
+
+探针位于 `CubeShim/s0-rootfs-probe`，由
+`io.containerd.cube.s0.standard-rootfs=true` 显式开启。当前 Agent 仍消费 legacy
+`cube.rootfs.info`，因此 CubeShim 在内部把标准 `CreateTaskRequest.rootfs` 转成该
+注解；上游 containerd/CRI 不需要生成 Cube 私有 rootfs 输入。S1 把转换并入 Sandbox
+生命周期后应删除或演进此 S0 开关。
+
+| 项目 | 结果 |
+|---|---|
+| 云上环境 | 香港二区 `ins-pl7mznaa`；官方匹配 PVM Host/Guest 6.6.69；containerd 2.3.4；XFS `/data/cubelet` |
+| 标准 rootfs | BusyBox 1.36.1 的 overlayfs active snapshot 经标准 Task rootfs 进入 Guest，输出 `STANDARD_OCI_ROOTFS_OK`，准确返回 exit code 23 |
+| 转换方式 | 不导出 Host merged overlay；按 containerd 顺序 bind active upper + image lowers，Guest Agent 在其上建立临时 writable overlay |
+| virtiofs 参数 | `cache=never`、`read_only=true`、`announce_submounts=false`；开启 submount 通告的负向对照在 Guest overlay 返回 `EINVAL` |
+| 在线变化 | VM 启动后新增 bind、Host rename、切只读均由 Guest console 确认；写只读 bind 返回 `Read-only file system` |
+| 在线卸载约束 | Guest lookup 后普通 Host unmount 返回 `EBUSY`；`MNT_DETACH` 使 Host mount 立即归零，旧 inode 可能保留到 Task/VM 删除。后续 volume detach 必须 Guest-first、generation 路径不复用 |
+| 清理 | 动态用例和 20/20 创建删除完成后，mount、share、Task、Container、Shim 每项均为 0 |
+| 测试/构建 | `make shim-test`：CubeShim 68 个、cube-runtime 1 个测试通过；release 构建通过，TAT `inv-9827fk0njh` |
+| 最终验收 | 仓库脚本直接重放成功，TAT `inv-9827ikgt4f`；环境证据 TAT `inv-0827k8gnsw` |
+
+由负向对照确认两个非显然边界：
+
+- Host merged overlay 不能直接作为 Guest overlay lower，否则形成
+  overlay-on-virtiofs-on-overlay 并返回 `EINVAL`；
+- layer bind 必须关闭 `announce_submounts`，否则 Guest 把 lower 识别为 FUSE
+  submount，同样返回 `EINVAL`。
+
+Guest writable upper 当前不回写 containerd active upper。S0/S1 的运行、退出码与删除
+语义已成立；持久化 writable layer、容器重启对账和 snapshotter 协同留到 S3。
 
 
 ### 目标

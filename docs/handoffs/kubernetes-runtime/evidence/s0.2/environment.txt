@@ -1,0 +1,15 @@
+TAT Invocation: inv-0827k8gnsw
+TAT Task: invt-0827k8gnsx
+Status: SUCCESS
+ExitCode: 0
+
+HOST_KERNEL=6.6.69-opencloudos9.cubesandbox.pvm.host-g0de43d6b3bcd
+KVM_DEVICE=present
+kvm_pvm                49152  0
+containerd github.com/containerd/containerd/v2 v2.3.4 db8809540e1a7a9da5d518876894933ff55692ab
+GUEST_KERNEL_LINK=/data/cubelet/s0.2-assets/kernel/vmlinux-pvm
+f9ecd86a05ddefc56dc6ae4b5c3448bb6c96c46ccc82fe344c5199560d7adb71  /data/cubelet/s0.2-assets/kernel/vmlinux
+64a69a8e03e97e02b270ad1c2a16341f4ede5132ac495414462631d22a0f1031  /data/cubelet/s0.2-assets/agent/cube-agent.ext4
+8262a7eb9cacf423ea9c03f6bf3ae8921b00684f4a18022fe11792b37ea69228  /data/cubelet/s0.2-assets/guest/cube-guest-image-cpu.img
+/dev/vdb xfs    rw,relatime,attr2,inode64,logbufs=8,logbsize=32k,noquota
+docker.io/library/busybox:1.36.1
