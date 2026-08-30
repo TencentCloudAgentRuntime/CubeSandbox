@@ -1,0 +1,22 @@
+{
+  "cniVersion": "1.0.0",
+  "name": "cube-s0",
+  "plugins": [
+    {
+      "type": "cube-s0-trace",
+      "bridge": "cube-s0",
+      "isGateway": true,
+      "ipMasq": true,
+      "hairpinMode": true,
+      "ipam": {
+        "type": "host-local",
+        "ranges": [[{"subnet": "10.88.0.0/16"}]],
+        "routes": [{"dst": "0.0.0.0/0"}]
+      }
+    },
+    {
+      "type": "portmap",
+      "capabilities": {"portMappings": true}
+    }
+  ]
+}

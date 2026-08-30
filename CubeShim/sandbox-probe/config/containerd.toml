@@ -1,0 +1,49 @@
+# containerd 2.3+ isolated S0 configuration. This deliberately does not replace
+# the node's primary containerd while the architecture probe is running.
+version = 4
+root = '/data/cubelet/s0-containerd/root'
+state = '/run/cube-s0-containerd'
+
+[debug]
+  level = 'debug'
+
+[plugins]
+  [plugins.'io.containerd.cri.v1.images']
+    snapshotter = 'overlayfs'
+    disable_snapshot_annotations = true
+    [plugins.'io.containerd.cri.v1.images'.pinned_images]
+      sandbox = 'registry.k8s.io/pause:3.10.2'
+
+  [plugins.'io.containerd.cri.v1.runtime']
+    [plugins.'io.containerd.cri.v1.runtime'.containerd]
+      default_runtime_name = 'runc'
+      [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes]
+        [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]
+          runtime_type = 'io.containerd.runc.v2'
+          sandboxer = 'podsandbox'
+        [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.cube-s0]
+          runtime_type = 'io.containerd.cube-s0.v1'
+          runtime_path = '/usr/local/bin/containerd-shim-cube-s0-v1'
+          sandboxer = 'shim'
+          cni_conf_dir = '/etc/cni/net.d-cube-s0'
+          cni_max_conf_num = 1
+
+    [plugins.'io.containerd.cri.v1.runtime'.cni]
+      bin_dirs = ['/opt/cni/bin']
+      conf_dir = '/etc/cni/net.d-cube-s0'
+      max_conf_num = 1
+      setup_serially = true
+      use_internal_loopback = true
+
+  [plugins.'io.containerd.grpc.v1.cri']
+    stream_server_address = '127.0.0.1'
+    stream_server_port = '0'
+
+  [plugins.'io.containerd.nri.v1.nri']
+    disable = true
+  [plugins.'io.containerd.server.v1.grpc']
+    address = '/run/cube-s0-containerd/containerd.sock'
+  [plugins.'io.containerd.server.v1.ttrpc']
+    address = '/run/cube-s0-containerd/containerd.sock.ttrpc'
+  [plugins.'io.containerd.shim.v1.manager']
+    socket_dir = '/run/cube-s0-containerd/s'

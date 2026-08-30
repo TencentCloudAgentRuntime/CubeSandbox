@@ -1,0 +1,4 @@
+runtime-endpoint: unix:///run/cube-s0-containerd/containerd.sock
+image-endpoint: unix:///run/cube-s0-containerd/containerd.sock
+timeout: 120
+debug: false
