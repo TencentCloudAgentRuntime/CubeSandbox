@@ -38,8 +38,8 @@ message GetCapabilitiesResponse {
   repeated Capability capabilities = 2;
   // v1 MUST return "node-resources-only".
   string service_mode = 3;
-  // Unix socket used for one-shot TAP delivery with SCM_RIGHTS. File
-  // descriptors are never encoded in protobuf.
+  // Unix socket for the length-prefixed FDHandoffRequestV1 protocol. This is a
+  // Kubernetes runtime endpoint distinct from the legacy cubetap JSON socket.
   string fd_handoff_endpoint = 4;
 }
 
@@ -95,6 +95,13 @@ message Neighbor {
   string device = 3;
 }
 
+message FDHandoffDescriptor {
+  uint32 protocol_version = 1;
+  string endpoint = 2;
+  // Opaque token bound to sandbox_id + generation + lease_id + network_handle.
+  string token = 3;
+}
+
 message NetworkAttachment {
   string network_handle = 1;
   string tap_name = 2;
@@ -104,6 +111,7 @@ message NetworkAttachment {
   repeated string ips = 6;
   repeated Route routes = 7;
   repeated Neighbor neighbors = 8;
+  FDHandoffDescriptor fd_handoff = 9;
 }
 
 message PreparedSandbox {
@@ -116,7 +124,7 @@ message PreparedSandbox {
 
 message PrepareSandboxResponse {
   PreparedSandbox sandbox = 1;
-  // True when an idempotent retry returned an existing matching generation.
+  // True only when the same idempotency key returned its durable result.
   bool reused = 2;
 }
 
@@ -124,11 +132,14 @@ message ReleaseSandboxRequest {
   string sandbox_id = 1;
   string lease_id = 2;
   uint64 generation = 3;
+  // Stable across retries of this exact release operation. It cannot be reused
+  // by PrepareSandbox, another generation, or another lease.
   string idempotency_key = 4;
 }
 
 message ReleaseSandboxResponse {
-  // True both after a successful release and when the generation was absent.
+  // True for the current lease after release and for an exact retry recorded in
+  // its durable tombstone. Unknown/future generations and mismatched leases fail.
   bool released = 1;
 }
 
@@ -172,4 +183,33 @@ message ReconcileEntry {
 
 message ReconcileSandboxesResponse {
   repeated ReconcileEntry entries = 1;
+}
+
+// FD handoff v1 uses a four-byte unsigned big-endian protobuf length followed
+// by exactly one serialized request/response. The maximum frame is 64 KiB.
+message FDHandoffRequestV1 {
+  uint32 protocol_version = 1;
+  string sandbox_id = 2;
+  uint64 generation = 3;
+  string lease_id = 4;
+  string network_handle = 5;
+  string token = 6;
+}
+
+enum FDHandoffCode {
+  FD_HANDOFF_CODE_UNSPECIFIED = 0;
+  FD_HANDOFF_CODE_OK = 1;
+  FD_HANDOFF_CODE_MALFORMED = 2;
+  FD_HANDOFF_CODE_UNAUTHORIZED = 3;
+  FD_HANDOFF_CODE_STALE = 4;
+  FD_HANDOFF_CODE_NOT_READY = 5;
+  FD_HANDOFF_CODE_INTERNAL = 6;
+}
+
+message FDHandoffResponseV1 {
+  uint32 protocol_version = 1;
+  FDHandoffCode code = 2;
+  string message = 3;
+  // OK carries exactly one SCM_RIGHTS FD. Every other code carries zero.
+  uint32 fd_count = 4;
 }

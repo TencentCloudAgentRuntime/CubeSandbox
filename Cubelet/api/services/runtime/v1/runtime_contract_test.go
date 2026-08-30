@@ -33,23 +33,35 @@ func TestRuntimeResourceV1MethodSetIsNodeResourcesOnly(t *testing.T) {
 	}
 }
 
-func TestRuntimeResourceV1KeepsRetryIdentityAndFDsOutOfProtobuf(t *testing.T) {
-	prepare := (&PrepareSandboxRequest{}).ProtoReflect().Descriptor().Fields()
-	for _, name := range []protoreflect.Name{"sandbox_id", "idempotency_key", "generation"} {
-		if prepare.ByName(name) == nil {
-			t.Fatalf("PrepareSandboxRequest missing retry identity field %s", name)
+func requireFields(t *testing.T, message protoreflect.MessageDescriptor, names ...protoreflect.Name) {
+	t.Helper()
+	for _, name := range names {
+		if message.Fields().ByName(name) == nil {
+			t.Fatalf("%s missing contract field %s", message.Name(), name)
 		}
 	}
+}
 
-	attachment := (&NetworkAttachment{}).ProtoReflect().Descriptor().Fields()
-	if attachment.ByName("tap_name") == nil {
-		t.Fatal("NetworkAttachment missing tap_name")
-	}
+func TestRuntimeResourceV1KeepsRetryIdentityAndFDsOutOfProtobuf(t *testing.T) {
+	prepare := (&PrepareSandboxRequest{}).ProtoReflect().Descriptor()
+	requireFields(t, prepare, "sandbox_id", "idempotency_key", "generation")
+
+	attachment := (&NetworkAttachment{}).ProtoReflect().Descriptor()
+	requireFields(t, attachment, "tap_name", "network_handle", "fd_handoff")
 	for _, forbidden := range []protoreflect.Name{"fd", "fds", "tap_fd"} {
-		if attachment.ByName(forbidden) != nil {
+		if attachment.Fields().ByName(forbidden) != nil {
 			t.Fatalf("NetworkAttachment must not encode %s; use SCM_RIGHTS side channel", forbidden)
 		}
 	}
+
+	descriptor := (&FDHandoffDescriptor{}).ProtoReflect().Descriptor()
+	requireFields(t, descriptor, "protocol_version", "endpoint", "token")
+
+	handoffRequest := (&FDHandoffRequestV1{}).ProtoReflect().Descriptor()
+	requireFields(t, handoffRequest,
+		"protocol_version", "sandbox_id", "generation", "lease_id", "network_handle", "token")
+	handoffResponse := (&FDHandoffResponseV1{}).ProtoReflect().Descriptor()
+	requireFields(t, handoffResponse, "protocol_version", "code", "message", "fd_count")
 
 	reconcile := (&ReconcileSandboxesRequest{}).ProtoReflect().Descriptor().Fields()
 	if reconcile.ByName("delete_orphans") != nil || reconcile.ByName("force") != nil {

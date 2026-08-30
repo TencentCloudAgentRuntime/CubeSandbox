@@ -179,6 +179,9 @@
   
 - [api/services/runtime/v1/runtime.proto](#api_services_runtime_v1_runtime-proto)
     - [Capability](#cubelet-services-runtime-v1-Capability)
+    - [FDHandoffDescriptor](#cubelet-services-runtime-v1-FDHandoffDescriptor)
+    - [FDHandoffRequestV1](#cubelet-services-runtime-v1-FDHandoffRequestV1)
+    - [FDHandoffResponseV1](#cubelet-services-runtime-v1-FDHandoffResponseV1)
     - [GetCapabilitiesRequest](#cubelet-services-runtime-v1-GetCapabilitiesRequest)
     - [GetCapabilitiesResponse](#cubelet-services-runtime-v1-GetCapabilitiesResponse)
     - [InspectSandboxRequest](#cubelet-services-runtime-v1-InspectSandboxRequest)
@@ -199,6 +202,7 @@
     - [Route](#cubelet-services-runtime-v1-Route)
     - [RuntimeAssets](#cubelet-services-runtime-v1-RuntimeAssets)
 
+    - [FDHandoffCode](#cubelet-services-runtime-v1-FDHandoffCode)
     - [ReconcileDisposition](#cubelet-services-runtime-v1-ReconcileDisposition)
     - [SandboxResourceState](#cubelet-services-runtime-v1-SandboxResourceState)
 
@@ -3112,6 +3116,62 @@ Service for machine level operations.
 
 
 
+<a name="cubelet-services-runtime-v1-FDHandoffDescriptor"></a>
+
+### FDHandoffDescriptor
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| protocol_version | [uint32](#uint32) |  |  |
+| endpoint | [string](#string) |  |  |
+| token | [string](#string) |  | Opaque token bound to sandbox_id &#43; generation &#43; lease_id &#43; network_handle. |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-FDHandoffRequestV1"></a>
+
+### FDHandoffRequestV1
+FD handoff v1 uses a four-byte unsigned big-endian protobuf length followed
+by exactly one serialized request/response. The maximum frame is 64 KiB.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| protocol_version | [uint32](#uint32) |  |  |
+| sandbox_id | [string](#string) |  |  |
+| generation | [uint64](#uint64) |  |  |
+| lease_id | [string](#string) |  |  |
+| network_handle | [string](#string) |  |  |
+| token | [string](#string) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-FDHandoffResponseV1"></a>
+
+### FDHandoffResponseV1
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| protocol_version | [uint32](#uint32) |  |  |
+| code | [FDHandoffCode](#cubelet-services-runtime-v1-FDHandoffCode) |  |  |
+| message | [string](#string) |  |  |
+| fd_count | [uint32](#uint32) |  | OK carries exactly one SCM_RIGHTS FD. Every other code carries zero. |
+
+
+
+
+
+
 <a name="cubelet-services-runtime-v1-GetCapabilitiesRequest"></a>
 
 ### GetCapabilitiesRequest
@@ -3138,7 +3198,7 @@ Service for machine level operations.
 | api_version | [uint32](#uint32) |  |  |
 | capabilities | [Capability](#cubelet-services-runtime-v1-Capability) | repeated |  |
 | service_mode | [string](#string) |  | v1 MUST return &#34;node-resources-only&#34;. |
-| fd_handoff_endpoint | [string](#string) |  | Unix socket used for one-shot TAP delivery with SCM_RIGHTS. File descriptors are never encoded in protobuf. |
+| fd_handoff_endpoint | [string](#string) |  | Unix socket for the length-prefixed FDHandoffRequestV1 protocol. This is a Kubernetes runtime endpoint distinct from the legacy cubetap JSON socket. |
 
 
 
@@ -3211,6 +3271,7 @@ Service for machine level operations.
 | ips | [string](#string) | repeated |  |
 | routes | [Route](#cubelet-services-runtime-v1-Route) | repeated |  |
 | neighbors | [Neighbor](#cubelet-services-runtime-v1-Neighbor) | repeated |  |
+| fd_handoff | [FDHandoffDescriptor](#cubelet-services-runtime-v1-FDHandoffDescriptor) |  |  |
 
 
 
@@ -3282,7 +3343,7 @@ Service for machine level operations.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | sandbox | [PreparedSandbox](#cubelet-services-runtime-v1-PreparedSandbox) |  |  |
-| reused | [bool](#bool) |  | True when an idempotent retry returned an existing matching generation. |
+| reused | [bool](#bool) |  | True only when the same idempotency key returned its durable result. |
 
 
 
@@ -3367,7 +3428,7 @@ Service for machine level operations.
 | sandbox_id | [string](#string) |  |  |
 | lease_id | [string](#string) |  |  |
 | generation | [uint64](#uint64) |  |  |
-| idempotency_key | [string](#string) |  |  |
+| idempotency_key | [string](#string) |  | Stable across retries of this exact release operation. It cannot be reused by PrepareSandbox, another generation, or another lease. |
 
 
 
@@ -3382,7 +3443,7 @@ Service for machine level operations.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| released | [bool](#bool) |  | True both after a successful release and when the generation was absent. |
+| released | [bool](#bool) |  | True for the current lease after release and for an exact retry recorded in its durable tombstone. Unknown/future generations and mismatched leases fail. |
 
 
 
@@ -3441,6 +3502,23 @@ Service for machine level operations.
 
 
 
+
+
+
+<a name="cubelet-services-runtime-v1-FDHandoffCode"></a>
+
+### FDHandoffCode
+
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| FD_HANDOFF_CODE_UNSPECIFIED | 0 |  |
+| FD_HANDOFF_CODE_OK | 1 |  |
+| FD_HANDOFF_CODE_MALFORMED | 2 |  |
+| FD_HANDOFF_CODE_UNAUTHORIZED | 3 |  |
+| FD_HANDOFF_CODE_STALE | 4 |  |
+| FD_HANDOFF_CODE_NOT_READY | 5 |  |
+| FD_HANDOFF_CODE_INTERNAL | 6 |  |
 
 
 

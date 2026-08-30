@@ -135,6 +135,67 @@ func (ReconcileDisposition) EnumDescriptor() ([]byte, []int) {
 	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{1}
 }
 
+type FDHandoffCode int32
+
+const (
+	FDHandoffCode_FD_HANDOFF_CODE_UNSPECIFIED  FDHandoffCode = 0
+	FDHandoffCode_FD_HANDOFF_CODE_OK           FDHandoffCode = 1
+	FDHandoffCode_FD_HANDOFF_CODE_MALFORMED    FDHandoffCode = 2
+	FDHandoffCode_FD_HANDOFF_CODE_UNAUTHORIZED FDHandoffCode = 3
+	FDHandoffCode_FD_HANDOFF_CODE_STALE        FDHandoffCode = 4
+	FDHandoffCode_FD_HANDOFF_CODE_NOT_READY    FDHandoffCode = 5
+	FDHandoffCode_FD_HANDOFF_CODE_INTERNAL     FDHandoffCode = 6
+)
+
+// Enum value maps for FDHandoffCode.
+var (
+	FDHandoffCode_name = map[int32]string{
+		0: "FD_HANDOFF_CODE_UNSPECIFIED",
+		1: "FD_HANDOFF_CODE_OK",
+		2: "FD_HANDOFF_CODE_MALFORMED",
+		3: "FD_HANDOFF_CODE_UNAUTHORIZED",
+		4: "FD_HANDOFF_CODE_STALE",
+		5: "FD_HANDOFF_CODE_NOT_READY",
+		6: "FD_HANDOFF_CODE_INTERNAL",
+	}
+	FDHandoffCode_value = map[string]int32{
+		"FD_HANDOFF_CODE_UNSPECIFIED":  0,
+		"FD_HANDOFF_CODE_OK":           1,
+		"FD_HANDOFF_CODE_MALFORMED":    2,
+		"FD_HANDOFF_CODE_UNAUTHORIZED": 3,
+		"FD_HANDOFF_CODE_STALE":        4,
+		"FD_HANDOFF_CODE_NOT_READY":    5,
+		"FD_HANDOFF_CODE_INTERNAL":     6,
+	}
+)
+
+func (x FDHandoffCode) Enum() *FDHandoffCode {
+	p := new(FDHandoffCode)
+	*p = x
+	return p
+}
+
+func (x FDHandoffCode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FDHandoffCode) Descriptor() protoreflect.EnumDescriptor {
+	return file_api_services_runtime_v1_runtime_proto_enumTypes[2].Descriptor()
+}
+
+func (FDHandoffCode) Type() protoreflect.EnumType {
+	return &file_api_services_runtime_v1_runtime_proto_enumTypes[2]
+}
+
+func (x FDHandoffCode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FDHandoffCode.Descriptor instead.
+func (FDHandoffCode) EnumDescriptor() ([]byte, []int) {
+	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{2}
+}
+
 type GetCapabilitiesRequest struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
 	ClientApiVersion uint32                 `protobuf:"varint,1,opt,name=client_api_version,json=clientApiVersion,proto3" json:"client_api_version,omitempty"`
@@ -237,8 +298,8 @@ type GetCapabilitiesResponse struct {
 	Capabilities []*Capability          `protobuf:"bytes,2,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	// v1 MUST return "node-resources-only".
 	ServiceMode string `protobuf:"bytes,3,opt,name=service_mode,json=serviceMode,proto3" json:"service_mode,omitempty"`
-	// Unix socket used for one-shot TAP delivery with SCM_RIGHTS. File
-	// descriptors are never encoded in protobuf.
+	// Unix socket for the length-prefixed FDHandoffRequestV1 protocol. This is a
+	// Kubernetes runtime endpoint distinct from the legacy cubetap JSON socket.
 	FdHandoffEndpoint string `protobuf:"bytes,4,opt,name=fd_handoff_endpoint,json=fdHandoffEndpoint,proto3" json:"fd_handoff_endpoint,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
@@ -781,6 +842,67 @@ func (x *Neighbor) GetDevice() string {
 	return ""
 }
 
+type FDHandoffDescriptor struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ProtocolVersion uint32                 `protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	Endpoint        string                 `protobuf:"bytes,2,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
+	// Opaque token bound to sandbox_id + generation + lease_id + network_handle.
+	Token         string `protobuf:"bytes,3,opt,name=token,proto3" json:"token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FDHandoffDescriptor) Reset() {
+	*x = FDHandoffDescriptor{}
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FDHandoffDescriptor) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FDHandoffDescriptor) ProtoMessage() {}
+
+func (x *FDHandoffDescriptor) ProtoReflect() protoreflect.Message {
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FDHandoffDescriptor.ProtoReflect.Descriptor instead.
+func (*FDHandoffDescriptor) Descriptor() ([]byte, []int) {
+	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *FDHandoffDescriptor) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return 0
+}
+
+func (x *FDHandoffDescriptor) GetEndpoint() string {
+	if x != nil {
+		return x.Endpoint
+	}
+	return ""
+}
+
+func (x *FDHandoffDescriptor) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
 type NetworkAttachment struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	NetworkHandle      string                 `protobuf:"bytes,1,opt,name=network_handle,json=networkHandle,proto3" json:"network_handle,omitempty"`
@@ -791,13 +913,14 @@ type NetworkAttachment struct {
 	Ips                []string               `protobuf:"bytes,6,rep,name=ips,proto3" json:"ips,omitempty"`
 	Routes             []*Route               `protobuf:"bytes,7,rep,name=routes,proto3" json:"routes,omitempty"`
 	Neighbors          []*Neighbor            `protobuf:"bytes,8,rep,name=neighbors,proto3" json:"neighbors,omitempty"`
+	FdHandoff          *FDHandoffDescriptor   `protobuf:"bytes,9,opt,name=fd_handoff,json=fdHandoff,proto3" json:"fd_handoff,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
 
 func (x *NetworkAttachment) Reset() {
 	*x = NetworkAttachment{}
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[10]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -809,7 +932,7 @@ func (x *NetworkAttachment) String() string {
 func (*NetworkAttachment) ProtoMessage() {}
 
 func (x *NetworkAttachment) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[10]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -822,7 +945,7 @@ func (x *NetworkAttachment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NetworkAttachment.ProtoReflect.Descriptor instead.
 func (*NetworkAttachment) Descriptor() ([]byte, []int) {
-	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{10}
+	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *NetworkAttachment) GetNetworkHandle() string {
@@ -881,6 +1004,13 @@ func (x *NetworkAttachment) GetNeighbors() []*Neighbor {
 	return nil
 }
 
+func (x *NetworkAttachment) GetFdHandoff() *FDHandoffDescriptor {
+	if x != nil {
+		return x.FdHandoff
+	}
+	return nil
+}
+
 type PreparedSandbox struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
@@ -894,7 +1024,7 @@ type PreparedSandbox struct {
 
 func (x *PreparedSandbox) Reset() {
 	*x = PreparedSandbox{}
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[11]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -906,7 +1036,7 @@ func (x *PreparedSandbox) String() string {
 func (*PreparedSandbox) ProtoMessage() {}
 
 func (x *PreparedSandbox) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[11]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -919,7 +1049,7 @@ func (x *PreparedSandbox) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PreparedSandbox.ProtoReflect.Descriptor instead.
 func (*PreparedSandbox) Descriptor() ([]byte, []int) {
-	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{11}
+	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *PreparedSandbox) GetSandboxId() string {
@@ -960,7 +1090,7 @@ func (x *PreparedSandbox) GetNetwork() *NetworkAttachment {
 type PrepareSandboxResponse struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Sandbox *PreparedSandbox       `protobuf:"bytes,1,opt,name=sandbox,proto3" json:"sandbox,omitempty"`
-	// True when an idempotent retry returned an existing matching generation.
+	// True only when the same idempotency key returned its durable result.
 	Reused        bool `protobuf:"varint,2,opt,name=reused,proto3" json:"reused,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -968,7 +1098,7 @@ type PrepareSandboxResponse struct {
 
 func (x *PrepareSandboxResponse) Reset() {
 	*x = PrepareSandboxResponse{}
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[12]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -980,7 +1110,7 @@ func (x *PrepareSandboxResponse) String() string {
 func (*PrepareSandboxResponse) ProtoMessage() {}
 
 func (x *PrepareSandboxResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[12]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -993,7 +1123,7 @@ func (x *PrepareSandboxResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareSandboxResponse.ProtoReflect.Descriptor instead.
 func (*PrepareSandboxResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{12}
+	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *PrepareSandboxResponse) GetSandbox() *PreparedSandbox {
@@ -1011,18 +1141,20 @@ func (x *PrepareSandboxResponse) GetReused() bool {
 }
 
 type ReleaseSandboxRequest struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	SandboxId      string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
-	LeaseId        string                 `protobuf:"bytes,2,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
-	Generation     uint64                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
-	IdempotencyKey string                 `protobuf:"bytes,4,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	SandboxId  string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	LeaseId    string                 `protobuf:"bytes,2,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
+	Generation uint64                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
+	// Stable across retries of this exact release operation. It cannot be reused
+	// by PrepareSandbox, another generation, or another lease.
+	IdempotencyKey string `protobuf:"bytes,4,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ReleaseSandboxRequest) Reset() {
 	*x = ReleaseSandboxRequest{}
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[13]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1034,7 +1166,7 @@ func (x *ReleaseSandboxRequest) String() string {
 func (*ReleaseSandboxRequest) ProtoMessage() {}
 
 func (x *ReleaseSandboxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[13]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1047,7 +1179,7 @@ func (x *ReleaseSandboxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseSandboxRequest.ProtoReflect.Descriptor instead.
 func (*ReleaseSandboxRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{13}
+	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ReleaseSandboxRequest) GetSandboxId() string {
@@ -1080,7 +1212,8 @@ func (x *ReleaseSandboxRequest) GetIdempotencyKey() string {
 
 type ReleaseSandboxResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// True both after a successful release and when the generation was absent.
+	// True for the current lease after release and for an exact retry recorded in
+	// its durable tombstone. Unknown/future generations and mismatched leases fail.
 	Released      bool `protobuf:"varint,1,opt,name=released,proto3" json:"released,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1088,7 +1221,7 @@ type ReleaseSandboxResponse struct {
 
 func (x *ReleaseSandboxResponse) Reset() {
 	*x = ReleaseSandboxResponse{}
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[14]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1100,7 +1233,7 @@ func (x *ReleaseSandboxResponse) String() string {
 func (*ReleaseSandboxResponse) ProtoMessage() {}
 
 func (x *ReleaseSandboxResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[14]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1113,7 +1246,7 @@ func (x *ReleaseSandboxResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseSandboxResponse.ProtoReflect.Descriptor instead.
 func (*ReleaseSandboxResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{14}
+	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ReleaseSandboxResponse) GetReleased() bool {
@@ -1132,7 +1265,7 @@ type InspectSandboxRequest struct {
 
 func (x *InspectSandboxRequest) Reset() {
 	*x = InspectSandboxRequest{}
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[15]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1144,7 +1277,7 @@ func (x *InspectSandboxRequest) String() string {
 func (*InspectSandboxRequest) ProtoMessage() {}
 
 func (x *InspectSandboxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[15]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1157,7 +1290,7 @@ func (x *InspectSandboxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InspectSandboxRequest.ProtoReflect.Descriptor instead.
 func (*InspectSandboxRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{15}
+	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *InspectSandboxRequest) GetSandboxId() string {
@@ -1179,7 +1312,7 @@ type InspectSandboxResponse struct {
 
 func (x *InspectSandboxResponse) Reset() {
 	*x = InspectSandboxResponse{}
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[16]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1191,7 +1324,7 @@ func (x *InspectSandboxResponse) String() string {
 func (*InspectSandboxResponse) ProtoMessage() {}
 
 func (x *InspectSandboxResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[16]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1204,7 +1337,7 @@ func (x *InspectSandboxResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InspectSandboxResponse.ProtoReflect.Descriptor instead.
 func (*InspectSandboxResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{16}
+	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *InspectSandboxResponse) GetFound() bool {
@@ -1244,7 +1377,7 @@ type ReconcileSandboxesRequest struct {
 
 func (x *ReconcileSandboxesRequest) Reset() {
 	*x = ReconcileSandboxesRequest{}
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[17]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1256,7 +1389,7 @@ func (x *ReconcileSandboxesRequest) String() string {
 func (*ReconcileSandboxesRequest) ProtoMessage() {}
 
 func (x *ReconcileSandboxesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[17]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1269,7 +1402,7 @@ func (x *ReconcileSandboxesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReconcileSandboxesRequest.ProtoReflect.Descriptor instead.
 func (*ReconcileSandboxesRequest) Descriptor() ([]byte, []int) {
-	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{17}
+	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ReconcileSandboxesRequest) GetLiveSandboxIds() []string {
@@ -1291,7 +1424,7 @@ type ReconcileEntry struct {
 
 func (x *ReconcileEntry) Reset() {
 	*x = ReconcileEntry{}
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[18]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1303,7 +1436,7 @@ func (x *ReconcileEntry) String() string {
 func (*ReconcileEntry) ProtoMessage() {}
 
 func (x *ReconcileEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[18]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1316,7 +1449,7 @@ func (x *ReconcileEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReconcileEntry.ProtoReflect.Descriptor instead.
 func (*ReconcileEntry) Descriptor() ([]byte, []int) {
-	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{18}
+	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ReconcileEntry) GetSandboxId() string {
@@ -1356,7 +1489,7 @@ type ReconcileSandboxesResponse struct {
 
 func (x *ReconcileSandboxesResponse) Reset() {
 	*x = ReconcileSandboxesResponse{}
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[19]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1368,7 +1501,7 @@ func (x *ReconcileSandboxesResponse) String() string {
 func (*ReconcileSandboxesResponse) ProtoMessage() {}
 
 func (x *ReconcileSandboxesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[19]
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1381,7 +1514,7 @@ func (x *ReconcileSandboxesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReconcileSandboxesResponse.ProtoReflect.Descriptor instead.
 func (*ReconcileSandboxesResponse) Descriptor() ([]byte, []int) {
-	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{19}
+	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ReconcileSandboxesResponse) GetEntries() []*ReconcileEntry {
@@ -1389,6 +1522,161 @@ func (x *ReconcileSandboxesResponse) GetEntries() []*ReconcileEntry {
 		return x.Entries
 	}
 	return nil
+}
+
+// FD handoff v1 uses a four-byte unsigned big-endian protobuf length followed
+// by exactly one serialized request/response. The maximum frame is 64 KiB.
+type FDHandoffRequestV1 struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ProtocolVersion uint32                 `protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	SandboxId       string                 `protobuf:"bytes,2,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	Generation      uint64                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
+	LeaseId         string                 `protobuf:"bytes,4,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
+	NetworkHandle   string                 `protobuf:"bytes,5,opt,name=network_handle,json=networkHandle,proto3" json:"network_handle,omitempty"`
+	Token           string                 `protobuf:"bytes,6,opt,name=token,proto3" json:"token,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *FDHandoffRequestV1) Reset() {
+	*x = FDHandoffRequestV1{}
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FDHandoffRequestV1) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FDHandoffRequestV1) ProtoMessage() {}
+
+func (x *FDHandoffRequestV1) ProtoReflect() protoreflect.Message {
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FDHandoffRequestV1.ProtoReflect.Descriptor instead.
+func (*FDHandoffRequestV1) Descriptor() ([]byte, []int) {
+	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *FDHandoffRequestV1) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return 0
+}
+
+func (x *FDHandoffRequestV1) GetSandboxId() string {
+	if x != nil {
+		return x.SandboxId
+	}
+	return ""
+}
+
+func (x *FDHandoffRequestV1) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *FDHandoffRequestV1) GetLeaseId() string {
+	if x != nil {
+		return x.LeaseId
+	}
+	return ""
+}
+
+func (x *FDHandoffRequestV1) GetNetworkHandle() string {
+	if x != nil {
+		return x.NetworkHandle
+	}
+	return ""
+}
+
+func (x *FDHandoffRequestV1) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+type FDHandoffResponseV1 struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ProtocolVersion uint32                 `protobuf:"varint,1,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	Code            FDHandoffCode          `protobuf:"varint,2,opt,name=code,proto3,enum=cubelet.services.runtime.v1.FDHandoffCode" json:"code,omitempty"`
+	Message         string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	// OK carries exactly one SCM_RIGHTS FD. Every other code carries zero.
+	FdCount       uint32 `protobuf:"varint,4,opt,name=fd_count,json=fdCount,proto3" json:"fd_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FDHandoffResponseV1) Reset() {
+	*x = FDHandoffResponseV1{}
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FDHandoffResponseV1) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FDHandoffResponseV1) ProtoMessage() {}
+
+func (x *FDHandoffResponseV1) ProtoReflect() protoreflect.Message {
+	mi := &file_api_services_runtime_v1_runtime_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FDHandoffResponseV1.ProtoReflect.Descriptor instead.
+func (*FDHandoffResponseV1) Descriptor() ([]byte, []int) {
+	return file_api_services_runtime_v1_runtime_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *FDHandoffResponseV1) GetProtocolVersion() uint32 {
+	if x != nil {
+		return x.ProtocolVersion
+	}
+	return 0
+}
+
+func (x *FDHandoffResponseV1) GetCode() FDHandoffCode {
+	if x != nil {
+		return x.Code
+	}
+	return FDHandoffCode_FD_HANDOFF_CODE_UNSPECIFIED
+}
+
+func (x *FDHandoffResponseV1) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+func (x *FDHandoffResponseV1) GetFdCount() uint32 {
+	if x != nil {
+		return x.FdCount
+	}
+	return 0
 }
 
 var File_api_services_runtime_v1_runtime_proto protoreflect.FileDescriptor
@@ -1450,7 +1738,11 @@ const file_api_services_runtime_v1_runtime_proto_rawDesc = "" +
 	"\bNeighbor\x12\x0e\n" +
 	"\x02ip\x18\x01 \x01(\tR\x02ip\x12\x10\n" +
 	"\x03mac\x18\x02 \x01(\tR\x03mac\x12\x16\n" +
-	"\x06device\x18\x03 \x01(\tR\x06device\"\xbe\x02\n" +
+	"\x06device\x18\x03 \x01(\tR\x06device\"r\n" +
+	"\x13FDHandoffDescriptor\x12)\n" +
+	"\x10protocol_version\x18\x01 \x01(\rR\x0fprotocolVersion\x12\x1a\n" +
+	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x12\x14\n" +
+	"\x05token\x18\x03 \x01(\tR\x05token\"\x8f\x03\n" +
 	"\x11NetworkAttachment\x12%\n" +
 	"\x0enetwork_handle\x18\x01 \x01(\tR\rnetworkHandle\x12\x19\n" +
 	"\btap_name\x18\x02 \x01(\tR\atapName\x120\n" +
@@ -1459,7 +1751,9 @@ const file_api_services_runtime_v1_runtime_proto_rawDesc = "" +
 	"\x03mtu\x18\x05 \x01(\rR\x03mtu\x12\x10\n" +
 	"\x03ips\x18\x06 \x03(\tR\x03ips\x12:\n" +
 	"\x06routes\x18\a \x03(\v2\".cubelet.services.runtime.v1.RouteR\x06routes\x12C\n" +
-	"\tneighbors\x18\b \x03(\v2%.cubelet.services.runtime.v1.NeighborR\tneighbors\"\xf9\x01\n" +
+	"\tneighbors\x18\b \x03(\v2%.cubelet.services.runtime.v1.NeighborR\tneighbors\x12O\n" +
+	"\n" +
+	"fd_handoff\x18\t \x01(\v20.cubelet.services.runtime.v1.FDHandoffDescriptorR\tfdHandoff\"\xf9\x01\n" +
 	"\x0fPreparedSandbox\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x19\n" +
@@ -1502,7 +1796,22 @@ const file_api_services_runtime_v1_runtime_proto_rawDesc = "" +
 	"\vdisposition\x18\x03 \x01(\x0e21.cubelet.services.runtime.v1.ReconcileDispositionR\vdisposition\x12\x16\n" +
 	"\x06detail\x18\x04 \x01(\tR\x06detail\"c\n" +
 	"\x1aReconcileSandboxesResponse\x12E\n" +
-	"\aentries\x18\x01 \x03(\v2+.cubelet.services.runtime.v1.ReconcileEntryR\aentries*\xf3\x01\n" +
+	"\aentries\x18\x01 \x03(\v2+.cubelet.services.runtime.v1.ReconcileEntryR\aentries\"\xd6\x01\n" +
+	"\x12FDHandoffRequestV1\x12)\n" +
+	"\x10protocol_version\x18\x01 \x01(\rR\x0fprotocolVersion\x12\x1d\n" +
+	"\n" +
+	"sandbox_id\x18\x02 \x01(\tR\tsandboxId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x03 \x01(\x04R\n" +
+	"generation\x12\x19\n" +
+	"\blease_id\x18\x04 \x01(\tR\aleaseId\x12%\n" +
+	"\x0enetwork_handle\x18\x05 \x01(\tR\rnetworkHandle\x12\x14\n" +
+	"\x05token\x18\x06 \x01(\tR\x05token\"\xb5\x01\n" +
+	"\x13FDHandoffResponseV1\x12)\n" +
+	"\x10protocol_version\x18\x01 \x01(\rR\x0fprotocolVersion\x12>\n" +
+	"\x04code\x18\x02 \x01(\x0e2*.cubelet.services.runtime.v1.FDHandoffCodeR\x04code\x12\x18\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\x12\x19\n" +
+	"\bfd_count\x18\x04 \x01(\rR\afdCount*\xf3\x01\n" +
 	"\x14SandboxResourceState\x12&\n" +
 	"\"SANDBOX_RESOURCE_STATE_UNSPECIFIED\x10\x00\x12$\n" +
 	" SANDBOX_RESOURCE_STATE_PREPARING\x10\x01\x12 \n" +
@@ -1514,7 +1823,15 @@ const file_api_services_runtime_v1_runtime_proto_rawDesc = "" +
 	"!RECONCILE_DISPOSITION_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aRECONCILE_DISPOSITION_LIVE\x10\x01\x12*\n" +
 	"&RECONCILE_DISPOSITION_ORPHAN_CANDIDATE\x10\x02\x12!\n" +
-	"\x1dRECONCILE_DISPOSITION_MISSING\x10\x032\x88\x05\n" +
+	"\x1dRECONCILE_DISPOSITION_MISSING\x10\x03*\xe1\x01\n" +
+	"\rFDHandoffCode\x12\x1f\n" +
+	"\x1bFD_HANDOFF_CODE_UNSPECIFIED\x10\x00\x12\x16\n" +
+	"\x12FD_HANDOFF_CODE_OK\x10\x01\x12\x1d\n" +
+	"\x19FD_HANDOFF_CODE_MALFORMED\x10\x02\x12 \n" +
+	"\x1cFD_HANDOFF_CODE_UNAUTHORIZED\x10\x03\x12\x19\n" +
+	"\x15FD_HANDOFF_CODE_STALE\x10\x04\x12\x1d\n" +
+	"\x19FD_HANDOFF_CODE_NOT_READY\x10\x05\x12\x1c\n" +
+	"\x18FD_HANDOFF_CODE_INTERNAL\x10\x062\x88\x05\n" +
 	"\x0fRuntimeResource\x12|\n" +
 	"\x0fGetCapabilities\x123.cubelet.services.runtime.v1.GetCapabilitiesRequest\x1a4.cubelet.services.runtime.v1.GetCapabilitiesResponse\x12y\n" +
 	"\x0ePrepareSandbox\x122.cubelet.services.runtime.v1.PrepareSandboxRequest\x1a3.cubelet.services.runtime.v1.PrepareSandboxResponse\x12y\n" +
@@ -1534,61 +1851,67 @@ func file_api_services_runtime_v1_runtime_proto_rawDescGZIP() []byte {
 	return file_api_services_runtime_v1_runtime_proto_rawDescData
 }
 
-var file_api_services_runtime_v1_runtime_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_api_services_runtime_v1_runtime_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_api_services_runtime_v1_runtime_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_api_services_runtime_v1_runtime_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_api_services_runtime_v1_runtime_proto_goTypes = []any{
 	(SandboxResourceState)(0),          // 0: cubelet.services.runtime.v1.SandboxResourceState
 	(ReconcileDisposition)(0),          // 1: cubelet.services.runtime.v1.ReconcileDisposition
-	(*GetCapabilitiesRequest)(nil),     // 2: cubelet.services.runtime.v1.GetCapabilitiesRequest
-	(*Capability)(nil),                 // 3: cubelet.services.runtime.v1.Capability
-	(*GetCapabilitiesResponse)(nil),    // 4: cubelet.services.runtime.v1.GetCapabilitiesResponse
-	(*PodIdentity)(nil),                // 5: cubelet.services.runtime.v1.PodIdentity
-	(*ResourceRequest)(nil),            // 6: cubelet.services.runtime.v1.ResourceRequest
-	(*NetworkIntent)(nil),              // 7: cubelet.services.runtime.v1.NetworkIntent
-	(*PrepareSandboxRequest)(nil),      // 8: cubelet.services.runtime.v1.PrepareSandboxRequest
-	(*RuntimeAssets)(nil),              // 9: cubelet.services.runtime.v1.RuntimeAssets
-	(*Route)(nil),                      // 10: cubelet.services.runtime.v1.Route
-	(*Neighbor)(nil),                   // 11: cubelet.services.runtime.v1.Neighbor
-	(*NetworkAttachment)(nil),          // 12: cubelet.services.runtime.v1.NetworkAttachment
-	(*PreparedSandbox)(nil),            // 13: cubelet.services.runtime.v1.PreparedSandbox
-	(*PrepareSandboxResponse)(nil),     // 14: cubelet.services.runtime.v1.PrepareSandboxResponse
-	(*ReleaseSandboxRequest)(nil),      // 15: cubelet.services.runtime.v1.ReleaseSandboxRequest
-	(*ReleaseSandboxResponse)(nil),     // 16: cubelet.services.runtime.v1.ReleaseSandboxResponse
-	(*InspectSandboxRequest)(nil),      // 17: cubelet.services.runtime.v1.InspectSandboxRequest
-	(*InspectSandboxResponse)(nil),     // 18: cubelet.services.runtime.v1.InspectSandboxResponse
-	(*ReconcileSandboxesRequest)(nil),  // 19: cubelet.services.runtime.v1.ReconcileSandboxesRequest
-	(*ReconcileEntry)(nil),             // 20: cubelet.services.runtime.v1.ReconcileEntry
-	(*ReconcileSandboxesResponse)(nil), // 21: cubelet.services.runtime.v1.ReconcileSandboxesResponse
+	(FDHandoffCode)(0),                 // 2: cubelet.services.runtime.v1.FDHandoffCode
+	(*GetCapabilitiesRequest)(nil),     // 3: cubelet.services.runtime.v1.GetCapabilitiesRequest
+	(*Capability)(nil),                 // 4: cubelet.services.runtime.v1.Capability
+	(*GetCapabilitiesResponse)(nil),    // 5: cubelet.services.runtime.v1.GetCapabilitiesResponse
+	(*PodIdentity)(nil),                // 6: cubelet.services.runtime.v1.PodIdentity
+	(*ResourceRequest)(nil),            // 7: cubelet.services.runtime.v1.ResourceRequest
+	(*NetworkIntent)(nil),              // 8: cubelet.services.runtime.v1.NetworkIntent
+	(*PrepareSandboxRequest)(nil),      // 9: cubelet.services.runtime.v1.PrepareSandboxRequest
+	(*RuntimeAssets)(nil),              // 10: cubelet.services.runtime.v1.RuntimeAssets
+	(*Route)(nil),                      // 11: cubelet.services.runtime.v1.Route
+	(*Neighbor)(nil),                   // 12: cubelet.services.runtime.v1.Neighbor
+	(*FDHandoffDescriptor)(nil),        // 13: cubelet.services.runtime.v1.FDHandoffDescriptor
+	(*NetworkAttachment)(nil),          // 14: cubelet.services.runtime.v1.NetworkAttachment
+	(*PreparedSandbox)(nil),            // 15: cubelet.services.runtime.v1.PreparedSandbox
+	(*PrepareSandboxResponse)(nil),     // 16: cubelet.services.runtime.v1.PrepareSandboxResponse
+	(*ReleaseSandboxRequest)(nil),      // 17: cubelet.services.runtime.v1.ReleaseSandboxRequest
+	(*ReleaseSandboxResponse)(nil),     // 18: cubelet.services.runtime.v1.ReleaseSandboxResponse
+	(*InspectSandboxRequest)(nil),      // 19: cubelet.services.runtime.v1.InspectSandboxRequest
+	(*InspectSandboxResponse)(nil),     // 20: cubelet.services.runtime.v1.InspectSandboxResponse
+	(*ReconcileSandboxesRequest)(nil),  // 21: cubelet.services.runtime.v1.ReconcileSandboxesRequest
+	(*ReconcileEntry)(nil),             // 22: cubelet.services.runtime.v1.ReconcileEntry
+	(*ReconcileSandboxesResponse)(nil), // 23: cubelet.services.runtime.v1.ReconcileSandboxesResponse
+	(*FDHandoffRequestV1)(nil),         // 24: cubelet.services.runtime.v1.FDHandoffRequestV1
+	(*FDHandoffResponseV1)(nil),        // 25: cubelet.services.runtime.v1.FDHandoffResponseV1
 }
 var file_api_services_runtime_v1_runtime_proto_depIdxs = []int32{
-	3,  // 0: cubelet.services.runtime.v1.GetCapabilitiesResponse.capabilities:type_name -> cubelet.services.runtime.v1.Capability
-	5,  // 1: cubelet.services.runtime.v1.PrepareSandboxRequest.pod:type_name -> cubelet.services.runtime.v1.PodIdentity
-	6,  // 2: cubelet.services.runtime.v1.PrepareSandboxRequest.resources:type_name -> cubelet.services.runtime.v1.ResourceRequest
-	7,  // 3: cubelet.services.runtime.v1.PrepareSandboxRequest.network:type_name -> cubelet.services.runtime.v1.NetworkIntent
-	10, // 4: cubelet.services.runtime.v1.NetworkAttachment.routes:type_name -> cubelet.services.runtime.v1.Route
-	11, // 5: cubelet.services.runtime.v1.NetworkAttachment.neighbors:type_name -> cubelet.services.runtime.v1.Neighbor
-	9,  // 6: cubelet.services.runtime.v1.PreparedSandbox.assets:type_name -> cubelet.services.runtime.v1.RuntimeAssets
-	12, // 7: cubelet.services.runtime.v1.PreparedSandbox.network:type_name -> cubelet.services.runtime.v1.NetworkAttachment
-	13, // 8: cubelet.services.runtime.v1.PrepareSandboxResponse.sandbox:type_name -> cubelet.services.runtime.v1.PreparedSandbox
-	0,  // 9: cubelet.services.runtime.v1.InspectSandboxResponse.state:type_name -> cubelet.services.runtime.v1.SandboxResourceState
-	13, // 10: cubelet.services.runtime.v1.InspectSandboxResponse.sandbox:type_name -> cubelet.services.runtime.v1.PreparedSandbox
-	1,  // 11: cubelet.services.runtime.v1.ReconcileEntry.disposition:type_name -> cubelet.services.runtime.v1.ReconcileDisposition
-	20, // 12: cubelet.services.runtime.v1.ReconcileSandboxesResponse.entries:type_name -> cubelet.services.runtime.v1.ReconcileEntry
-	2,  // 13: cubelet.services.runtime.v1.RuntimeResource.GetCapabilities:input_type -> cubelet.services.runtime.v1.GetCapabilitiesRequest
-	8,  // 14: cubelet.services.runtime.v1.RuntimeResource.PrepareSandbox:input_type -> cubelet.services.runtime.v1.PrepareSandboxRequest
-	15, // 15: cubelet.services.runtime.v1.RuntimeResource.ReleaseSandbox:input_type -> cubelet.services.runtime.v1.ReleaseSandboxRequest
-	17, // 16: cubelet.services.runtime.v1.RuntimeResource.InspectSandbox:input_type -> cubelet.services.runtime.v1.InspectSandboxRequest
-	19, // 17: cubelet.services.runtime.v1.RuntimeResource.ReconcileSandboxes:input_type -> cubelet.services.runtime.v1.ReconcileSandboxesRequest
-	4,  // 18: cubelet.services.runtime.v1.RuntimeResource.GetCapabilities:output_type -> cubelet.services.runtime.v1.GetCapabilitiesResponse
-	14, // 19: cubelet.services.runtime.v1.RuntimeResource.PrepareSandbox:output_type -> cubelet.services.runtime.v1.PrepareSandboxResponse
-	16, // 20: cubelet.services.runtime.v1.RuntimeResource.ReleaseSandbox:output_type -> cubelet.services.runtime.v1.ReleaseSandboxResponse
-	18, // 21: cubelet.services.runtime.v1.RuntimeResource.InspectSandbox:output_type -> cubelet.services.runtime.v1.InspectSandboxResponse
-	21, // 22: cubelet.services.runtime.v1.RuntimeResource.ReconcileSandboxes:output_type -> cubelet.services.runtime.v1.ReconcileSandboxesResponse
-	18, // [18:23] is the sub-list for method output_type
-	13, // [13:18] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	4,  // 0: cubelet.services.runtime.v1.GetCapabilitiesResponse.capabilities:type_name -> cubelet.services.runtime.v1.Capability
+	6,  // 1: cubelet.services.runtime.v1.PrepareSandboxRequest.pod:type_name -> cubelet.services.runtime.v1.PodIdentity
+	7,  // 2: cubelet.services.runtime.v1.PrepareSandboxRequest.resources:type_name -> cubelet.services.runtime.v1.ResourceRequest
+	8,  // 3: cubelet.services.runtime.v1.PrepareSandboxRequest.network:type_name -> cubelet.services.runtime.v1.NetworkIntent
+	11, // 4: cubelet.services.runtime.v1.NetworkAttachment.routes:type_name -> cubelet.services.runtime.v1.Route
+	12, // 5: cubelet.services.runtime.v1.NetworkAttachment.neighbors:type_name -> cubelet.services.runtime.v1.Neighbor
+	13, // 6: cubelet.services.runtime.v1.NetworkAttachment.fd_handoff:type_name -> cubelet.services.runtime.v1.FDHandoffDescriptor
+	10, // 7: cubelet.services.runtime.v1.PreparedSandbox.assets:type_name -> cubelet.services.runtime.v1.RuntimeAssets
+	14, // 8: cubelet.services.runtime.v1.PreparedSandbox.network:type_name -> cubelet.services.runtime.v1.NetworkAttachment
+	15, // 9: cubelet.services.runtime.v1.PrepareSandboxResponse.sandbox:type_name -> cubelet.services.runtime.v1.PreparedSandbox
+	0,  // 10: cubelet.services.runtime.v1.InspectSandboxResponse.state:type_name -> cubelet.services.runtime.v1.SandboxResourceState
+	15, // 11: cubelet.services.runtime.v1.InspectSandboxResponse.sandbox:type_name -> cubelet.services.runtime.v1.PreparedSandbox
+	1,  // 12: cubelet.services.runtime.v1.ReconcileEntry.disposition:type_name -> cubelet.services.runtime.v1.ReconcileDisposition
+	22, // 13: cubelet.services.runtime.v1.ReconcileSandboxesResponse.entries:type_name -> cubelet.services.runtime.v1.ReconcileEntry
+	2,  // 14: cubelet.services.runtime.v1.FDHandoffResponseV1.code:type_name -> cubelet.services.runtime.v1.FDHandoffCode
+	3,  // 15: cubelet.services.runtime.v1.RuntimeResource.GetCapabilities:input_type -> cubelet.services.runtime.v1.GetCapabilitiesRequest
+	9,  // 16: cubelet.services.runtime.v1.RuntimeResource.PrepareSandbox:input_type -> cubelet.services.runtime.v1.PrepareSandboxRequest
+	17, // 17: cubelet.services.runtime.v1.RuntimeResource.ReleaseSandbox:input_type -> cubelet.services.runtime.v1.ReleaseSandboxRequest
+	19, // 18: cubelet.services.runtime.v1.RuntimeResource.InspectSandbox:input_type -> cubelet.services.runtime.v1.InspectSandboxRequest
+	21, // 19: cubelet.services.runtime.v1.RuntimeResource.ReconcileSandboxes:input_type -> cubelet.services.runtime.v1.ReconcileSandboxesRequest
+	5,  // 20: cubelet.services.runtime.v1.RuntimeResource.GetCapabilities:output_type -> cubelet.services.runtime.v1.GetCapabilitiesResponse
+	16, // 21: cubelet.services.runtime.v1.RuntimeResource.PrepareSandbox:output_type -> cubelet.services.runtime.v1.PrepareSandboxResponse
+	18, // 22: cubelet.services.runtime.v1.RuntimeResource.ReleaseSandbox:output_type -> cubelet.services.runtime.v1.ReleaseSandboxResponse
+	20, // 23: cubelet.services.runtime.v1.RuntimeResource.InspectSandbox:output_type -> cubelet.services.runtime.v1.InspectSandboxResponse
+	23, // 24: cubelet.services.runtime.v1.RuntimeResource.ReconcileSandboxes:output_type -> cubelet.services.runtime.v1.ReconcileSandboxesResponse
+	20, // [20:25] is the sub-list for method output_type
+	15, // [15:20] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_api_services_runtime_v1_runtime_proto_init() }
@@ -1601,8 +1924,8 @@ func file_api_services_runtime_v1_runtime_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_services_runtime_v1_runtime_proto_rawDesc), len(file_api_services_runtime_v1_runtime_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   20,
+			NumEnums:      3,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
