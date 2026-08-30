@@ -61,7 +61,7 @@ cargo check -p containerd-shim-cube-rs
 
 - 目标：香港二区我们创建的 `ins-4dyul5ag`（名称含“勿删”），16C32G，Linux 6.6 PVM host，`/dev/kvm` 可用，containerd 2.3.4。
 - 只读基线 TAT：`inv-b82na40m3i` 成功；确认 `/opt/cubesandbox-src` 仅含早期 S0.3 overlay，不含 RuntimeResource/S1.1 源码。
-- 待执行：把当前分支相对公开基线的 245KB Git bundle（SHA-256 `fe2b693329a59daf7e4214b704d3afef66ed6a0aaac0c99a6d2568384563ed97`）同步到该 CVM，构建当前 CubeShim/Cubelet，并完成真实 Create→Start→Status→Stop→Shutdown 与异常回滚。
+- 待执行：把公开基线到实现提交 `dfdc0455` 的 175KB binary patch（SHA-256 `1c97db5836fd39735cb08b1bbf8d1b6a10ae1d4e2ac2caf191fed7fc591c7f6a`）同步到该 CVM，构建当前 CubeShim/Cubelet，并完成真实 Create→Start→Status→Stop→Shutdown 与异常回滚。
 - 阻塞：执行策略要求用户在聊天中明确批准具体源码 payload 和目的地；未获批准前不通过公开 push、其他 bucket 或间接命令绕过。
 
 S1.1 在真实 VM 成功链路、清理检查和 subagent `APPROVE` 前不得标记 `DONE`。

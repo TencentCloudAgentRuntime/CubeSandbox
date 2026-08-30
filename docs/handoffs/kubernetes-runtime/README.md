@@ -22,7 +22,7 @@ CubeShim 96 项单测与 cargo check 通过；Cubelet RuntimeResource/plugin Go 
 
 ## 阻塞
 
-执行策略要求用户明确批准：把当前分支的 245KB Git bundle 上传到新建私有 COS `cubesandbox-k8s-poc-20260831-1251707795`，再下载到我们创建的 CVM `ins-4dyul5ag`。不得绕过。
+执行策略要求用户明确批准：把截至实现提交 `dfdc0455` 的 175KB binary patch 上传到新建私有 COS `cubesandbox-k8s-poc-20260831-1251707795`，再下载到我们创建的 CVM `ins-4dyul5ag`。不得绕过。
 
 ## 受保护路径
 
