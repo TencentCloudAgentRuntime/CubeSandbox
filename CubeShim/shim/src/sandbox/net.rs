@@ -86,6 +86,11 @@ impl Net {
         let mut arps = Vec::new();
         for arp in self.arps.iter() {
             let addr = protoc::types::IPAddress {
+                family: if arp.family == protoc::types::IPFamily::v6 as u32 {
+                    protoc::types::IPFamily::v6
+                } else {
+                    protoc::types::IPFamily::v4
+                },
                 address: arp.dest_ip.clone(),
                 ..Default::default()
             };
@@ -169,6 +174,8 @@ pub struct Arp {
     pub ll_addr: String,
     pub state: u32,
     pub flags: u32,
+    #[serde(default)]
+    pub family: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

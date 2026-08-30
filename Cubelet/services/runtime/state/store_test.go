@@ -5,6 +5,9 @@ package state
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -50,6 +53,33 @@ func requireCode(t *testing.T, err error, code codes.Code) {
 	t.Helper()
 	if status.Code(err) != code {
 		t.Fatalf("error=%v code=%s, want %s", err, status.Code(err), code)
+	}
+}
+
+func TestListSandboxIDsSortsAndRejectsCorruptState(t *testing.T) {
+	dir := t.TempDir()
+	store := openTestStore(t, dir, deterministicGenerator())
+	for _, id := range []string{"sandbox-z", "sandbox-a"} {
+		_, err := store.Prepare(PrepareRequest{SandboxID: id, Generation: 1, IdempotencyKey: "prepare-" + id, PayloadDigest: "digest-" + id})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ignored.txt"), []byte("ignored"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := store.ListSandboxIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"sandbox-a", "sandbox-z"}; !reflect.DeepEqual(ids, want) {
+		t.Fatalf("ids=%v want=%v", ids, want)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "corrupt.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ListSandboxIDs(); status.Code(err) != codes.Unavailable {
+		t.Fatalf("corrupt state error=%v code=%s", err, status.Code(err))
 	}
 }
 

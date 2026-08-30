@@ -114,6 +114,20 @@ func newTestService(t *testing.T, store *state.Store, adapter Adapter) (*Service
 	return service, registry
 }
 
+func TestServiceGetCapabilitiesRejectsUnsupportedClientVersion(t *testing.T) {
+	store, err := state.Open(t.TempDir(), serviceGenerator())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, _ := newTestService(t, store, newServiceFakeAdapter())
+	if _, err := service.GetCapabilities(context.Background(), nil); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("nil request error=%v code=%s", err, status.Code(err))
+	}
+	if _, err := service.GetCapabilities(context.Background(), &runtimev1.GetCapabilitiesRequest{ClientApiVersion: APIVersion + 1}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unsupported version error=%v code=%s", err, status.Code(err))
+	}
+}
+
 func TestServicePrepareReleaseIsIdempotentAndLeaseScoped(t *testing.T) {
 	ctx := context.Background()
 	store, err := state.Open(t.TempDir(), serviceGenerator())

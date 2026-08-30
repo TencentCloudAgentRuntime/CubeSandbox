@@ -330,6 +330,7 @@ pub(crate) struct RuntimeLease {
 
 impl RuntimeLease {
     pub(crate) async fn acquire_tap(&self) -> Result<std::fs::File, String> {
+        preflight_runtime_environment_at(&self.sandbox, Path::new("/dev/kvm"))?;
         let sandbox = self.sandbox.clone();
         tokio::task::spawn_blocking(move || acquire_tap_blocking(&sandbox))
             .await
@@ -500,6 +501,57 @@ pub(crate) async fn prepare(
     Ok(RuntimeLease { endpoint, sandbox })
 }
 
+fn preflight_runtime_environment_at(
+    sandbox: &PreparedSandbox,
+    kvm_path: &Path,
+) -> Result<(), String> {
+    let assets = sandbox
+        .assets
+        .as_ref()
+        .ok_or_else(|| "Cubelet returned no runtime assets".to_string())?;
+    for (name, path) in [
+        ("kernel", assets.kernel_path.as_str()),
+        ("agent", assets.agent_path.as_str()),
+        ("guest image", assets.guest_image_path.as_str()),
+    ] {
+        let path = Path::new(path);
+        if !path.is_absolute() {
+            return Err(format!(
+                "RuntimeResource {name} path must be absolute: {}",
+                path.display()
+            ));
+        }
+        let metadata = path
+            .metadata()
+            .map_err(|error| format!("stat RuntimeResource {name} {}: {error}", path.display()))?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "RuntimeResource {name} is not a file: {}",
+                path.display()
+            ));
+        }
+    }
+    let shared_root = Path::new(&assets.shared_root);
+    let metadata = shared_root.metadata().map_err(|error| {
+        format!(
+            "stat RuntimeResource shared root {}: {error}",
+            shared_root.display()
+        )
+    })?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "RuntimeResource shared root is not a directory: {}",
+            shared_root.display()
+        ));
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(kvm_path)
+        .map_err(|error| format!("open KVM device {}: {error}", kvm_path.display()))?;
+    Ok(())
+}
+
 fn pod_metadata(config: &CriPodSandboxConfig) -> Result<&CriPodSandboxMetadata, String> {
     let metadata = config
         .metadata
@@ -629,7 +681,7 @@ fn inject_annotations(
 #[derive(Serialize)]
 struct NetConfig<'a> {
     interfaces: Vec<NetInterface<'a>>,
-    routes: &'a [Route],
+    routes: Vec<NetRoute<'a>>,
     arps: Vec<Arp<'a>>,
 }
 
@@ -654,12 +706,35 @@ struct NetIp<'a> {
 }
 
 #[derive(Serialize)]
+struct NetRoute<'a> {
+    family: u32,
+    dest: &'a str,
+    gateway: &'a str,
+    source: &'a str,
+    device: &'a str,
+    scope: u32,
+    onlink: bool,
+}
+
+#[derive(Serialize)]
 struct Arp<'a> {
     dest_ip: &'a str,
     device: &'a str,
     ll_addr: &'a str,
     state: u32,
     flags: u32,
+    family: u32,
+}
+
+fn ip_family(address: &str) -> Result<u32, String> {
+    let address = address.split_once('/').map_or(address, |(ip, _)| ip);
+    match address.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(_)) => Ok(0),
+        Ok(std::net::IpAddr::V6(_)) => Ok(1),
+        Err(error) => Err(format!(
+            "RuntimeResource returned invalid IP {address}: {error}"
+        )),
+    }
 }
 
 fn network_json(network: &NetworkAttachment) -> Result<String, String> {
@@ -670,7 +745,7 @@ fn network_json(network: &NetworkAttachment) -> Result<String, String> {
             .ok_or_else(|| format!("RuntimeResource returned invalid CIDR {address}"))?;
         ips.push(NetIp {
             ip,
-            family: 0,
+            family: ip_family(ip)?,
             mask: mask
                 .parse()
                 .map_err(|error| format!("parse CIDR {address}: {error}"))?,
@@ -688,18 +763,41 @@ fn network_json(network: &NetworkAttachment) -> Result<String, String> {
             ips,
             qos: None,
         }],
-        routes: &network.routes,
+        routes: network
+            .routes
+            .iter()
+            .map(|route| {
+                let family_source = [&route.destination, &route.gateway, &route.source]
+                    .into_iter()
+                    .find(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        "RuntimeResource returned route without an address".to_string()
+                    })?;
+                Ok(NetRoute {
+                    family: ip_family(family_source)?,
+                    dest: &route.destination,
+                    gateway: &route.gateway,
+                    source: &route.source,
+                    device: &route.device,
+                    scope: route.scope,
+                    onlink: false,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?,
         arps: network
             .neighbors
             .iter()
-            .map(|neighbor| Arp {
-                dest_ip: &neighbor.ip,
-                device: &neighbor.device,
-                ll_addr: &neighbor.mac,
-                state: 128,
-                flags: 0,
+            .map(|neighbor| {
+                Ok(Arp {
+                    dest_ip: &neighbor.ip,
+                    device: &neighbor.device,
+                    ll_addr: &neighbor.mac,
+                    state: 128,
+                    flags: 0,
+                    family: ip_family(&neighbor.ip)?,
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>, String>>()?,
     };
     serde_json::to_string(&config).map_err(|error| format!("serialize Cube network: {error}"))
 }
@@ -906,7 +1004,58 @@ mod tests {
         assert_eq!(value["interfaces"][0]["name"], "cb123");
         assert_eq!(value["interfaces"][0]["ips"][0]["mask"], 24);
         assert_eq!(value["routes"][0]["dest"], "0.0.0.0/0");
+        assert_eq!(value["routes"][0]["family"], 0);
         assert_eq!(value["arps"][0]["state"], 128);
+        assert_eq!(value["arps"][0]["family"], 0);
+    }
+
+    #[test]
+    fn network_attachment_derives_ipv6_family() {
+        let mut network = sample_network();
+        network.ips = vec!["2001:db8::2/64".to_string()];
+        network.routes[0].destination = "::/0".to_string();
+        network.routes[0].gateway = "2001:db8::1".to_string();
+        network.routes[0].source = "2001:db8::2".to_string();
+        network.neighbors[0].ip = "2001:db8::1".to_string();
+        let value: serde_json::Value =
+            serde_json::from_str(&network_json(&network).unwrap()).unwrap();
+        assert_eq!(value["interfaces"][0]["ips"][0]["family"], 1);
+        assert_eq!(value["routes"][0]["family"], 1);
+        assert_eq!(value["arps"][0]["family"], 1);
+    }
+
+    #[test]
+    fn network_attachment_rejects_invalid_ip() {
+        let mut network = sample_network();
+        network.ips = vec!["not-an-ip/24".to_string()];
+        assert!(network_json(&network).unwrap_err().contains("invalid IP"));
+    }
+
+    #[test]
+    fn runtime_preflight_checks_assets_shared_root_and_kvm() {
+        let root =
+            std::env::temp_dir().join(format!("cube-runtime-preflight-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("shared")).unwrap();
+        for name in ["kernel", "agent", "guest.img", "kvm"] {
+            std::fs::write(root.join(name), b"test").unwrap();
+        }
+        let sandbox = PreparedSandbox {
+            assets: Some(RuntimeAssets {
+                kernel_path: root.join("kernel").display().to_string(),
+                agent_path: root.join("agent").display().to_string(),
+                guest_image_path: root.join("guest.img").display().to_string(),
+                shared_root: root.join("shared").display().to_string(),
+            }),
+            ..Default::default()
+        };
+        preflight_runtime_environment_at(&sandbox, &root.join("kvm")).unwrap();
+        std::fs::remove_file(root.join("kernel")).unwrap();
+        assert!(
+            preflight_runtime_environment_at(&sandbox, &root.join("kvm"))
+                .unwrap_err()
+                .contains("stat RuntimeResource kernel")
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

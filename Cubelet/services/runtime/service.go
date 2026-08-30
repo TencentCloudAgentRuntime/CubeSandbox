@@ -129,7 +129,13 @@ func (s *Service) Recover(ctx context.Context) error {
 	return nil
 }
 
-func (s *Service) GetCapabilities(context.Context, *runtimev1.GetCapabilitiesRequest) (*runtimev1.GetCapabilitiesResponse, error) {
+func (s *Service) GetCapabilities(_ context.Context, request *runtimev1.GetCapabilitiesRequest) (*runtimev1.GetCapabilitiesResponse, error) {
+	if request == nil || request.GetClientApiVersion() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "client_api_version must be non-zero")
+	}
+	if request.GetClientApiVersion() != APIVersion {
+		return nil, status.Errorf(codes.FailedPrecondition, "unsupported client api version %d; server supports %d", request.GetClientApiVersion(), APIVersion)
+	}
 	return &runtimev1.GetCapabilitiesResponse{
 		ApiVersion: APIVersion,
 		Capabilities: []*runtimev1.Capability{
