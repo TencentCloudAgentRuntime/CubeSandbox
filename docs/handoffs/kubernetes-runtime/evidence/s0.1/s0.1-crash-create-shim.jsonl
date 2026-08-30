@@ -1,0 +1,9 @@
+{"event":"bootstrap.start","instance_id":"b5ae865af35284258b2b33b8292ab242a7b53e43d1762e2a202f8af37038a5d0","namespace":"k8s.io","pid":186013,"socket_dir":"/run/cube-s0-containerd/s","time":"2026-08-30T12:29:17.878592628Z"}
+{"event":"shim.spawned","instance_id":"b5ae865af35284258b2b33b8292ab242a7b53e43d1762e2a202f8af37038a5d0","pid":186013,"shim_pid":186021,"time":"2026-08-30T12:29:17.87917792Z"}
+{"address":"unix:///run/cube-s0-containerd/s/8f18dc57603c5a098dee69e2875a7afe7083efd20b3db07c61b5735b62f1d4a1","event":"bootstrap.started","instance_id":"b5ae865af35284258b2b33b8292ab242a7b53e43d1762e2a202f8af37038a5d0","pid":186013,"protocol":"ttrpc","result":"ok","time":"2026-08-30T12:29:17.879624478Z","version":3}
+{"event":"rpc.begin","method":"/containerd.runtime.sandbox.v1.Sandbox/CreateSandbox","pid":186021,"time":"2026-08-30T12:29:17.882775446Z"}
+{"event":"failpoint.crash-create","pid":186021,"sandbox_id":"b5ae865af35284258b2b33b8292ab242a7b53e43d1762e2a202f8af37038a5d0","time":"2026-08-30T12:29:17.882899942Z"}
+{"event":"bootstrap.delete","instance_id":"b5ae865af35284258b2b33b8292ab242a7b53e43d1762e2a202f8af37038a5d0","pid":186032,"time":"2026-08-30T12:29:17.886148268Z"}
+{"event":"manager.stop","instance_id":"b5ae865af35284258b2b33b8292ab242a7b53e43d1762e2a202f8af37038a5d0","pid":186032,"time":"2026-08-30T12:29:17.886179427Z"}
+{"event":"manager.socket_cleanup","instance_id":"b5ae865af35284258b2b33b8292ab242a7b53e43d1762e2a202f8af37038a5d0","pid":186032,"result":"ok","time":"2026-08-30T12:29:17.88641262Z"}
+{"event":"bootstrap.deleted","exit_status":0,"instance_id":"b5ae865af35284258b2b33b8292ab242a7b53e43d1762e2a202f8af37038a5d0","pid":0,"result":"ok","time":"2026-08-30T12:29:17.886457359Z"}

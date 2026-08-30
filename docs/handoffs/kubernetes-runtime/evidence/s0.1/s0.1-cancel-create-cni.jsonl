@@ -1,0 +1,4 @@
+{"time":"2026-08-30T12:29:18.084420812Z","event":"cni.ADD","container_id":"9bf7e69a09e8bf5d41cac96fe713f361a70edf01f9bdfb78d2114485c02c77ba","netns":"/var/run/netns/cni-9e278e96-dca9-8693-b263-74f4501568e6","ifname":"eth0"}
+{"time":"2026-08-30T12:29:18.100223603Z","event":"cni.ADD.result","result":"ok","status":0,"container_id":"9bf7e69a09e8bf5d41cac96fe713f361a70edf01f9bdfb78d2114485c02c77ba","netns":"/var/run/netns/cni-9e278e96-dca9-8693-b263-74f4501568e6","ifname":"eth0"}
+{"time":"2026-08-30T12:29:19.074484381Z","event":"cni.DEL","container_id":"9bf7e69a09e8bf5d41cac96fe713f361a70edf01f9bdfb78d2114485c02c77ba","netns":"/var/run/netns/cni-9e278e96-dca9-8693-b263-74f4501568e6","ifname":"eth0"}
+{"time":"2026-08-30T12:29:19.150851881Z","event":"cni.DEL.result","result":"ok","status":0,"container_id":"9bf7e69a09e8bf5d41cac96fe713f361a70edf01f9bdfb78d2114485c02c77ba","netns":"/var/run/netns/cni-9e278e96-dca9-8693-b263-74f4501568e6","ifname":"eth0"}

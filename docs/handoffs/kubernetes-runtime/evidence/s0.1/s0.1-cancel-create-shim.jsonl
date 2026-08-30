@@ -1,0 +1,8 @@
+{"event":"bootstrap.start","instance_id":"9bf7e69a09e8bf5d41cac96fe713f361a70edf01f9bdfb78d2114485c02c77ba","namespace":"k8s.io","pid":186228,"socket_dir":"/run/cube-s0-containerd/s","time":"2026-08-30T12:29:18.108340067Z"}
+{"event":"shim.spawned","instance_id":"9bf7e69a09e8bf5d41cac96fe713f361a70edf01f9bdfb78d2114485c02c77ba","pid":186228,"shim_pid":186237,"time":"2026-08-30T12:29:18.109052796Z"}
+{"address":"unix:///run/cube-s0-containerd/s/8b382c9d9282378551a374c94ebdb1de7179f2d9106b0a41fce361a82d878197","event":"bootstrap.started","instance_id":"9bf7e69a09e8bf5d41cac96fe713f361a70edf01f9bdfb78d2114485c02c77ba","pid":186228,"protocol":"ttrpc","result":"ok","time":"2026-08-30T12:29:18.109073935Z","version":3}
+{"event":"rpc.begin","method":"/containerd.runtime.sandbox.v1.Sandbox/CreateSandbox","pid":186237,"time":"2026-08-30T12:29:18.112719809Z"}
+{"event":"failpoint.delay-create","pid":186237,"sandbox_id":"9bf7e69a09e8bf5d41cac96fe713f361a70edf01f9bdfb78d2114485c02c77ba","time":"2026-08-30T12:29:18.112863235Z"}
+{"event":"rpc.begin","method":"/containerd.runtime.sandbox.v1.Sandbox/ShutdownSandbox","pid":186237,"time":"2026-08-30T12:29:19.068587273Z"}
+{"event":"sandbox.shutdown","pid":186237,"sandbox_id":"9bf7e69a09e8bf5d41cac96fe713f361a70edf01f9bdfb78d2114485c02c77ba","time":"2026-08-30T12:29:19.06868341Z"}
+{"event":"rpc.end","method":"/containerd.runtime.sandbox.v1.Sandbox/ShutdownSandbox","pid":186237,"result":"ok","time":"2026-08-30T12:29:19.06870641Z"}

@@ -1,0 +1,18 @@
+preflight cleanup pods=0 containers=0 mounts=0 shims=0 sandbox_meta=0 sockets=0 state_bundles=0 root_bundles=0 netns=0 ipam=0
+normal cleanup pods=0 containers=0 mounts=0 shims=0 sandbox_meta=0 sockets=0 state_bundles=0 root_bundles=0 netns=0 ipam=0
+normal cni add_ok=1 del_ok=2
+normal trace bootstrap=3/ttrpc endpoint=unix:///run/cube-s0-containerd/s/ab4716e553f191a3fce74061b4930253c6b627be53eaa1c1dbcc4877918faa82 sandbox_task_pid=185171 ordered_rpcs=14
+normal state=SANDBOX_READY exit=23 output=cube-s0-task-ok
+fail-create cleanup pods=0 containers=0 mounts=0 shims=0 sandbox_meta=0 sockets=0 state_bundles=0 root_bundles=0 netns=0 ipam=0
+fail-create cni add_ok=1 del_ok=1
+fail-create trace failpoint=fail-create shutdown=True delete_helper=True
+fail-start cleanup pods=0 containers=0 mounts=0 shims=0 sandbox_meta=0 sockets=0 state_bundles=0 root_bundles=0 netns=0 ipam=0
+fail-start cni add_ok=1 del_ok=1
+fail-start trace failpoint=fail-start shutdown=True delete_helper=True
+crash-create cleanup pods=0 containers=0 mounts=0 shims=0 sandbox_meta=0 sockets=0 state_bundles=0 root_bundles=0 netns=0 ipam=0
+crash-create cni add_ok=1 del_ok=1
+crash-create trace failpoint=crash-create shutdown=False delete_helper=True
+cancel-create cleanup pods=0 containers=0 mounts=0 shims=0 sandbox_meta=0 sockets=0 state_bundles=0 root_bundles=0 netns=0 ipam=0
+cancel-create cni add_ok=1 del_ok=1
+cancel-create trace failpoint=delay-create shutdown=True delete_helper=False
+S0.1 verification PASS

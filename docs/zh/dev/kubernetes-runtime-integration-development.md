@@ -124,7 +124,7 @@ tests/e2e/kubernetes-runtime/
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
-| S0.1 Sandbox API | `VALIDATING` | Codex | 增加显式启用的双服务探针、独立 containerd/CNI 配置和 trace；真实 CRI 正常链路及四类异常清理已通过 | 本节“[S0.1 Sandbox API 探针结果](#s0-1-sandbox-api-探针结果-2026-08-30)”；TAT `inv-6823ei0b0e`、`inv-0823cv0q03` | subagent 独立 review；问题清零并确认通过后改为 `DONE` |
+| S0.1 Sandbox API | `VALIDATING` | Codex | 双服务探针、独立配置、固定 CRI 输入和一键验收脚本已提交；真实正常链路及四类明确异常通过，10 类残留均为 0 | 实现 `f38622c2`、`6a53a52d`、`33dbf479`；TAT `inv-68246d0jt1`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.1/README.md) | subagent 独立 review；问题清零并确认通过后改为 `DONE` |
 | S0.2 RootFS/virtiofs | `NOT_STARTED` | 待指定 | — | — | 验证标准 rootfs 和动态 bind/unmount |
 | S0.3 CNI 网络 | `NOT_STARTED` | 待指定 | — | — | 选择首个 CNI 并建立 VM 网络原型 |
 | S0.4 组件接口 | `NOT_STARTED` | 待指定 | — | — | 形成最小版本化 RPC 草案 |
@@ -156,10 +156,10 @@ runc Task v3 Service。此处复用 runc 只用于隔离验证 containerd 契约
 | 配置 | 独立 root/state/socket，不替换节点主 containerd；handler `cube-s0` 使用 `runtime_type = "io.containerd.cube-s0.v1"`、绝对 `runtime_path` 和 `sandboxer = "shim"` |
 | 正常链路 | CNI ADD → bootstrap v3 → Sandbox Create/Start/Wait → Sandbox Status/Platform → Task v3 Create/Start/Wait/Kill/Delete → Sandbox Stop → CNI DEL → Sandbox Shutdown → shim delete |
 | CRI 结果 | `SANDBOX_READY`，Pod IP `10.88.0.11`；BusyBox 标准 OCI snapshot 进程输出 `cube-s0-task-ok` 并准确返回 exit code 23 |
-| 正常清理 | 删除后 CRI Pod=0、Container=0、mount=0、shim 进程=0、containerd sandbox metadata=0 |
-| 异常清理 | `CreateSandbox` 失败、`StartSandbox` 失败、Create 中 shim exit(86)、延迟 Create 后客户端取消均回到上述五项 0；每例均有 CNI ADD/DEL |
+| 正常清理 | 删除后 CRI Pod/Container、mount、shim 进程/socket、sandbox metadata、state/root bundle、netns、host-local IP 分配 10 项均为 0 |
+| 异常清理 | `CreateSandbox` 失败、`StartSandbox` 失败、Create 中 shim exit(86)、延迟 Create 后客户端取消均回到上述 10 项 0；每例均确认 failpoint 命中和 CNI ADD/DEL 成功 |
 | 本地验证 | `go test -race ./...`、`go vet ./...`、`git diff --check` 通过 |
-| 云端证据 | 基线复验 `inv-a8234e07gq`；最终正常 trace `inv-6823ei0b0e`；四类异常 `inv-0823cv0q03` |
+| 云端证据 | 仓库脚本完整重放 `inv-68246d0jt1`；原始 JSONL、失败输出和摘要位于 `docs/handoffs/kubernetes-runtime/evidence/s0.1/` |
 
 实测确认以下非显然契约：
 
@@ -173,6 +173,10 @@ runc Task v3 Service。此处复用 runc 只用于隔离验证 containerd 契约
 - Create/Start 失败由 shim controller 调用 Shutdown 并删除 shim/bundle；shim 已崩溃时
   Shutdown 可能失败，但 containerd 仍执行 shim delete；客户端取消由 CRI 回滚 CNI，
   最终同样不能残留 metadata、mount、socket 或进程。
+- 首轮 crash 探针暴露出 delete helper 未删除死 shim socket；提交 `6a53a52d` 改为从
+  `bootstrap.json` 读取精确地址并传播清理错误。新矩阵开始前只删除两个已验证不可连接
+  的旧 socket，之后 normal、fail-create、fail-start、crash-create、cancel-create 每例
+  均断言 socket=0。
 
 S0.1 尚未证明 Cube Guest、virtiofs 或 Cube-backed Task；这些属于 S0.2，不能用本
 探针中的 runc 成功结果代替。

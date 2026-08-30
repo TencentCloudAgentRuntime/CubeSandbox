@@ -1,0 +1,13 @@
+{"event":"bootstrap.start","instance_id":"651a7504aa16bd9e42bb1bc6f633a1a4fe825a7591470cc066ea097c4c4b6c5f","namespace":"k8s.io","pid":185594,"socket_dir":"/run/cube-s0-containerd/s","time":"2026-08-30T12:29:17.409468489Z"}
+{"event":"shim.spawned","instance_id":"651a7504aa16bd9e42bb1bc6f633a1a4fe825a7591470cc066ea097c4c4b6c5f","pid":185594,"shim_pid":185603,"time":"2026-08-30T12:29:17.410222228Z"}
+{"address":"unix:///run/cube-s0-containerd/s/9dfedfb3342cedf972ed8bc258d2f363b4823dc2d162fb67fc6b880b70d0696a","event":"bootstrap.started","instance_id":"651a7504aa16bd9e42bb1bc6f633a1a4fe825a7591470cc066ea097c4c4b6c5f","pid":185594,"protocol":"ttrpc","result":"ok","time":"2026-08-30T12:29:17.410242237Z","version":3}
+{"event":"rpc.begin","method":"/containerd.runtime.sandbox.v1.Sandbox/CreateSandbox","pid":185603,"time":"2026-08-30T12:29:17.414044076Z"}
+{"error":"cube S0 failpoint: CreateSandbox","event":"failpoint.fail-create","pid":185603,"sandbox_id":"651a7504aa16bd9e42bb1bc6f633a1a4fe825a7591470cc066ea097c4c4b6c5f","time":"2026-08-30T12:29:17.414175362Z"}
+{"error":"cube S0 failpoint: CreateSandbox","event":"rpc.end","method":"/containerd.runtime.sandbox.v1.Sandbox/CreateSandbox","pid":185603,"time":"2026-08-30T12:29:17.414184212Z"}
+{"event":"rpc.begin","method":"/containerd.runtime.sandbox.v1.Sandbox/ShutdownSandbox","pid":185603,"time":"2026-08-30T12:29:17.414319668Z"}
+{"event":"sandbox.shutdown","pid":185603,"sandbox_id":"651a7504aa16bd9e42bb1bc6f633a1a4fe825a7591470cc066ea097c4c4b6c5f","time":"2026-08-30T12:29:17.414363907Z"}
+{"event":"rpc.end","method":"/containerd.runtime.sandbox.v1.Sandbox/ShutdownSandbox","pid":185603,"result":"ok","time":"2026-08-30T12:29:17.414374267Z"}
+{"event":"bootstrap.delete","instance_id":"651a7504aa16bd9e42bb1bc6f633a1a4fe825a7591470cc066ea097c4c4b6c5f","pid":185613,"time":"2026-08-30T12:29:17.417315901Z"}
+{"event":"manager.stop","instance_id":"651a7504aa16bd9e42bb1bc6f633a1a4fe825a7591470cc066ea097c4c4b6c5f","pid":185613,"time":"2026-08-30T12:29:17.41734138Z"}
+{"event":"manager.socket_cleanup","instance_id":"651a7504aa16bd9e42bb1bc6f633a1a4fe825a7591470cc066ea097c4c4b6c5f","pid":185613,"result":"ok","time":"2026-08-30T12:29:17.417388669Z"}
+{"event":"bootstrap.deleted","exit_status":0,"instance_id":"651a7504aa16bd9e42bb1bc6f633a1a4fe825a7591470cc066ea097c4c4b6c5f","pid":0,"result":"ok","time":"2026-08-30T12:29:17.417404948Z"}

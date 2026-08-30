@@ -1,0 +1,16 @@
+{"event":"bootstrap.start","instance_id":"96b3f375f2d7012afdefa98d075d34466db805471096e6616d66de74f28a429e","namespace":"k8s.io","pid":185806,"socket_dir":"/run/cube-s0-containerd/s","time":"2026-08-30T12:29:17.638178339Z"}
+{"event":"shim.spawned","instance_id":"96b3f375f2d7012afdefa98d075d34466db805471096e6616d66de74f28a429e","pid":185806,"shim_pid":185814,"time":"2026-08-30T12:29:17.638857589Z"}
+{"address":"unix:///run/cube-s0-containerd/s/306fc9303b831d7f1a1143938341123ef8c0f0339ba370f99a5b9d3025b7ed69","event":"bootstrap.started","instance_id":"96b3f375f2d7012afdefa98d075d34466db805471096e6616d66de74f28a429e","pid":185806,"protocol":"ttrpc","result":"ok","time":"2026-08-30T12:29:17.638874938Z","version":3}
+{"event":"rpc.begin","method":"/containerd.runtime.sandbox.v1.Sandbox/CreateSandbox","pid":185814,"time":"2026-08-30T12:29:17.642483683Z"}
+{"annotation_count":0,"bundle_path":"/run/cube-s0-containerd/io.containerd.sandbox.controller.v1.shim/k8s.io/96b3f375f2d7012afdefa98d075d34466db805471096e6616d66de74f28a429e","event":"sandbox.create","netns_path":"/var/run/netns/cni-a39450d4-9aa6-0658-3002-55f1cf0bbea3","pid":185814,"rootfs_mounts":0,"sandbox_id":"96b3f375f2d7012afdefa98d075d34466db805471096e6616d66de74f28a429e","time":"2026-08-30T12:29:17.64260916Z"}
+{"event":"rpc.end","method":"/containerd.runtime.sandbox.v1.Sandbox/CreateSandbox","pid":185814,"result":"ok","time":"2026-08-30T12:29:17.642623469Z"}
+{"event":"rpc.begin","method":"/containerd.runtime.sandbox.v1.Sandbox/StartSandbox","pid":185814,"time":"2026-08-30T12:29:17.642787914Z"}
+{"error":"cube S0 failpoint: StartSandbox","event":"failpoint.fail-start","pid":185814,"sandbox_id":"96b3f375f2d7012afdefa98d075d34466db805471096e6616d66de74f28a429e","time":"2026-08-30T12:29:17.642842983Z"}
+{"error":"cube S0 failpoint: StartSandbox","event":"rpc.end","method":"/containerd.runtime.sandbox.v1.Sandbox/StartSandbox","pid":185814,"time":"2026-08-30T12:29:17.642854783Z"}
+{"event":"rpc.begin","method":"/containerd.runtime.sandbox.v1.Sandbox/ShutdownSandbox","pid":185814,"time":"2026-08-30T12:29:17.642967989Z"}
+{"event":"sandbox.shutdown","pid":185814,"sandbox_id":"96b3f375f2d7012afdefa98d075d34466db805471096e6616d66de74f28a429e","time":"2026-08-30T12:29:17.643000308Z"}
+{"event":"rpc.end","method":"/containerd.runtime.sandbox.v1.Sandbox/ShutdownSandbox","pid":185814,"result":"ok","time":"2026-08-30T12:29:17.643018478Z"}
+{"event":"bootstrap.delete","instance_id":"96b3f375f2d7012afdefa98d075d34466db805471096e6616d66de74f28a429e","pid":185823,"time":"2026-08-30T12:29:17.646331202Z"}
+{"event":"manager.stop","instance_id":"96b3f375f2d7012afdefa98d075d34466db805471096e6616d66de74f28a429e","pid":185823,"time":"2026-08-30T12:29:17.646364081Z"}
+{"event":"manager.socket_cleanup","instance_id":"96b3f375f2d7012afdefa98d075d34466db805471096e6616d66de74f28a429e","pid":185823,"result":"ok","time":"2026-08-30T12:29:17.646579564Z"}
+{"event":"bootstrap.deleted","exit_status":0,"instance_id":"96b3f375f2d7012afdefa98d075d34466db805471096e6616d66de74f28a429e","pid":0,"result":"ok","time":"2026-08-30T12:29:17.646600324Z"}

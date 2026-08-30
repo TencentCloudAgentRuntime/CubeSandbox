@@ -2,7 +2,7 @@
 
 | ID | 问题 | 当前假设 | Owner | 最迟 Stage | 状态 | 所需证据/最终决定 |
 |---|---|---|---|---|---|---|
-| K8S-OQ-001 | containerd 2.3 Sandbox API 的实际 CRI 调用顺序和配置字段是什么？ | 使用 `sandboxer = "shim"`，CubeShim 同时承载 Sandbox/Task | Codex | S0 | VALIDATING | containerd 2.3.4 云基线与现有 CubeShim 构建/单测已通过；仍需调用 trace、最小 runtime 配置和异常清理结果 |
+| K8S-OQ-001 | containerd 2.3 Sandbox API 的实际 CRI 调用顺序和配置字段是什么？ | 使用 `sandboxer = "shim"`，CubeShim 同时承载 Sandbox/Task | Codex | S0 | DECIDED | handler 使用 `runtime_type/runtime_path/sandboxer = "shim"`；bootstrap v3 返回 ttrpc endpoint，Sandbox/Task 同 PID；CNI ADD 在 Create 前，Stop 后 CNI DEL，再 Shutdown/delete。正常与四类异常的 10 类残留均为 0，证据 `inv-68246d0jt1` 和 `evidence/s0.1/` |
 | K8S-OQ-002 | VM 启动后新增 bind mount 是否能被固定 virtiofs shared root 稳定看到？ | 每 Pod 一个固定 shared root 可支持动态容器/卷 | 待指定 | S0 | OPEN | bind/rename/unmount/inotify 原型测试 |
 | K8S-OQ-003 | PoC 网络首先采用哪种数据面？ | 先用 Cilium，保留 VPC-CNI/Global Router adapter | 待指定 | S0 | OPEN | Pod IP、Service、DNS、NetworkPolicy、跨节点实测 |
 | K8S-OQ-004 | Kubernetes 路径能否完全使用标准 `CreateTaskRequest.rootfs`？ | 可以，legacy 私有注解只服务原链路 | 待指定 | S0 | OPEN | overlayfs rootfs create/delete/restart 测试 |
