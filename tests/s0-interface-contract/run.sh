@@ -11,6 +11,10 @@ run_contract_checks() {
   grep -Eq '[.]version\(' CubeShim/shim/src/sandbox/sb.rs
   grep -Eq 'AGENT_PROTOCOL_VERSION: u32 = 1' agent/src/rpc.rs
   grep -Eq 'SCM_RIGHTS' Cubelet/api/services/runtime/v1/runtime.proto
+  grep -Eq 'message FDHandoffRequestV1' Cubelet/api/services/runtime/v1/runtime.proto
+  grep -Eq 'string lease_id = 4;' Cubelet/api/services/runtime/v1/runtime.proto
+  grep -Eq 'string network_handle = 5;' Cubelet/api/services/runtime/v1/runtime.proto
+  grep -Eq 'string token = 6;' Cubelet/api/services/runtime/v1/runtime.proto
 
   if grep -En 'rpc (CreateContainer|CreateTask|RunPodSandbox|PullImage|CreateSnapshot)' \
     Cubelet/api/services/runtime/v1/runtime.proto; then
@@ -27,7 +31,7 @@ run_contract_checks() {
 
   (
     cd Cubelet
-    go test ./api/services/runtime/v1
+    go test ./api/services/runtime/v1 ./services/runtime/...
   )
 
   cargo fmt --manifest-path CubeShim/Cargo.toml --all -- --check
