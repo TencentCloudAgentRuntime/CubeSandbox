@@ -1,6 +1,6 @@
 # CubeSandbox Kubernetes RuntimeClass PoC 开发计划
 
-> 状态：评审基线  
+> 状态：执行中（S0.1）
 > 日期：2026-08-30  
 > 总体设计：[CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)  
 > 活动交接：[Kubernetes RuntimeClass PoC Handoff](../../../docs/handoffs/kubernetes-runtime/README.md)
@@ -120,14 +120,29 @@ tests/e2e/kubernetes-runtime/
 | 方案与开发准备 | `DONE` | 总体设计、S0～S6 开发计划、轻量 handoff 和未决问题表 | `95b3164a`、`3b564b76`；VitePress 构建通过 | 从 S0.1 开始技术探针 |
 
 ## 5. S0：架构技术探针
-> Milestone 状态：`NOT_STARTED`。入口条件已满足，等待为 S0.1～S0.4 指定 Owner。
+> Milestone 状态：`IN_PROGRESS`。S0.1 已开始，S0.2～S0.4 等待指定 Owner。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
-| S0.1 Sandbox API | `NOT_STARTED` | 待指定 | — | — | 运行 containerd 2.3 最小 shim 并记录调用 trace |
+| S0.1 Sandbox API | `IN_PROGRESS` | Codex | 香港 PVM 开发节点、containerd 2.3.4、XFS reflink、CubeShim 构建与单测基线已就绪 | 本节“[S0.1 云上开发基线](#s0-1-云上开发基线-2026-08-30)”；TAT `inv-3822g20r7i` | 实现 containerd 2.3 最小 Sandbox shim，记录 CRI/Sandbox/Task 调用 trace 和异常清理 |
 | S0.2 RootFS/virtiofs | `NOT_STARTED` | 待指定 | — | — | 验证标准 rootfs 和动态 bind/unmount |
 | S0.3 CNI 网络 | `NOT_STARTED` | 待指定 | — | — | 选择首个 CNI 并建立 VM 网络原型 |
 | S0.4 组件接口 | `NOT_STARTED` | 待指定 | — | — | 形成最小版本化 RPC 草案 |
+
+### S0.1 云上开发基线（2026-08-30）
+
+| 项目 | 结果 |
+|---|---|
+| 节点 | 腾讯云香港二区 `ins-pl7mznaa`，`SA5.4XLARGE32`（16C32G），镜像 `img-qansmwme`，Ubuntu 24.04；带 `billing=blakezyli` 标签 |
+| PVM/KVM | 内核 `6.12.33+`，`kvm_pvm` 已加载，`/dev/kvm` 可用；`KVM_GET_API_VERSION=12`、`KVM_CREATE_VM=ok` |
+| containerd | 官方校验后的 `v2.3.4`，systemd 使用 `/usr/local/bin/containerd`；CRI images/runtime 插件均为 `ok`；Docker 29.2.1 正常接入同一 containerd |
+| 存储 | 新 200GB 数据盘 `/dev/vdb` 以 XFS 挂载到 `/data/cubelet`，`reflink=1`，写入 `/etc/fstab` |
+| 源码与构建 | 云节点从公开 `master` 检出精确基线 `09274501dd12e47dbed2dcc77d8eb67dd661d49c`；`make shim` 生成 `containerd-shim-cube-rs` 和 `cube-runtime` |
+| 测试 | `make shim-test`：shim 61 个、cube-runtime 1 个测试通过，0 失败；构建 TAT `inv-38221eg40s`，测试 TAT `inv-6822eegkw4`，汇总 TAT `inv-3822g20r7i` |
+| 网络/访问 | 复用账号内现有 `cubesandbox-cluster-subnet`；PoC 专属安全组 `sg-k3absy6z`。TAT Agent 在线；公网 SSH 转发返回 `502 Server UnReachable`，当前以 TAT 执行命令，不阻塞自动化验证 |
+| 集群 | 已确认香港地域可创建 Kubernetes 1.36.2；为避免在架构探针前扩张成本，尚未创建专属 TKE 集群 |
+
+上述结果只证明云上开发基线、KVM API 和现有 CubeShim 可构建/可测试。尚未证明完整 Cube Guest 启动，也未得到 containerd Sandbox API 调用 trace，因此 S0.1 保持 `IN_PROGRESS`。
 
 
 ### 目标
