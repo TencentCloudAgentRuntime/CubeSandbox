@@ -371,12 +371,12 @@ impl SandboxService {
 
     async fn finish_stop(&self, previous: Phase, result: Result<(), String>, released: bool) {
         let mut state = self.lifecycle.state.lock().await;
+        if released {
+            state.runtime = None;
+        }
         match result {
             Ok(()) => {
                 state.phase = Phase::Stopped;
-                if released {
-                    state.runtime = None;
-                }
                 state.exit_status = 0;
                 state.exited_at = Some(now_timestamp());
                 state.last_error = None;
@@ -436,6 +436,7 @@ impl SandboxService {
             sandbox.clear_runtime_tap();
             result
         };
+        let released = release.is_ok();
         let result = match (release, abort) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) => Err(format!("release RuntimeResource: {error}")),
@@ -445,10 +446,12 @@ impl SandboxService {
             )),
         };
         let mut state = self.lifecycle.state.lock().await;
+        if released {
+            state.runtime = None;
+        }
         match result {
             Ok(()) => {
                 state.phase = Phase::Shutdown;
-                state.runtime = None;
                 state.last_error = None;
                 if state.exited_at.is_none() {
                     state.exited_at = Some(now_timestamp());
@@ -730,14 +733,19 @@ impl Sandbox for SandboxService {
         req: api::ShutdownSandboxRequest,
     ) -> TtrpcResult<api::ShutdownSandboxResponse> {
         self.validate_id(&req.sandbox_id)?;
-        let should_shutdown = {
+        let should_shutdown = loop {
+            let notified = self.lifecycle.changed.notified();
             let mut state = self.lifecycle.state.lock().await;
             match state.phase {
+                Phase::Creating | Phase::Starting | Phase::Stopping => {
+                    drop(state);
+                    notified.await;
+                }
                 Phase::Shutdown => return Ok(api::ShutdownSandboxResponse::new()),
-                Phase::ShuttingDown => false,
+                Phase::ShuttingDown => break false,
                 _ => {
                     state.phase = Phase::ShuttingDown;
-                    true
+                    break true;
                 }
             }
         };
