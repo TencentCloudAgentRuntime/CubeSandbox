@@ -98,7 +98,37 @@ tests/e2e/kubernetes-runtime/
 | S5 | 可部署 PoC 验收 | 安装升级、性能、兼容性、Node E2E | PoC 验收报告和已知限制完整 |
 | S6 | 二期快照能力 | Snapshot/Restore CRD、Pause/Resume | 从快照创建新 Pod 和一致性验证通过 |
 
+### 4.1 执行状态规则
+
+本文档同时是 Stage 进度的唯一权威来源；handoff 只引用当前 `Sx.x`，不复制整张进度表。
+
+| 状态 | 含义 |
+|---|---|
+| `NOT_STARTED` | 尚未开始 |
+| `IN_PROGRESS` | 正在实现，尚未进入完整验收 |
+| `VALIDATING` | 实现已具备，正在执行该 Work Stage 的验收标准 |
+| `DONE` | 全部验收标准通过，并已填写可复现证据 |
+| `BLOCKED` | 存在阻塞，必须在“下一步”中写解除条件 |
+| `DEFERRED` | 不阻塞当前 Milestone，已明确新的目标 Stage |
+
+`Sx` 的状态由必需的 `Sx.x` 聚合：只有全部为 `DONE` 才能标记 Milestone 完成。代码合入但尚未通过验收时只能是 `VALIDATING`。
+
+### 4.2 当前准备状态
+
+| 项目 | 状态 | 已完成 | 证据 | 下一步 |
+|---|---|---|---|---|
+| 方案与开发准备 | `DONE` | 总体设计、S0～S6 开发计划、轻量 handoff 和未决问题表 | `95b3164a`、`3b564b76`；VitePress 构建通过 | 从 S0.1 开始技术探针 |
+
 ## 5. S0：架构技术探针
+> Milestone 状态：`NOT_STARTED`。入口条件已满足，等待为 S0.1～S0.4 指定 Owner。
+
+| Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
+|---|---|---|---|---|---|
+| S0.1 Sandbox API | `NOT_STARTED` | 待指定 | — | — | 运行 containerd 2.3 最小 shim 并记录调用 trace |
+| S0.2 RootFS/virtiofs | `NOT_STARTED` | 待指定 | — | — | 验证标准 rootfs 和动态 bind/unmount |
+| S0.3 CNI 网络 | `NOT_STARTED` | 待指定 | — | — | 选择首个 CNI 并建立 VM 网络原型 |
+| S0.4 组件接口 | `NOT_STARTED` | 待指定 | — | — | 形成最小版本化 RPC 草案 |
+
 
 ### 目标
 
@@ -121,6 +151,15 @@ tests/e2e/kubernetes-runtime/
 - 不要求生产代码质量；探针代码若合入必须 feature-gated，并附删除或演进说明。
 
 ## 6. S1：单容器纵向 PoC
+> Milestone 状态：`NOT_STARTED`。依赖 S0.1～S0.4 完成。
+
+| Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
+|---|---|---|---|---|---|
+| S1.1 Sandbox VM 生命周期 | `NOT_STARTED` | 待指定 | — | — | 实现一个 PodSandbox 对应一个 VM |
+| S1.2 OCI Task | `NOT_STARTED` | 待指定 | — | — | 打通单容器 Create/Start/Wait/Kill/Delete |
+| S1.3 CRI 基础交互 | `NOT_STARTED` | 待指定 | — | — | 实现 logs、非 TTY exec、信号和退出码 |
+| S1.4 清理与共存 | `NOT_STARTED` | 待指定 | — | — | 验证资源清理、runc 和 legacy 回归 |
+
 
 ### 目标
 
@@ -144,6 +183,15 @@ tests/e2e/kubernetes-runtime/
 - legacy Cubebox 创建/删除 smoke test 通过。
 
 ## 7. S2：多容器与 Pod 生命周期
+> Milestone 状态：`NOT_STARTED`。依赖 S1.1～S1.4 完成。
+
+| Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
+|---|---|---|---|---|---|
+| S2.1 动态多容器 | `NOT_STARTED` | 待指定 | — | — | 在运行中的 VM 动态增删普通容器 |
+| S2.2 Init 与重启 | `NOT_STARTED` | 待指定 | — | — | 实现 init 顺序和单容器重启 |
+| S2.3 Namespace | `NOT_STARTED` | 待指定 | — | — | 实现 Pod 共享和隔离 namespace 语义 |
+| S2.4 Sidecar 与 Pod 生命周期 | `NOT_STARTED` | 待指定 | — | — | 实现 sidecar、ephemeral、probe 和 hook |
+
 
 ### 目标
 
@@ -167,6 +215,15 @@ tests/e2e/kubernetes-runtime/
 - 终止宽限期、SIGTERM/SIGKILL 和 TaskExit 事件时序有自动化测试。
 
 ## 8. S3：存储、安全与资源
+> Milestone 状态：`NOT_STARTED`。依赖 S2.1～S2.4 完成。
+
+| Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
+|---|---|---|---|---|---|
+| S3.1 基础 Volume | `NOT_STARTED` | 待指定 | — | — | 实现 emptyDir 和 projected 类 volume |
+| S3.2 PVC | `NOT_STARTED` | 待指定 | — | — | 实现文件系统 PVC 挂载和清理 |
+| S3.3 SecurityContext | `NOT_STARTED` | 待指定 | — | — | 映射并验证常用安全字段 |
+| S3.4 资源控制 | `NOT_STARTED` | 待指定 | — | — | 实现 Host/Guest 双层 cgroup |
+
 
 ### 目标
 
@@ -191,6 +248,14 @@ tests/e2e/kubernetes-runtime/
 - raw block、完整 subPath、双向 mount propagation 等未实现能力返回明确结果并写入支持矩阵。
 
 ## 9. S4：恢复与可观测性
+> Milestone 状态：`NOT_STARTED`。依赖 S3.1～S3.4 完成。
+
+| Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
+|---|---|---|---|---|---|
+| S4.1 状态与重连 | `NOT_STARTED` | 待指定 | — | — | 定义最小持久状态并实现组件重连 |
+| S4.2 Reconcile | `NOT_STARTED` | 待指定 | — | — | 对账并清理 VM、网络和 mount 资源 |
+| S4.3 可观测性 | `NOT_STARTED` | 待指定 | — | — | 输出 logs、events、metrics 和 CRI stats |
+
 
 ### 目标
 
@@ -214,6 +279,15 @@ tests/e2e/kubernetes-runtime/
 - 每种失败至少能从日志或指标定位到具体生命周期阶段。
 
 ## 10. S5：PoC 集成交付
+> Milestone 状态：`NOT_STARTED`。依赖 S4.1～S4.3 完成。
+
+| Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
+|---|---|---|---|---|---|
+| S5.1 安装与共存 | `NOT_STARTED` | 待指定 | — | — | 提供安装、卸载和 runc 共存方案 |
+| S5.2 升级与回滚 | `NOT_STARTED` | 待指定 | — | — | 验证版本协商、滚动升级和回滚 |
+| S5.3 兼容性 | `NOT_STARTED` | 待指定 | — | — | 运行 Node E2E/Conformance 并分类失败 |
+| S5.4 性能与稳定性 | `NOT_STARTED` | 待指定 | — | — | 执行密度、并发和 soak 测试 |
+
 
 ### 目标
 
@@ -238,6 +312,14 @@ tests/e2e/kubernetes-runtime/
 - 100 节点验证是否执行取决于资源条件；未执行时明确记录为生产化前置项，不把它算作 PoC 通过证据。
 
 ## 11. S6：二期 Snapshot、Restore 与 Pause/Resume
+> Milestone 状态：`NOT_STARTED`。依赖 S5.1～S5.4 完成，属于二期范围。
+
+| Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
+|---|---|---|---|---|---|
+| S6.1 Snapshot Artifact | `NOT_STARTED` | 待指定 | — | — | 定义并生成版本化多容器快照制品 |
+| S6.2 Restore 新 Pod | `NOT_STARTED` | 待指定 | — | — | 通过 CRD/annotation 恢复为新 Pod |
+| S6.3 Pause/Resume | `NOT_STARTED` | 待指定 | — | — | 实现短时暂停恢复和失败收敛 |
+
 
 ### 目标
 
@@ -262,14 +344,15 @@ tests/e2e/kubernetes-runtime/
 
 ## 12. Stage 执行与 Handoff
 
-每个 stage 只维护三类状态：代码/PR、活动 handoff、未决问题表。详细规则见 [PoC Handoff 规则](../../dev/handoff-policy.md)，交接时最少完成：
+Stage 进度只记录在本文各 `Sx.x` 状态表中；活动 handoff 只保存当前工作入口，不再复制整项进度。详细规则见 [PoC Handoff 规则](../../dev/handoff-policy.md)。状态变化时按以下顺序更新：
 
-1. 在 `docs/handoffs/kubernetes-runtime/README.md` 写当前 stage、基线 commit、已完成/未完成、实际验证、阻塞和下一步。
-2. 在 `open-questions.md` 更新本 stage 必须关闭的问题。
-3. 附可复现命令和结果摘要；大日志放 CI/制品系统，只记录链接或 digest。
-4. 接手者复现上一项关键验证后，再开始新范围。
+1. 直接更新对应 `Sx.x` 行的状态、Owner、已完成内容、验收证据和下一步。
+2. 在活动 handoff 中写当前 `Sx.x`、基线 commit、最后一项验证、阻塞和接手动作。
+3. 在 `open-questions.md` 更新该 Work Stage 必须关闭的问题。
+4. 附可复现命令和结果摘要；接手者先复现最后一项关键验证。
 
-Stage 未达到验收标准时不标记完成。允许以 `DEFERRED` 延期非关键项，但必须注明新的最迟 stage；会改变主架构或公共接口的问题不能带入不可逆实现。
+Work Stage 未达到全部验收标准时不能标记 `DONE`。允许以 `DEFERRED` 延期非关键项，但必须注明新的目标 Stage；会改变主架构或公共接口的问题不能带入不可逆实现。
+
 
 ## 13. 未确认问题记录规则
 
