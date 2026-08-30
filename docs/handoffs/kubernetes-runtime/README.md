@@ -2,15 +2,15 @@
 
 ## 当前 Stage
 
-S0.4 `VALIDATING`：第二轮问题已整改，等待第三轮复审。
+S0.4 `VALIDATING`：第三轮问题已整改，等待第四轮复审。
 
 ## 基线
 
-lease `ea192ecb`，线性化 `e3205220`，证据 `5aef6886`。
+线性化 `e3205220`，commit outcome `aace4c4a`，证据 `4af46a9f`。
 
 ## 已完成
 
-Coordinator 固定锁序并原子持久化/撤销 FD binding；失败与重启恢复已测；peer auth 必需且真实 allow/deny 已测。
+pre-rename 保留 READY；post-rename commit-unknown 撤销 FD 并阻止 cleanup，重同步后继续；真实 Store 注入已测。
 
 ## 未完成
 
@@ -18,7 +18,7 @@ Coordinator 固定锁序并原子持久化/撤销 FD binding；失败与重启�
 
 ## 验证
 
-Go test/race/vet、20 轮并发 race、官方 builder 契约、VitePress、diff check 均通过。
+Go test/race/vet、20 轮故障并发 race、官方 builder 契约、VitePress、diff check 均通过。
 
 ## 阻塞
 
