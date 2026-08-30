@@ -2,10 +2,23 @@
 set -eu
 
 input="$(mktemp)"
-trap 'rm -f "$input"' EXIT
+output="$(mktemp)"
+trap 'rm -f "$input" "$output"' EXIT
 cat > "$input"
 mkdir -p /run/cube-s0
 printf '{"time":"%s","event":"cni.%s","container_id":"%s","netns":"%s","ifname":"%s"}\n' \
   "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" "${CNI_COMMAND:-UNKNOWN}" \
   "${CNI_CONTAINERID:-}" "${CNI_NETNS:-}" "${CNI_IFNAME:-}" >> /run/cube-s0/cni.jsonl
-sed 's/"type"[[:space:]]*:[[:space:]]*"cube-s0-trace"/"type":"bridge"/' "$input" | /opt/cni/bin/bridge
+if sed 's/"type"[[:space:]]*:[[:space:]]*"cube-s0-trace"/"type":"bridge"/' "$input" | \
+  /opt/cni/bin/bridge > "$output"; then
+  result=ok
+  status=0
+else
+  status=$?
+  result=error
+fi
+printf '{"time":"%s","event":"cni.%s.result","result":"%s","status":%s,"container_id":"%s","netns":"%s","ifname":"%s"}\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" "${CNI_COMMAND:-UNKNOWN}" "$result" "$status" \
+  "${CNI_CONTAINERID:-}" "${CNI_NETNS:-}" "${CNI_IFNAME:-}" >> /run/cube-s0/cni.jsonl
+cat "$output"
+exit "$status"

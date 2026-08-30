@@ -1,0 +1,16 @@
+{
+  "metadata": {
+    "name": "workload",
+    "attempt": 1
+  },
+  "image": {
+    "image": "docker.io/library/busybox:1.36.1"
+  },
+  "command": [
+    "/bin/sh",
+    "-c",
+    "echo cube-s0-task-ok; exit 23"
+  ],
+  "log_path": "workload.log",
+  "linux": {}
+}

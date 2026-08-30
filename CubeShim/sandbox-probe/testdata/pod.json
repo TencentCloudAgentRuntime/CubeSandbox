@@ -1,0 +1,10 @@
+{
+  "metadata": {
+    "name": "cube-s0-probe",
+    "namespace": "default",
+    "uid": "cube-s0-probe",
+    "attempt": 1
+  },
+  "log_directory": "/tmp/cube-s0-probe",
+  "linux": {}
+}

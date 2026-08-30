@@ -35,6 +35,20 @@ containerd --config /etc/containerd/cube-s0.toml
 crictl --config config/crictl.yaml runp --runtime cube-s0 pod.json
 ```
 
+仓库中的固定输入和云端验收脚本可重放完整正常/异常矩阵：
+
+```bash
+sudo CRICTL_CONFIG=/etc/crictl-cube-s0.yaml \
+  ARTIFACT_DIR=/run/cube-s0/evidence scripts/verify-cloud.sh
+```
+
+脚本使用 `testdata/pod.json`、`testdata/container.json`，断言 Sandbox Ready、
+业务进程 exit code 23、日志、bootstrap v3/ttrpc、Sandbox/Task 同 endpoint PID 与
+关键 RPC 顺序。每例结束后检查 CRI Pod/Container、containerd sandbox metadata、
+shim 进程/socket、state/root bundle、mount、netns、host-local IP 分配均为零，并确认
+CNI ADD/DEL 实际执行成功。原始 RPC/CNI trace、失败输出和摘要写入
+`ARTIFACT_DIR`。
+
 shim 默认写 `/run/cube-s0/trace.jsonl`，CNI wrapper 写
 `/run/cube-s0/cni.jsonl`；可用 `CUBE_S0_TRACE_PATH` 改写 shim trace 位置。
 

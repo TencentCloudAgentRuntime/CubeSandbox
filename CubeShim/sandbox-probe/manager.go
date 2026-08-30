@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -143,6 +144,10 @@ func (probeManager) Start(ctx context.Context, params *bootapi.BootstrapParams) 
 	if err := shim.AdjustOOMScore(command.Process.Pid); err != nil {
 		return nil, fmt.Errorf("adjust shim OOM score: %w", err)
 	}
+	record("shim.spawned", map[string]any{
+		"instance_id": id,
+		"shim_pid":    command.Process.Pid,
+	})
 	return &bootapi.BootstrapResult{
 		Version:  3,
 		Address:  socket.address,
@@ -150,13 +155,45 @@ func (probeManager) Start(ctx context.Context, params *bootapi.BootstrapParams) 
 	}, nil
 }
 
+func removeProbeSocket(bundlePath string) error {
+	data, err := os.ReadFile(filepath.Join(bundlePath, "bootstrap.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var result bootapi.BootstrapResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return fmt.Errorf("decode bootstrap.json: %w", err)
+	}
+	if result.GetAddress() == "" {
+		return fmt.Errorf("bootstrap.json has no shim address")
+	}
+	if err := shim.RemoveSocket(result.GetAddress()); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove shim socket: %w", err)
+	}
+	return nil
+}
+
 func (probeManager) Stop(_ context.Context, id string) (shim.StopStatus, error) {
-	record("manager.stop", map[string]any{"instance_id": id})
-	return shim.StopStatus{
+	status := shim.StopStatus{
 		Pid:        0,
 		ExitStatus: 0,
 		ExitedAt:   time.Now().UTC(),
-	}, nil
+	}
+	record("manager.stop", map[string]any{"instance_id": id})
+	if cwd, err := os.Getwd(); err != nil {
+		recordResult("manager.socket_cleanup", map[string]any{"instance_id": id}, err)
+		return status, err
+	} else {
+		err := removeProbeSocket(cwd)
+		recordResult("manager.socket_cleanup", map[string]any{"instance_id": id}, err)
+		if err != nil {
+			return status, err
+		}
+	}
+	return status, nil
 }
 
 func (probeManager) Info(_ context.Context, _ io.Reader) (*apitypes.RuntimeInfo, error) {
