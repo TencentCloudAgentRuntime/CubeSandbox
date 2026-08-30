@@ -2,7 +2,7 @@
 
 ## 当前结论
 
-S0.4 v1 契约已按四轮独立审查整改，当前等待第五轮复审。宿主 containerd 独占 CRI、OCI image/snapshot、Sandbox/Task 与 CNI 状态；Cubelet RuntimeResource 仅准备和释放节点资源；Guest Agent 只负责 VM 内容器执行。不得在复审 `APPROVE` 前把 S0.4 标为 `DONE`。
+S0.4 v1 契约已按四轮独立审查整改，并在第五轮复审获得 `APPROVE`。宿主 containerd 独占 CRI、OCI image/snapshot、Sandbox/Task 与 CNI 状态；Cubelet RuntimeResource 仅准备和释放节点资源；Guest Agent 只负责 VM 内容器执行。
 
 ## 产物
 
@@ -44,6 +44,10 @@ S0.4 v1 契约已按四轮独立审查整改，当前等待第五轮复审。宿
 
 `695fbada` 增加真实 `Store.ConfirmReleaseDurable`：在 Store 锁内校验精确 generation/lease/release key，并执行 parent-directory fsync。Coordinator 只有 confirmation 成功才写入 confirmed 门禁；否则 binding 保持缺失，retry/同进程 Recover/新 Coordinator Recover 均返回 `UNAVAILABLE`，`CompleteRelease` 返回 `FAILED_PRECONDITION`。注入故障解除后 Recover 才成功，之后才允许 cleanup；20 轮 race 通过。
 
+## 第五轮独立审查结论
+
+第五轮结果为 `APPROVE`。审查确认 `ConfirmReleaseDurable` 在 Store 锁内校验完整 release identity 后真实执行 parent-directory fsync；RELEASING retry 与 Recover 只有在 confirmation 成功后才写入 exact confirmed；`CompleteRelease` 同时要求无 uncertain 且完整请求匹配。故障持续启用时，同进程与新 Coordinator 均保持 fail closed，解除故障后才可 Recover、重试和清理；旧 tombstone retry 不会覆盖新 active confirmation。独立复跑 unit、race、vet、定向 race 20 轮及官方 runner 全部通过。
+
 精确状态迁移、gRPC code、FD ownership 和失败顺序见 [S0.4 接口边界](../../../../zh/dev/kubernetes-runtime-integration-s0.4-interface.md)。
 
 ## 验证
@@ -64,4 +68,4 @@ S0.4 v1 契约已按四轮独立审查整改，当前等待第五轮复审。宿
 
 ## 审查门禁
 
-同一独立 subagent 必须复查 `ea192ecb`、`e3205220`、`aace4c4a`、`695fbada`、本证据、接口文档与测试，并明确返回 `APPROVE`；否则继续整改和复审，不进入 S1。
+同一独立 subagent 已复查 `ea192ecb`、`e3205220`、`aace4c4a`、`695fbada`、本证据、接口文档与测试，并在第五轮明确返回 `APPROVE`。S0.4 审查门禁已关闭。
