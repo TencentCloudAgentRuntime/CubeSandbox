@@ -2,23 +2,23 @@
 
 ## 当前 Stage
 
-S0.4 `VALIDATING`：首轮审查整改完成，等待同一 subagent 复审。
+S0.4 `VALIDATING`：第二轮问题已整改，等待第三轮复审。
 
 ## 基线
 
-实现 `ea192ecb`，契约与证据 `c33d2279`。
+lease `ea192ecb`，线性化 `e3205220`，证据 `5aef6886`。
 
 ## 已完成
 
-持久化 lease/tombstone、五元 FD 栅栏、peer auth、direct gRPC 注册和真实 import graph 测试。
+Coordinator 固定锁序并原子持久化/撤销 FD binding；失败与重启恢复已测；peer auth 必需且真实 allow/deny 已测。
 
 ## 未完成
 
-复审必须明确 `APPROVE`；否则继续整改，不进入 S1。
+同一 subagent 必须明确 `APPROVE`；否则继续整改。
 
 ## 验证
 
-Go test/race/vet、官方 builder 契约、VitePress、diff check 均通过；Rust 完整回归沿用前轮未改代码结果。
+Go test/race/vet、20 轮并发 race、官方 builder 契约、VitePress、diff check 均通过。
 
 ## 阻塞
 
@@ -30,4 +30,4 @@ Go test/race/vet、官方 builder 契约、VitePress、diff check 均通过；Ru
 
 ## 下一步
 
-复查 `ea192ecb`、`c33d2279`；通过后标记 S0 完成并启动 S1.1。
+复查上述提交；通过后标记 S0 完成并启动 S1.1。
