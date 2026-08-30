@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use containerd_shim::asynchronous::run as shim_run;
-use containerd_shim::{parse, Config};
+use containerd_shim::parse;
 use containerd_shim_cube_rs::common;
-use containerd_shim_cube_rs::service::Service;
+use containerd_shim_cube_rs::service;
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -14,13 +13,6 @@ use tokio::runtime::Builder;
 //const SHIM_VERSION: &str = env!("GIT_COMMIT_INFO");
 //const CH_VERSION: &str = env!("CH_GIT_COMMIT_INFO");
 fn main() {
-    let c = Config {
-        no_reaper: true,
-        no_setup_logger: true,
-        no_sub_reaper: true,
-        ..Default::default()
-    };
-
     let mut thread_num = 1;
     let os_args: Vec<_> = std::env::args_os().collect();
     if is_version_request(&os_args[1..]) {
@@ -51,7 +43,10 @@ fn main() {
         .enable_all()
         .build()
         .unwrap();
-    runtime.block_on(shim_run::<Service>("io.containerd.cube.rs", Some(c)));
+    if let Err(error) = runtime.block_on(service::run("io.containerd.cube.rs", flags)) {
+        eprintln!("io.containerd.cube.rs: {error:?}");
+        unsafe { libc::exit(1) };
+    }
 }
 
 fn is_version_request(args: &[OsString]) -> bool {

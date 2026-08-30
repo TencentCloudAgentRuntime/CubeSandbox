@@ -69,6 +69,7 @@ import (
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/resourcemetrics"
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/multimeta"
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/runtime"
+	_ "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/runtime_resource"
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/snapshots/overlay/plugin"
 
 	_ "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/internals/sandbox"

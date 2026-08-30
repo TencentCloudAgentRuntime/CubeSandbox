@@ -262,6 +262,34 @@ impl CubeHypervisor {
         Ok(())
     }
 
+    /// Stop the VMM process even when the guest agent never became reachable.
+    ///
+    /// Sandbox startup can fail after the VMM thread is launched but before
+    /// `SandBox::client` is installed. The normal guest-driven shutdown path
+    /// cannot cover that interval, so rollback must address the VMM directly.
+    pub async fn shutdown_vmm(&mut self) -> CResult<()> {
+        let Some(instance) = self.ch.take() else {
+            self.status = HypStatus::Init;
+            self.ev_receiver = None;
+            return Ok(());
+        };
+
+        let mut instance = instance.lock().await;
+        let request_result = instance
+            .send_request(ApiRequest::VmmShutdown)
+            .map_err(|error| format!("shutdown vmm request failed:{error}"))
+            .and_then(|response| {
+                response.map_err(|error| format!("shutdown vmm response failed:{error}"))
+            });
+        let join_result = instance
+            .join()
+            .map_err(|error| format!("join vmm after shutdown failed:{error}"));
+        self.status = HypStatus::Init;
+        self.ev_receiver = None;
+
+        request_result.and(join_result).map(|_| ())
+    }
+
     pub async fn wait_notify(&self, timeout: Duration) -> CResult<NotifyEvent> {
         if let Some(recv) = &self.ev_receiver {
             let rx = recv.lock().await;

@@ -33,6 +33,7 @@ use crate::container::{container_mgr::ContainerInfo, exec::Tty};
 use crate::log::{stat_defer, Log, LogLevel};
 use crate::sandbox::sb;
 use crate::service::s0_rootfs::{self, PreparedRootfs};
+use crate::service::sandbox_srv::{SandboxLifecycle, TaskMode};
 use crate::service::update_ext;
 use crate::{debugf, errf, infof, warnf};
 const MODULE: &str = "Shim";
@@ -291,6 +292,7 @@ pub struct TaskService {
     //ns: String,
     sandbox: Arc<Mutex<sb::SandBox>>,
     s0_rootfs: Arc<Mutex<HashMap<String, PreparedRootfs>>>,
+    sandbox_lifecycle: Arc<SandboxLifecycle>,
     log: Log,
     //debug: bool,
     exit: Arc<ExitSignal>,
@@ -322,11 +324,28 @@ impl TaskService {
             //ns,
             sandbox: Arc::new(Mutex::new(sb)),
             s0_rootfs: Arc::new(Mutex::new(HashMap::new())),
+            sandbox_lifecycle: Arc::new(SandboxLifecycle::default()),
             log,
             //debug: debug,
             exit,
             tx_containerd: tx,
         }
+    }
+
+    pub(super) fn sandbox_id(&self) -> &str {
+        &self.sandbox_id
+    }
+
+    pub(super) fn sandbox(&self) -> Arc<Mutex<sb::SandBox>> {
+        self.sandbox.clone()
+    }
+
+    pub(super) fn sandbox_lifecycle(&self) -> Arc<SandboxLifecycle> {
+        self.sandbox_lifecycle.clone()
+    }
+
+    pub(super) fn exit_signal(&self) -> Arc<ExitSignal> {
+        self.exit.clone()
     }
 
     async fn tx_event(&self, topic: String, event: Box<dyn MessageDyn>) {
@@ -352,6 +371,11 @@ impl Task for TaskService {
             stat_defer::CALLEE_ACT_CREATE_POD_CONTAINER.to_string(),
             self.log.clone(),
         );
+
+        let task_mode =
+            self.sandbox_lifecycle.task_mode().await.map_err(|error| {
+                Error::Other(format!("Create task before sandbox ready: {error}"))
+            })?;
 
         let bundle = req.bundle.as_str();
 
@@ -385,6 +409,11 @@ impl Task for TaskService {
             return Err(create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into());
         }
         if !sb.inited() {
+            if task_mode == TaskMode::ManagedReady {
+                let message = "managed sandbox is ready but Cube configuration is not initialized"
+                    .to_string();
+                return Err(create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into());
+            }
             stat.set_callee_act(stat_defer::CALLEE_ACT_CREATE_POD_SANDBOX.to_string());
             infof!(self.log, "shim pid {}", std::process::id());
             if let Err(e) = Utils::record_pid() {
@@ -803,6 +832,14 @@ impl Task for TaskService {
         _req: api::ShutdownRequest,
     ) -> TtrpcResult<api::Empty> {
         infof!(self.log, "shutdown req start");
+
+        if self.sandbox_lifecycle.is_managed().await {
+            infof!(
+                self.log,
+                "managed sandbox ignores Task.Shutdown; Sandbox.Shutdown owns the shim"
+            );
+            return Ok(api::Empty::default());
+        }
 
         let mut sb = self.sandbox.lock().await;
         // After PauseToSnapshot the sandbox is Paused (MicroVM already gone).

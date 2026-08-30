@@ -17,10 +17,12 @@ import (
 type LifecycleStore interface {
 	Prepare(state.PrepareRequest) (*state.PrepareResult, error)
 	MarkReady(string, uint64, string, string) (*state.Lease, error)
+	AbandonPrepare(string, uint64, string) error
 	BeginRelease(state.ReleaseRequest) (*state.ReleaseResult, error)
 	ConfirmReleaseDurable(state.ReleaseRequest) (*state.ReleaseResult, error)
 	CompleteRelease(state.ReleaseRequest) error
 	Inspect(string) (*state.Record, error)
+	ListSandboxIDs() ([]string, error)
 }
 
 // Coordinator freezes lifecycle lock order as:
@@ -51,6 +53,16 @@ func (c *Coordinator) Prepare(request state.PrepareRequest) (*state.PrepareResul
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.store.Prepare(request)
+}
+
+// AbandonPrepare is called only after every PREPARING side effect is rolled back.
+func (c *Coordinator) AbandonPrepare(sandboxID string, generation uint64, leaseID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.handoff.EnsureAbsent(sandboxID); err != nil {
+		return err
+	}
+	return c.store.AbandonPrepare(sandboxID, generation, leaseID)
 }
 
 // MarkReadyAndPublish persists READY before publishing its exact FD binding.

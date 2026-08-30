@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync"
 
@@ -425,6 +426,35 @@ func (s *Store) AbandonPrepare(sandboxID string, generation uint64, leaseID stri
 		return err
 	}
 	return nil
+}
+
+func (s *Store) ListSandboxIDs() ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(s.dir, entry.Name()))
+		if err != nil {
+			return nil, status.Error(codes.Unavailable, err.Error())
+		}
+		record := new(Record)
+		if err := json.Unmarshal(data, record); err != nil {
+			return nil, status.Errorf(codes.Unavailable, "decode runtime state %s: %v", entry.Name(), err)
+		}
+		if record.SandboxID == "" || filepath.Base(s.recordPath(record.SandboxID)) != entry.Name() {
+			return nil, status.Errorf(codes.Unavailable, "runtime state file %s has invalid sandbox identity", entry.Name())
+		}
+		ids = append(ids, record.SandboxID)
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 func (s *Store) Inspect(sandboxID string) (*Record, error) {

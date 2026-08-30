@@ -1,0 +1,298 @@
+//go:build linux
+
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+package runtimeresource
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	goruntime "runtime"
+	"strconv"
+	"strings"
+	"syscall"
+
+	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
+	"github.com/vishvananda/netns"
+	"golang.org/x/sys/unix"
+)
+
+const tcPreference = "49152"
+
+type commandRunner interface {
+	Run(context.Context, string, ...string) ([]byte, error)
+}
+
+type nsenterRunner struct{}
+
+func (nsenterRunner) Run(ctx context.Context, netnsPath string, command ...string) ([]byte, error) {
+	args := append([]string{"--net=" + netnsPath, "--"}, command...)
+	output, err := commandContext(ctx, "nsenter", args...).CombinedOutput()
+	if err != nil {
+		return output, fmt.Errorf("netns command %q: %w: %s", strings.Join(command, " "), err, strings.TrimSpace(string(output)))
+	}
+	return output, nil
+}
+
+var commandContext = newExecCommand
+
+// Kept behind a variable to make privileged commands replaceable in unit tests.
+var newExecCommand = func(ctx context.Context, name string, args ...string) command {
+	return osCommand{ctx: ctx, name: name, args: args}
+}
+
+type command interface {
+	CombinedOutput() ([]byte, error)
+}
+
+type osCommand struct {
+	ctx  context.Context
+	name string
+	args []string
+}
+
+func (c osCommand) CombinedOutput() ([]byte, error) {
+	return execCombinedOutput(c.ctx, c.name, c.args...)
+}
+
+var execCombinedOutput = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return nil, errors.New("exec implementation is not initialized")
+}
+
+type linuxNetwork struct{ runner commandRunner }
+
+func newLinuxNetwork() *linuxNetwork { return &linuxNetwork{runner: nsenterRunner{}} }
+
+func (n *linuxNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, tapName string) (*runtimev1.NetworkAttachment, error) {
+	if _, err := os.Stat(netnsPath); err != nil {
+		return nil, err
+	}
+	linkOutput, err := n.runner.Run(ctx, netnsPath, "ip", "-j", "link", "show", "dev", interfaceName)
+	if err != nil {
+		return nil, err
+	}
+	var links []struct {
+		Address string `json:"address"`
+		MTU     uint32 `json:"mtu"`
+	}
+	if err := json.Unmarshal(linkOutput, &links); err != nil {
+		return nil, fmt.Errorf("decode CNI interface: %w", err)
+	}
+	if len(links) != 1 || links[0].Address == "" || links[0].MTU == 0 {
+		return nil, errors.New("CNI interface response must contain one link with MAC and MTU")
+	}
+
+	if _, err := n.runner.Run(ctx, netnsPath, "ip", "link", "show", "dev", tapName); err != nil {
+		if _, createErr := n.runner.Run(ctx, netnsPath, "ip", "tuntap", "add", "dev", tapName, "mode", "tap", "vnet_hdr"); createErr != nil {
+			return nil, createErr
+		}
+	}
+	if _, err := n.runner.Run(ctx, netnsPath, "ip", "link", "set", "dev", tapName, "mtu", strconv.FormatUint(uint64(links[0].MTU), 10), "up"); err != nil {
+		return nil, err
+	}
+	if err := n.ensureIngress(ctx, netnsPath, interfaceName); err != nil {
+		return nil, err
+	}
+	if err := n.ensureIngress(ctx, netnsPath, tapName); err != nil {
+		return nil, err
+	}
+	for _, pair := range [][2]string{{interfaceName, tapName}, {tapName, interfaceName}} {
+		if _, err := n.runner.Run(ctx, netnsPath, "tc", "filter", "replace", "dev", pair[0], "parent", "ffff:", "protocol", "all", "pref", tcPreference, "u32", "match", "u8", "0", "0", "action", "mirred", "egress", "redirect", "dev", pair[1]); err != nil {
+			return nil, err
+		}
+	}
+
+	ips, err := n.addresses(ctx, netnsPath, interfaceName)
+	if err != nil {
+		return nil, err
+	}
+	routes, gateway, err := n.routes(ctx, netnsPath, interfaceName, ips)
+	if err != nil {
+		return nil, err
+	}
+	neighbors, err := n.neighbors(ctx, netnsPath, interfaceName, gateway)
+	if err != nil {
+		return nil, err
+	}
+	return &runtimev1.NetworkAttachment{TapName: tapName, GuestInterfaceName: "eth0", Mac: links[0].Address, Mtu: links[0].MTU, Ips: ips, Routes: routes, Neighbors: neighbors}, nil
+}
+
+func (n *linuxNetwork) ensureIngress(ctx context.Context, netnsPath, device string) error {
+	output, _ := n.runner.Run(ctx, netnsPath, "tc", "qdisc", "show", "dev", device)
+	if strings.Contains(string(output), "ingress ffff:") || strings.Contains(string(output), "clsact ffff:") {
+		return nil
+	}
+	_, err := n.runner.Run(ctx, netnsPath, "tc", "qdisc", "add", "dev", device, "ingress")
+	return err
+}
+
+func (n *linuxNetwork) addresses(ctx context.Context, netnsPath, device string) ([]string, error) {
+	output, err := n.runner.Run(ctx, netnsPath, "ip", "-j", "-4", "addr", "show", "dev", device)
+	if err != nil {
+		return nil, err
+	}
+	var entries []struct {
+		Addresses []struct {
+			Local     string `json:"local"`
+			PrefixLen uint32 `json:"prefixlen"`
+			Scope     string `json:"scope"`
+		} `json:"addr_info"`
+	}
+	if err := json.Unmarshal(output, &entries); err != nil {
+		return nil, err
+	}
+	var result []string
+	for _, entry := range entries {
+		for _, address := range entry.Addresses {
+			if address.Scope == "global" && net.ParseIP(address.Local) != nil {
+				result = append(result, fmt.Sprintf("%s/%d", address.Local, address.PrefixLen))
+			}
+		}
+	}
+	if len(result) == 0 {
+		return nil, errors.New("CNI interface has no global IPv4 address")
+	}
+	return result, nil
+}
+
+func (n *linuxNetwork) routes(ctx context.Context, netnsPath, device string, ips []string) ([]*runtimev1.Route, string, error) {
+	output, err := n.runner.Run(ctx, netnsPath, "ip", "-j", "-4", "route", "show")
+	if err != nil {
+		return nil, "", err
+	}
+	var entries []struct {
+		Dst     string `json:"dst"`
+		Gateway string `json:"gateway"`
+		Dev     string `json:"dev"`
+		PrefSrc string `json:"prefsrc"`
+		Scope   string `json:"scope"`
+	}
+	if err := json.Unmarshal(output, &entries); err != nil {
+		return nil, "", err
+	}
+	source := strings.SplitN(ips[0], "/", 2)[0]
+	var result []*runtimev1.Route
+	var gateway string
+	for _, entry := range entries {
+		if entry.Dev != device {
+			continue
+		}
+		destination := entry.Dst
+		if destination == "" || destination == "default" {
+			destination = "0.0.0.0/0"
+		}
+		if entry.PrefSrc == "" {
+			entry.PrefSrc = source
+		}
+		if entry.Gateway != "" && gateway == "" {
+			gateway = entry.Gateway
+		}
+		result = append(result, &runtimev1.Route{Destination: destination, Gateway: entry.Gateway, Source: entry.PrefSrc, Device: "eth0", Scope: routeScope(entry.Scope)})
+	}
+	if gateway == "" {
+		return nil, "", errors.New("CNI interface has no IPv4 default gateway")
+	}
+	result = append([]*runtimev1.Route{{Destination: gateway + "/32", Source: source, Device: "eth0", Scope: 253}}, result...)
+	return result, gateway, nil
+}
+
+func (n *linuxNetwork) neighbors(ctx context.Context, netnsPath, device, gateway string) ([]*runtimev1.Neighbor, error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		output, err := n.runner.Run(ctx, netnsPath, "ip", "-j", "neigh", "show", "dev", device)
+		if err != nil {
+			return nil, err
+		}
+		var entries []struct {
+			Dst    string `json:"dst"`
+			LLAddr string `json:"lladdr"`
+			Dev    string `json:"dev"`
+		}
+		if err := json.Unmarshal(output, &entries); err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			if entry.Dst == gateway && entry.LLAddr != "" {
+				return []*runtimev1.Neighbor{{Ip: gateway, Mac: entry.LLAddr, Device: "eth0"}}, nil
+			}
+		}
+		_, _ = n.runner.Run(ctx, netnsPath, "ping", "-c", "1", "-W", "1", gateway)
+	}
+	return nil, errors.New("CNI default gateway has no neighbor MAC")
+}
+
+func (n *linuxNetwork) Release(ctx context.Context, netnsPath, interfaceName, tapName string) error {
+	if _, err := os.Stat(netnsPath); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	_, _ = n.runner.Run(ctx, netnsPath, "tc", "filter", "del", "dev", interfaceName, "parent", "ffff:", "pref", tcPreference)
+	_, _ = n.runner.Run(ctx, netnsPath, "tc", "filter", "del", "dev", tapName, "parent", "ffff:", "pref", tcPreference)
+	_, err := n.runner.Run(ctx, netnsPath, "ip", "tuntap", "del", "dev", tapName, "mode", "tap")
+	if err != nil && !strings.Contains(err.Error(), "Cannot find device") {
+		return err
+	}
+	return nil
+}
+
+func (n *linuxNetwork) Open(netnsPath, tapName string) (*os.File, error) {
+	goruntime.LockOSThread()
+	defer goruntime.UnlockOSThread()
+	original, err := netns.Get()
+	if err != nil {
+		return nil, err
+	}
+	defer original.Close()
+	target, err := netns.GetFromPath(netnsPath)
+	if err != nil {
+		return nil, err
+	}
+	defer target.Close()
+	if err := netns.Set(target); err != nil {
+		return nil, err
+	}
+
+	file, openErr := openTap(tapName)
+	restoreErr := netns.Set(original)
+	if openErr != nil {
+		return nil, openErr
+	}
+	if restoreErr != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("restore network namespace: %w", restoreErr)
+	}
+	return file, nil
+}
+
+func openTap(tapName string) (*os.File, error) {
+	request, err := unix.NewIfreq(tapName)
+	if err != nil {
+		return nil, err
+	}
+	request.SetUint16(uint16(unix.IFF_TAP | unix.IFF_NO_PI | unix.IFF_VNET_HDR | unix.IFF_ONE_QUEUE))
+	fd, err := unix.Open("/dev/net/tun", os.O_RDWR|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, request); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), "/dev/net/tun"), nil
+}
+
+func routeScope(scope string) uint32 {
+	switch scope {
+	case "host":
+		return 254
+	case "link":
+		return 253
+	default:
+		return 0
+	}
+}

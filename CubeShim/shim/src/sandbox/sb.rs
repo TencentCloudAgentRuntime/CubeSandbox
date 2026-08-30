@@ -3,8 +3,9 @@
 //
 
 use std::collections::{HashMap, HashSet};
-use std::fs as stdfs;
+use std::fs::{self as stdfs, File};
 use std::net::IpAddr;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -132,6 +133,7 @@ pub struct SandBox {
     monitor_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
     tx_oom_exited: Option<Sender<()>>,
     oom_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
+    runtime_tap: Option<Arc<File>>,
 }
 
 impl SandBox {
@@ -173,6 +175,7 @@ impl SandBox {
             monitor_handle: None,
             tx_oom_exited: None,
             oom_handle: None,
+            runtime_tap: None,
         }
     }
 
@@ -216,6 +219,18 @@ impl SandBox {
 
     pub fn inited(&self) -> bool {
         self.inited
+    }
+
+    pub fn set_runtime_tap(&mut self, tap: File) {
+        self.runtime_tap = Some(Arc::new(tap));
+    }
+
+    pub fn clear_runtime_tap(&mut self) {
+        self.runtime_tap = None;
+    }
+
+    pub async fn vm_exited(&self) -> bool {
+        *self.state.lock().await == SandBoxState::Exited
     }
 
     pub fn init(&mut self, spec: Spec) -> CResult<()> {
@@ -847,6 +862,22 @@ impl SandBox {
         Ok(())
     }
 
+    /// Roll back a partially-created sandbox without depending on cube-agent.
+    pub async fn abort_sandbox(&mut self) -> CResult<()> {
+        if let Err(error) = self.disconnect_agent(true).await {
+            warnf!(
+                self.log,
+                "disconnect agent during rollback failed:{}",
+                error
+            );
+        }
+        if let Some(ch) = self.ch.as_mut() {
+            ch.lock().await.shutdown_vmm().await?;
+        }
+        *self.state.lock().await = SandBoxState::Exited;
+        Ok(())
+    }
+
     pub async fn prepare_resource(&mut self) -> CResult<VmConfig> {
         let mut vc = VmConfig::new(&self.conf.os_image_path, &self.conf.agent_path);
         vc.set_kernel(self.conf.kernel.clone())
@@ -966,7 +997,33 @@ impl SandBox {
     async fn start_vm(&mut self) -> CResult<bool> {
         infof!(self.log, "start vm start");
         let by_snapshot = self.by_snapshot();
-        let s0_prepared_boot = if super::s0_cni::PreparedNetwork::requested(&self.spec) {
+        let runtime_prepared_boot = if self.runtime_tap.is_some() {
+            if by_snapshot {
+                return Err("RuntimeResource network does not support snapshot restore".to_string());
+            }
+            let mut config = self.prepare_resource().await?;
+            let nets = config
+                .nets
+                .as_mut()
+                .ok_or_else(|| "RuntimeResource requires a VM network".to_string())?;
+            if nets.len() != 1 {
+                return Err(format!(
+                    "RuntimeResource requires exactly one VM network, got {}",
+                    nets.len()
+                ));
+            }
+            let tap = self.runtime_tap.as_ref().unwrap();
+            nets[0].tap = None;
+            nets[0].fds = Some(vec![tap.as_raw_fd()]);
+            nets[0].fds_from_other_netns = true;
+            nets[0].num_queues = 2;
+            Some(config)
+        } else {
+            None
+        };
+        let s0_prepared_boot = if runtime_prepared_boot.is_none()
+            && super::s0_cni::PreparedNetwork::requested(&self.spec)
+        {
             if by_snapshot {
                 return Err("S0 CNI adapter does not support snapshot restore".to_string());
             }
@@ -1000,7 +1057,9 @@ impl SandBox {
         }
 
         if !snapshot {
-            if let Some((config, _network)) = s0_prepared_boot.as_ref() {
+            if let Some(config) = runtime_prepared_boot.as_ref() {
+                self.boot_vm_with_config(config).await?;
+            } else if let Some((config, _network)) = s0_prepared_boot.as_ref() {
                 self.boot_vm_with_config(config).await?;
             } else {
                 self.boot_vm().await?;
