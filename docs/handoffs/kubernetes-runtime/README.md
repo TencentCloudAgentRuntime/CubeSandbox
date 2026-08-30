@@ -6,7 +6,7 @@ S1.1 `VALIDATING`：本地协议和失败回滚已通过，等待云端真实 Cu
 
 ## 基线
 
-S1.1 最后已验证实现 `dfdc0455`；S0 收口 `8db49456`。
+S1.1 最后已验证实现 `f61d1317`；S0 收口 `8db49456`。
 
 ## 已完成
 
@@ -18,11 +18,11 @@ S1.1 已实现 containerd Sandbox Service 到 Cube VM 的生命周期、Cubelet 
 
 ## 验证
 
-CubeShim 96 项单测与 cargo check 通过；Cubelet RuntimeResource/plugin Go test-race/vet 通过；本地真实 containerd wire probe 的 Create 成功，Start 因无 `/dev/kvm` 明确失败并精确释放。证据见 `evidence/s1.1/README.md`。
+CubeShim 97 项单测、cargo fmt check 与 cargo check 通过；Cubelet RuntimeResource/plugin Go test-race/vet 通过；本地真实 containerd wire probe 的 Create 成功，Start 因无 `/dev/kvm` 明确失败并精确释放。证据见 `evidence/s1.1/README.md`。
 
 ## 阻塞
 
-执行策略要求用户明确批准：把截至实现提交 `dfdc0455` 的 175KB binary patch 上传到新建私有 COS `cubesandbox-k8s-poc-20260831-1251707795`，再下载到我们创建的 CVM `ins-4dyul5ag`。不得绕过。
+执行策略要求用户明确批准：把截至实现提交 `f61d1317` 的 179327-byte binary patch（SHA-256 `64c4b6eebfd08e05d30542b8a8dec96f4f6871a338df2924134d30145d831445`）上传到新建私有 COS `cubesandbox-k8s-poc-20260831-1251707795`，再下载到我们创建的 CVM `ins-4dyul5ag`。不得绕过。
 
 ## 受保护路径
 

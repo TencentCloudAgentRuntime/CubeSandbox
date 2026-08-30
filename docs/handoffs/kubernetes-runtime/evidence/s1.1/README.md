@@ -16,6 +16,7 @@
 - `47522929`：实现 Sandbox VM 生命周期、RuntimeResource adapter/recovery 与测试。
 - `e7881524`：修正真实联调发现的 route family、asset/KVM preflight、API version negotiation 和 durable state 枚举覆盖。
 - `dfdc0455`：串行化 Shutdown 与 detached Create/Start/Stop，并在 VM teardown 错误时清除已释放 lease。
+- `f61d1317`：抽取可测试的 Shutdown transition，并增加并发操作等待与重复关闭回归测试。
 
 ## 官方 containerd wire 验证
 
@@ -55,13 +56,13 @@ LIBRARY_PATH=/tmp/cubesandbox-link-libs cargo test -p containerd-shim-cube-rs --
 cargo check -p containerd-shim-cube-rs
 ```
 
-结果：`96 passed; 0 failed`，`cargo check` 通过。依赖仓库原有 generated code 警告仍存在，没有新增编译错误。
+结果：`97 passed; 0 failed`，`cargo fmt --all --check` 与 `cargo check` 通过。依赖仓库原有 generated code 警告仍存在，没有新增编译错误。
 
 ## 云端状态
 
 - 目标：香港二区我们创建的 `ins-4dyul5ag`（名称含“勿删”），16C32G，Linux 6.6 PVM host，`/dev/kvm` 可用，containerd 2.3.4。
 - 只读基线 TAT：`inv-b82na40m3i` 成功；确认 `/opt/cubesandbox-src` 仅含早期 S0.3 overlay，不含 RuntimeResource/S1.1 源码。
-- 待执行：把公开基线到实现提交 `dfdc0455` 的 175KB binary patch（SHA-256 `1c97db5836fd39735cb08b1bbf8d1b6a10ae1d4e2ac2caf191fed7fc591c7f6a`）同步到该 CVM，构建当前 CubeShim/Cubelet，并完成真实 Create→Start→Status→Stop→Shutdown 与异常回滚。
+- 待执行：把公开基线到实现提交 `f61d1317` 的 179327-byte binary patch（SHA-256 `64c4b6eebfd08e05d30542b8a8dec96f4f6871a338df2924134d30145d831445`）同步到该 CVM，构建当前 CubeShim/Cubelet，并完成真实 Create→Start→Status→Stop→Shutdown 与异常回滚。
 - 阻塞：执行策略要求用户在聊天中明确批准具体源码 payload 和目的地；未获批准前不通过公开 push、其他 bucket 或间接命令绕过。
 
 S1.1 在真实 VM 成功链路、清理检查和 subagent `APPROVE` 前不得标记 `DONE`。
