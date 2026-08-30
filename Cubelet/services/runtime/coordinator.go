@@ -18,6 +18,7 @@ type LifecycleStore interface {
 	Prepare(state.PrepareRequest) (*state.PrepareResult, error)
 	MarkReady(string, uint64, string, string) (*state.Lease, error)
 	BeginRelease(state.ReleaseRequest) (*state.ReleaseResult, error)
+	ConfirmReleaseDurable(state.ReleaseRequest) (*state.ReleaseResult, error)
 	CompleteRelease(state.ReleaseRequest) error
 	Inspect(string) (*state.Record, error)
 }
@@ -32,6 +33,7 @@ type Coordinator struct {
 	store     LifecycleStore
 	handoff   *handoff.Registry
 	uncertain map[string]state.ReleaseRequest
+	confirmed map[string]state.ReleaseRequest
 }
 
 func NewCoordinator(store LifecycleStore, registry *handoff.Registry) (*Coordinator, error) {
@@ -39,7 +41,9 @@ func NewCoordinator(store LifecycleStore, registry *handoff.Registry) (*Coordina
 		return nil, errors.New("runtime lifecycle store/registry is nil")
 	}
 	return &Coordinator{
-		store: store, handoff: registry, uncertain: make(map[string]state.ReleaseRequest),
+		store: store, handoff: registry,
+		uncertain: make(map[string]state.ReleaseRequest),
+		confirmed: make(map[string]state.ReleaseRequest),
 	}, nil
 }
 
@@ -77,6 +81,11 @@ func (c *Coordinator) BeginReleaseAndFence(request state.ReleaseRequest) (*state
 		return nil, err
 	}
 	if record.Active != nil && record.Active.Generation == request.Generation &&
+		record.Active.LeaseID == request.LeaseID && record.Active.Phase == state.PhaseReleasing &&
+		record.Active.ReleaseKey == request.IdempotencyKey {
+		return c.confirmReleaseDurable(request)
+	}
+	if record.Active != nil && record.Active.Generation == request.Generation &&
 		record.Active.LeaseID == request.LeaseID && record.Active.Phase == state.PhaseReady {
 		binding := bindingFromLease(request.SandboxID, record.Active)
 		var result *state.ReleaseResult
@@ -87,21 +96,30 @@ func (c *Coordinator) BeginReleaseAndFence(request state.ReleaseRequest) (*state
 		}); err != nil {
 			if state.IsCommitUnknown(err) {
 				c.uncertain[request.SandboxID] = request
+				delete(c.confirmed, request.SandboxID)
 			}
 			return nil, err
 		}
 		delete(c.uncertain, request.SandboxID)
+		c.confirmed[request.SandboxID] = request
 		return result, nil
 	}
 	// PREPARING has never been published. RELEASING and tombstone retries are
 	// already fenced. Mismatched requests are rejected by the durable store.
 	result, err := c.store.BeginRelease(request)
-	if err == nil {
-		if uncertain, ok := c.uncertain[request.SandboxID]; ok && uncertain == request {
-			delete(c.uncertain, request.SandboxID)
+	if err != nil {
+		if state.IsCommitUnknown(err) {
+			c.uncertain[request.SandboxID] = request
+			delete(c.confirmed, request.SandboxID)
 		}
+		return nil, err
 	}
-	return result, err
+	if record.Active != nil && record.Active.Generation == request.Generation &&
+		record.Active.LeaseID == request.LeaseID {
+		delete(c.uncertain, request.SandboxID)
+		c.confirmed[request.SandboxID] = request
+	}
+	return result, nil
 }
 
 func (c *Coordinator) CompleteRelease(request state.ReleaseRequest) error {
@@ -110,7 +128,14 @@ func (c *Coordinator) CompleteRelease(request state.ReleaseRequest) error {
 	if _, ok := c.uncertain[request.SandboxID]; ok {
 		return status.Error(codes.FailedPrecondition, "release durability is commit-unknown; resynchronize before cleanup")
 	}
-	return c.store.CompleteRelease(request)
+	if confirmed, ok := c.confirmed[request.SandboxID]; !ok || confirmed != request {
+		return status.Error(codes.FailedPrecondition, "release durability is not confirmed; recover before cleanup")
+	}
+	if err := c.store.CompleteRelease(request); err != nil {
+		return err
+	}
+	delete(c.confirmed, request.SandboxID)
+	return nil
 }
 
 // RecoverSandbox is called before accepting RuntimeResource/FD traffic. READY
@@ -128,13 +153,37 @@ func (c *Coordinator) RecoverSandbox(sandboxID string) error {
 			return err
 		}
 		delete(c.uncertain, sandboxID)
+		delete(c.confirmed, sandboxID)
 		return nil
 	}
 	if err := c.handoff.EnsureAbsent(sandboxID); err != nil {
 		return err
 	}
+	if record.Active != nil && record.Active.Phase == state.PhaseReleasing {
+		request := state.ReleaseRequest{
+			SandboxID: sandboxID, Generation: record.Active.Generation,
+			LeaseID: record.Active.LeaseID, IdempotencyKey: record.Active.ReleaseKey,
+		}
+		_, err := c.confirmReleaseDurable(request)
+		return err
+	}
 	delete(c.uncertain, sandboxID)
+	delete(c.confirmed, sandboxID)
 	return nil
+}
+
+func (c *Coordinator) confirmReleaseDurable(request state.ReleaseRequest) (*state.ReleaseResult, error) {
+	result, err := c.store.ConfirmReleaseDurable(request)
+	if err != nil {
+		if state.IsCommitUnknown(err) {
+			c.uncertain[request.SandboxID] = request
+			delete(c.confirmed, request.SandboxID)
+		}
+		return nil, err
+	}
+	delete(c.uncertain, request.SandboxID)
+	c.confirmed[request.SandboxID] = request
+	return result, nil
 }
 
 func bindingFromLease(sandboxID string, lease *state.Lease) handoff.Binding {

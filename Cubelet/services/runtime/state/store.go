@@ -330,6 +330,37 @@ func (s *Store) BeginRelease(request ReleaseRequest) (*ReleaseResult, error) {
 	return &ReleaseResult{Lease: *record.Active}, nil
 }
 
+// ConfirmReleaseDurable validates the exact releasing identity and fsyncs the
+// parent directory. It is the only operation that resolves a post-rename
+// commit-unknown result; both retry and restart recovery call it.
+func (s *Store) ConfirmReleaseDurable(request ReleaseRequest) (*ReleaseResult, error) {
+	if request.SandboxID == "" || request.Generation == 0 || request.LeaseID == "" || request.IdempotencyKey == "" {
+		return nil, status.Error(codes.InvalidArgument, "release confirmation fields must be non-zero")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, err := s.load(request.SandboxID)
+	if err != nil {
+		return nil, stateLoadError(err)
+	}
+	if record.Active != nil && record.Active.Phase == PhaseReleasing &&
+		record.Active.Generation == request.Generation && record.Active.LeaseID == request.LeaseID &&
+		record.Active.ReleaseKey == request.IdempotencyKey {
+		if err := s.syncParent("confirm-release"); err != nil {
+			return nil, err
+		}
+		return &ReleaseResult{Lease: *record.Active, Reused: true}, nil
+	}
+	if tombstone, ok := record.Tombstones[generationKey(request.Generation)]; ok &&
+		tombstone.LeaseID == request.LeaseID && tombstone.ReleaseKey == request.IdempotencyKey {
+		if err := s.syncParent("confirm-tombstone"); err != nil {
+			return nil, err
+		}
+		return &ReleaseResult{Lease: leaseFromTombstone(tombstone), Reused: true}, nil
+	}
+	return nil, status.Error(codes.FailedPrecondition, "release durability confirmation does not match persistent state")
+}
+
 // CompleteRelease writes a tombstone and removes the active lease. Exact
 // retries remain successful across restarts.
 func (s *Store) CompleteRelease(request ReleaseRequest) error {
@@ -485,18 +516,22 @@ func (s *Store) persist(record *Record) error {
 	if err := os.Rename(tempName, s.recordPath(record.SandboxID)); err != nil {
 		return persistenceFailure("rename", false, err)
 	}
+	return s.syncParent("commit")
+}
+
+func (s *Store) syncParent(operation string) error {
 	if s.hooks.BeforeParentSync != nil {
 		if err := s.hooks.BeforeParentSync(); err != nil {
-			return persistenceFailure("before-parent-sync", true, err)
+			return persistenceFailure(operation+"-before-parent-sync", true, err)
 		}
 	}
 	dir, err := os.Open(s.dir)
 	if err != nil {
-		return persistenceFailure("open-parent", true, err)
+		return persistenceFailure(operation+"-open-parent", true, err)
 	}
 	defer dir.Close()
 	if err := dir.Sync(); err != nil {
-		return persistenceFailure("sync-parent", true, err)
+		return persistenceFailure(operation+"-sync-parent", true, err)
 	}
 	return nil
 }

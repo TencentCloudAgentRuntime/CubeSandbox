@@ -213,6 +213,16 @@ func TestCoordinatorParentSyncCommitUnknownFailsClosedUntilResync(t *testing.T) 
 		t.Fatalf("cleanup before durability resync error=%v code=%s, want FailedPrecondition", err, status.Code(err))
 	}
 
+	if _, err := coordinator.BeginReleaseAndFence(release); status.Code(err) != codes.Unavailable || !state.IsCommitUnknown(err) {
+		t.Fatalf("retry while parent sync fails error=%v code=%s", err, status.Code(err))
+	}
+	if err := coordinator.RecoverSandbox("sandbox-a"); status.Code(err) != codes.Unavailable || !state.IsCommitUnknown(err) {
+		t.Fatalf("recover while parent sync fails error=%v code=%s", err, status.Code(err))
+	}
+	if err := coordinator.CompleteRelease(release); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("cleanup after failed resync error=%v code=%s, want FailedPrecondition", err, status.Code(err))
+	}
+
 	restartedRegistry, err := handoff.NewRegistry(opener)
 	if err != nil {
 		t.Fatal(err)
@@ -221,18 +231,25 @@ func TestCoordinatorParentSyncCommitUnknownFailsClosedUntilResync(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := restarted.RecoverSandbox("sandbox-a"); err != nil {
-		t.Fatal(err)
+	if err := restarted.RecoverSandbox("sandbox-a"); status.Code(err) != codes.Unavailable || !state.IsCommitUnknown(err) {
+		t.Fatalf("restart recovery while parent sync fails error=%v code=%s", err, status.Code(err))
 	}
 	file, code, acquireErr = restartedRegistry.Acquire(handoffRequest(binding))
 	if file != nil || code != runtimev1.FDHandoffCode_FD_HANDOFF_CODE_STALE || !errors.Is(acquireErr, handoff.ErrStaleLease) {
-		t.Fatalf("RELEASING recovery acquire=(%v,%s,%v), want STALE", file, code, acquireErr)
+		t.Fatalf("failed recovery acquire=(%v,%s,%v), want STALE", file, code, acquireErr)
+	}
+	if err := restarted.CompleteRelease(release); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("restart cleanup before sync error=%v code=%s, want FailedPrecondition", err, status.Code(err))
+	}
+
+	armed = false
+	if err := restarted.RecoverSandbox("sandbox-a"); err != nil {
+		t.Fatal(err)
 	}
 	retry, err := restarted.BeginReleaseAndFence(release)
 	if err != nil || !retry.Reused {
 		t.Fatalf("durable resync retry=(%+v,%v), want reused", retry, err)
 	}
-	armed = false
 	if err := restarted.CompleteRelease(release); err != nil {
 		t.Fatal(err)
 	}
