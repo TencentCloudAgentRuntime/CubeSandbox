@@ -1,6 +1,6 @@
 # CubeSandbox Kubernetes RuntimeClass PoC 开发计划
 
-> 状态：执行中（S0.2 独立审查）
+> 状态：执行中（S0.3 CNI 网络）
 > 日期：2026-08-30  
 > 总体设计：[CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)  
 > 活动交接：[Kubernetes RuntimeClass PoC Handoff](../../../docs/handoffs/kubernetes-runtime/README.md)
@@ -120,13 +120,13 @@ tests/e2e/kubernetes-runtime/
 | 方案与开发准备 | `DONE` | 总体设计、S0～S6 开发计划、轻量 handoff 和未决问题表 | `95b3164a`、`3b564b76`；VitePress 构建通过 | 从 S0.1 开始技术探针 |
 
 ## 5. S0：架构技术探针
-> Milestone 状态：`IN_PROGRESS`。S0.1 已通过独立审查；S0.2 云上验收完成，等待独立审查。
+> Milestone 状态：`IN_PROGRESS`。S0.1、S0.2 已通过独立审查；当前执行 S0.3。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
 | S0.1 Sandbox API | `DONE` | Codex | 双服务探针、独立配置、固定 CRI 输入和一键验收脚本已提交；真实正常链路及四类明确异常通过，10 类残留均为 0 | 实现 `f38622c2`、`6a53a52d`、`33dbf479`；TAT `inv-68246d0jt1`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.1/README.md)；subagent `APPROVE` | S0.2 RootFS/virtiofs |
-| S0.2 RootFS/virtiofs | `VALIDATING` | Codex | 标准 OCI active snapshot 已在真实 Cube Guest 运行；动态 bind/rename/只读与卸载约束已验证；20 次创建删除无残留 | TAT `inv-9827ikgt4f`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.2/README.md) | subagent 独立审查 |
-| S0.3 CNI 网络 | `NOT_STARTED` | 待指定 | — | — | 选择首个 CNI 并建立 VM 网络原型 |
+| S0.2 RootFS/virtiofs | `DONE` | Codex | 标准 OCI active snapshot 已在真实 Cube Guest 运行；动态 bind/rename/只读与卸载约束已验证；20 次创建删除无残留 | 实现 `c014d3c6`；TAT `inv-9827ikgt4f`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.2/README.md)；subagent `APPROVE` | S0.3 CNI 网络 |
+| S0.3 CNI 网络 | `IN_PROGRESS` | Codex | 已进入候选 CNI 与 VM 网络原型调研 | — | 选择首个 CNI，形成探针并验证 Pod IP、DNS、Service、NetworkPolicy 与跨节点路径 |
 | S0.4 组件接口 | `NOT_STARTED` | 待指定 | — | — | 形成最小版本化 RPC 草案 |
 
 ### S0.1 云上开发基线（2026-08-30）
