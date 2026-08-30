@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+mod s0_rootfs;
 mod srv;
 mod task_srv;
 mod tools;

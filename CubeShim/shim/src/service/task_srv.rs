@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,7 @@ use crate::common::utils::Utils;
 use crate::container::{container_mgr::ContainerInfo, exec::Tty};
 use crate::log::{stat_defer, Log, LogLevel};
 use crate::sandbox::sb;
+use crate::service::s0_rootfs::{self, PreparedRootfs};
 use crate::service::update_ext;
 use crate::{debugf, errf, infof, warnf};
 const MODULE: &str = "Shim";
@@ -271,9 +273,10 @@ mod stats_tests {
 
 #[derive(Clone)]
 pub struct TaskService {
-    //id: String,
+    sandbox_id: String,
     //ns: String,
     sandbox: Arc<Mutex<sb::SandBox>>,
+    s0_rootfs: Arc<Mutex<HashMap<String, PreparedRootfs>>>,
     log: Log,
     //debug: bool,
     exit: Arc<ExitSignal>,
@@ -301,9 +304,10 @@ impl TaskService {
 
         let sb = sb::SandBox::new(id.clone(), log.clone(), debug, tx.clone());
         TaskService {
-            //id,
+            sandbox_id: id,
             //ns,
             sandbox: Arc::new(Mutex::new(sb)),
+            s0_rootfs: Arc::new(Mutex::new(HashMap::new())),
             log,
             //debug: debug,
             exit,
@@ -337,10 +341,22 @@ impl Task for TaskService {
 
         let bundle = req.bundle.as_str();
 
-        let spec = Utils::load_spec(bundle).map_err(|e| {
+        let mut spec = Utils::load_spec(bundle).map_err(|e| {
             errf!(self.log, "Load spec failed:{}", e.clone());
             Others(format!("Load spec failed:{}", e))
         })?;
+        let prepared_rootfs = s0_rootfs::prepare(&self.sandbox_id, &req.id, &req.rootfs, &mut spec)
+            .map_err(|e| {
+                errf!(self.log, "Prepare S0 standard rootfs failed:{}", e);
+                Error::Other(format!("Prepare S0 standard rootfs failed:{}", e))
+            })?;
+        if let Some(rootfs) = prepared_rootfs.as_ref() {
+            infof!(
+                self.log,
+                "S0 standard rootfs mounted at {}",
+                rootfs.target().display()
+            );
+        }
 
         infof!(
             self.log,
@@ -391,6 +407,9 @@ impl Task for TaskService {
                 errf!(self.log, "Create container failed:{}", e.clone());
                 Error::Other(format!("Create container failed:{}", e))
             })?;
+        if let Some(rootfs) = prepared_rootfs {
+            self.s0_rootfs.lock().await.insert(req.id.clone(), rootfs);
+        }
         infof!(
             self.log,
             "start container finish at:{}",
@@ -615,6 +634,14 @@ impl Task for TaskService {
                             seconds: tm.timestamp(),
                             ..Default::default()
                         };
+                        let rootfs = { self.s0_rootfs.lock().await.remove(&req.id) };
+                        if let Some(rootfs) = rootfs {
+                            if let Err(e) = rootfs.cleanup() {
+                                // Drop performs a lazy-unmount fallback. The S0
+                                // replay separately asserts no mount remains.
+                                warnf!(self.log, "cleanup S0 standard rootfs failed:{}", e);
+                            }
+                        }
                         let event = TaskDelete {
                             container_id: req.id.clone(),
                             pid: sb.pid(),

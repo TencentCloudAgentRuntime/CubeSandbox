@@ -1,0 +1,12 @@
+version = 3
+root = "/data/cubelet/s0.2-containerd/root"
+state = "/data/cubelet/s0.2-containerd/state"
+
+[grpc]
+  address = "/run/containerd-cube-s0.2/containerd.sock"
+
+[debug]
+  level = "debug"
+
+[plugins."io.containerd.cri.v1.runtime"]
+  disable_tcp_service = true

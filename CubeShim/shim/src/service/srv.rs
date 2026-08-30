@@ -13,7 +13,7 @@ use containerd_shim::{
 };
 
 use nix::sys::signal::Signal;
-use std::{fs, sync::Arc};
+use std::{fs, io::Read, sync::Arc};
 
 #[derive(Clone)]
 pub struct Service {
@@ -37,6 +37,15 @@ impl Shim for Service {
     }
 
     async fn start_shim(&mut self, opts: StartOpts) -> Result<String, Error> {
+        // containerd 2.3 writes BootstrapParams to the start action's stdin, but
+        // containerd-shim 0.9.0's start path never consumes that request. Drain
+        // it before using the library's legacy address-response path; flags and
+        // environment still carry the inputs needed to spawn the server. Remove
+        // this adapter when CubeShim moves to a bootstrap-aware shim library.
+        consume_start_input(std::io::stdin().lock()).map_err(|err| Error::IoError {
+            context: "read containerd bootstrap input".to_string(),
+            err,
+        })?;
         let grouping = opts.id.clone();
         let address: String = spawn(opts, &grouping, Vec::new()).await?;
         fs::write(ADDRESS_FILE, address.as_bytes()).map_err(|e| Error::IoError {
@@ -84,5 +93,27 @@ impl Shim for Service {
             publisher,
         )
         .await
+    }
+}
+
+fn consume_start_input(mut input: impl Read) -> std::io::Result<usize> {
+    let mut data = Vec::new();
+    input.read_to_end(&mut data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::consume_start_input;
+    use std::io::Cursor;
+
+    #[test]
+    fn consume_start_input_drains_bootstrap_payload() {
+        let payload = b"containerd-2.3-bootstrap";
+        let mut input = Cursor::new(payload);
+
+        let consumed = consume_start_input(&mut input).unwrap();
+
+        assert_eq!(consumed, payload.len());
+        assert_eq!(input.position(), payload.len() as u64);
     }
 }
