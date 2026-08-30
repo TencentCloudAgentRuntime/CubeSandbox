@@ -2,15 +2,15 @@
 
 ## 当前 Stage
 
-S0.4 `VALIDATING`：第三轮问题已整改，等待第四轮复审。
+S0.4 `VALIDATING`：第四轮问题已整改，等待第五轮复审。
 
 ## 基线
 
-线性化 `e3205220`，commit outcome `aace4c4a`，证据 `4af46a9f`。
+commit outcome `aace4c4a`，durability confirm `695fbada`，证据 `45db504e`。
 
 ## 已完成
 
-pre-rename 保留 READY；post-rename commit-unknown 撤销 FD 并阻止 cleanup，重同步后继续；真实 Store 注入已测。
+commit-unknown 时撤销 FD；retry/Recover 必须精确校验并 parent-dir fsync，确认前 Complete 被拒绝；真实故障已测。
 
 ## 未完成
 
@@ -18,7 +18,7 @@ pre-rename 保留 READY；post-rename commit-unknown 撤销 FD 并阻止 cleanup
 
 ## 验证
 
-Go test/race/vet、20 轮故障并发 race、官方 builder 契约、VitePress、diff check 均通过。
+Go test/race/vet、20 轮故障 race、官方 builder 契约、VitePress、diff check 均通过。
 
 ## 阻塞
 
