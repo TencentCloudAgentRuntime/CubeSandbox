@@ -1,6 +1,6 @@
 # CubeSandbox Kubernetes RuntimeClass PoC 开发计划
 
-> 状态：执行中（S0.3 CNI 网络）
+> 状态：执行中（S0.3 CNI 网络审查）
 > 日期：2026-08-30  
 > 总体设计：[CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)  
 > 活动交接：[Kubernetes RuntimeClass PoC Handoff](../../../docs/handoffs/kubernetes-runtime/README.md)
@@ -120,13 +120,13 @@ tests/e2e/kubernetes-runtime/
 | 方案与开发准备 | `DONE` | 总体设计、S0～S6 开发计划、轻量 handoff 和未决问题表 | `95b3164a`、`3b564b76`；VitePress 构建通过 | 从 S0.1 开始技术探针 |
 
 ## 5. S0：架构技术探针
-> Milestone 状态：`IN_PROGRESS`。S0.1、S0.2 已通过独立审查；当前执行 S0.3。
+> Milestone 状态：`IN_PROGRESS`。S0.1、S0.2 已通过独立审查；当前 S0.3 已进入独立审查。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
 | S0.1 Sandbox API | `DONE` | Codex | 双服务探针、独立配置、固定 CRI 输入和一键验收脚本已提交；真实正常链路及四类明确异常通过，10 类残留均为 0 | 实现 `f38622c2`、`6a53a52d`、`33dbf479`；TAT `inv-68246d0jt1`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.1/README.md)；subagent `APPROVE` | S0.2 RootFS/virtiofs |
 | S0.2 RootFS/virtiofs | `DONE` | Codex | 标准 OCI active snapshot 已在真实 Cube Guest 运行；动态 bind/rename/只读与卸载约束已验证；20 次创建删除无残留 | 实现 `c014d3c6`；TAT `inv-9827ikgt4f`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.2/README.md)；subagent `APPROVE` | S0.3 CNI 网络 |
-| S0.3 CNI 网络 | `IN_PROGRESS` | Codex | 已进入候选 CNI 与 VM 网络原型调研 | — | 选择首个 CNI，形成探针并验证 Pod IP、DNS、Service、NetworkPolicy 与跨节点路径 |
+| S0.3 CNI 网络 | `VALIDATING` | Codex | Cilium tcfilter/TAP 跨 netns FD 已接入；Pod IP/MAC/MTU、DNS、Service、跨节点和 NetworkPolicy 通过，成功/失败资源残留均为 0 | build `inv-982ekw0q2u`；完整验收 `inv-a82g9g0x1f`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.3/README.md) | 等待 subagent 明确 `APPROVE`；通过后标记 `DONE` 并进入 S0.4 |
 | S0.4 组件接口 | `NOT_STARTED` | 待指定 | — | — | 形成最小版本化 RPC 草案 |
 
 ### S0.1 云上开发基线（2026-08-30）
@@ -139,7 +139,7 @@ tests/e2e/kubernetes-runtime/
 | 存储 | 新 200GB 数据盘 `/dev/vdb` 以 XFS 挂载到 `/data/cubelet`，`reflink=1`，写入 `/etc/fstab` |
 | 源码与构建 | 云节点从公开 `master` 检出精确基线 `09274501dd12e47dbed2dcc77d8eb67dd661d49c`；`make shim` 生成 `containerd-shim-cube-rs` 和 `cube-runtime` |
 | 测试 | `make shim-test`：shim 61 个、cube-runtime 1 个测试通过，0 失败；构建 TAT `inv-38221eg40s`，测试 TAT `inv-6822eegkw4`，汇总 TAT `inv-3822g20r7i` |
-| 网络/访问 | 复用账号内现有 `cubesandbox-cluster-subnet`；PoC 专属安全组 `sg-k3absy6z`。TAT Agent 在线；公网 SSH 转发返回 `502 Server UnReachable`，当前以 TAT 执行命令，不阻塞自动化验证 |
+| 网络/访问 | 复用账号内现有 `cubesandbox-cluster-subnet` 和共享安全组 `sg-k3absy6z`（均非本 PoC 创建）。TAT Agent 在线；公网 SSH 转发返回 `502 Server UnReachable`，当前以 TAT 执行命令，不阻塞自动化验证 |
 | 集群 | 已确认香港地域可创建 Kubernetes 1.36.2；为避免在架构探针前扩张成本，尚未创建专属 TKE 集群 |
 
 上述基线当时只证明云上开发环境、KVM API 和现有 CubeShim 可构建/可测试；后续 Sandbox API trace 与清理结论见下一节。完整 Cube Guest 和 virtiofs 仍由 S0.2 验证。
@@ -211,6 +211,23 @@ S0.1 尚未证明 Cube Guest、virtiofs 或 Cube-backed Task；这些属于 S0.2
 Guest writable upper 当前不回写 containerd active upper。S0/S1 的运行、退出码与删除
 语义已成立；持久化 writable layer、容器重启对账和 snapshotter 协同留到 S3。
 
+
+### S0.3 CNI 网络探针结果（2026-08-31）
+
+探针位于 `CubeShim/s0-cni-probe`。S0 使用 anchor Pod 保存 CNI netns，在其中创建 TAP 和双向 tcfilter；CubeShim 从该 netns 打开 TAP 并把 FD 交给嵌入式 VMM。S1 必须把 netns/attachment 来源改为 Sandbox Service 与 Cubelet network adapter，并删除 anchor 与 S0 annotation。
+
+| 项目 | 结果 |
+|---|---|
+| 云上环境 | 香港二区 3 节点 Kubernetes 1.36.4、containerd 2.3.4、Cilium 1.20.0；隔离验收节点为 `ins-4dyul5ag`，匹配 PVM Host/Guest 6.6.69 |
+| Pod 网络身份 | Guest 使用 CNI 分配的 Pod IP、MAC、MTU、/32 路由和网关；MAC/MTU 从目标 netns 的 netlink 读取，避免误读宿主机 sysfs |
+| 数据面 | TAP 与 Pod eth0 使用双向 tc ingress redirect；跨 netns TAP FD 显式禁用 name-based ioctl 与 offload |
+| Kubernetes 网络 | 跨节点 PodIP、Cluster DNS、Service ClusterIP 和 Cilium egress NetworkPolicy 全部通过 |
+| OCI/DNS | 沿用 S0.2 标准 OCI rootfs；Pod DNS 同时进入 sandbox，并通过现有 custom-file 机制注入容器 `/etc/resolv.conf` |
+| 异常与清理 | 相对 netns 路径在创建前明确失败；成功/失败后 Task、Container、Shim、TAP、tc filter、rootfs mount/dir 均为 0，测试 namespace 已删除 |
+| 构建/测试 | 云端 release 构建与 74 项测试通过，TAT `inv-982ekw0q2u`；本地 `make shim-test` 通过 CubeShim 74 项和 cube-runtime 1 项测试；binary SHA-256 `4414ee5da24871978b65a34a04a2999430169b91e0f18f1163b90e14d6d43a10` |
+| 最终验收 | anchor 对照 `inv-b82g3a0mda`；无网络对照 `inv-b82fadg4xe`；Cube 完整 CNI `inv-a82g9g0x1f`；最终集群状态 `inv-682gcjgsnu`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.3/README.md) |
+
+诊断同时确认 Host 6.12/Guest 6.6 的 reset 失败与网络无关；匹配 Host/Guest 6.6.69 后无网络与完整 CNI 用例均成功。S0 只冻结 Cilium tcfilter 作为首选 PoC 路径，VPC-CNI/Global Router 留给后续 adapter 兼容验证。
 
 ### 目标
 
