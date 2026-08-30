@@ -2,32 +2,32 @@
 
 ## 当前 Stage
 
-S0.4 `IN_PROGRESS`：冻结组件接口边界并形成可验证草案。
+S0.4 `VALIDATING`：实现和验收已完成，等待独立审查。
 
 ## 基线
 
-S0.3 实现/证据 `e16411fd`、`80bacacb`、`168cd061`、`14ab3769`；审查门禁 `fe2989a4`，subagent `APPROVE`。
+接口 `40f4389a`，能力协商 `30bf3365`，探针 `eb7aed1a`/`2e2612a4`，证据 `9676d73e`。
 
 ## 已完成
 
-S0.1～S0.3 均为 `DONE`。三节点 Kubernetes 1.36.4 + containerd 2.3.4 + Cilium 1.20.0 保留；仅本任务临时传输材料已清理。
+RuntimeResource v1、Agent capability negotiation、无递归 containerd 契约、调用图和证据均已提交。
 
 ## 未完成
 
-CubeShim ↔ Cubelet 最小版本化 RPC、CubeShim ↔ Agent capability negotiation、禁止递归调用 Cubelet containerd 的架构验证与审查。
+subagent 必须明确 `APPROVE`；之后标记 S0/S0.4 `DONE` 并进入 S1.1。
 
 ## 验证
 
-S0.3：`make shim-test` 75 项、完整 CNI `inv-a82g9g0x1f`、最终状态 `inv-682gcjgsnu` 均成功；`make handoff-validate` 通过。
+契约探针成功；Shim 76 + runtime 1、Agent 114 项通过；VitePress 与 diff check 通过。云端仅完成环境 TAT 检查，源码上传在执行前被平台拒绝且未改云节点。
 
 ## 阻塞
 
-无。
+无；S0.4 为编译契约，云端未重放不阻塞。S1 必须云上验收真实 VM。
 
 ## 受保护路径
 
-`CubeShim/`、`Cubelet/`、`agent/`、开发文档与 `docs/handoffs/kubernetes-runtime/`；不得操作非本 PoC 云资源。
+`CubeShim/`、`Cubelet/`、`agent/`、相关文档；只操作本 PoC 云资源。
 
 ## 下一步
 
-盘点现有 RPC/containerd 依赖，提交 S0.4 接口与调用图、契约测试/静态验证和证据，独立审查至 `APPROVE`。
+审查上述五个提交、接口边界和 `evidence/s0.4/`；有问题修复并复审，否则完成状态提交并启动 S1.1。
