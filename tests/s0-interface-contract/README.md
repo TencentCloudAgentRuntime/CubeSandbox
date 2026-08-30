@@ -13,6 +13,6 @@
 ./tests/s0-interface-contract/run.sh
 ```
 
-Rust 检查默认在 `cube-sandbox-builder:ubuntu2004` 中执行，避免依赖宿主机的 `libseccomp` 等构建库；已准备等价依赖的环境可设置 `S0_4_RUST_TEST_MODE=native`。
+Rust 检查默认在 builder 镜像中执行，自动选择 Docker 或 containerd `ctr`；可用 `CUBE_BUILDER_RUNNER`、`CUBE_BUILDER_IMAGE` 覆盖。已准备等价依赖的环境可设置 `S0_4_RUST_TEST_MODE=native`。
 
 脚本验证 proto 副本同步、禁止 runtime/v1 暴露递归 containerd/CRI 方法、Go descriptor 契约、CubeShim capability 解析与 Agent capability 响应。
