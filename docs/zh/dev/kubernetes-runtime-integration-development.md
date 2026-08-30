@@ -1,6 +1,6 @@
 # CubeSandbox Kubernetes RuntimeClass PoC 开发计划
 
-> 状态：执行中（S1.1 Sandbox VM 生命周期）
+> 状态：执行中（S1.1 Sandbox VM 生命周期验证）
 > 日期：2026-08-30  
 > 总体设计：[CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)  
 > 活动交接：[Kubernetes RuntimeClass PoC Handoff](../../../docs/handoffs/kubernetes-runtime/README.md)
@@ -268,7 +268,7 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
-| S1.1 Sandbox VM 生命周期 | `IN_PROGRESS` | Codex | 已关闭 S0 接口门禁，开始把 Sandbox Service 契约移植到 Rust CubeShim 并接入 Cube VM | — | 实现一个 PodSandbox 对应一个 VM |
+| S1.1 Sandbox VM 生命周期 | `VALIDATING` | Codex | Rust Sandbox Service、Cubelet RuntimeResource adapter/recovery、真实 Unix FD handoff 与 VM 失败回滚已实现；官方 containerd 跨语言 Create 成功，缺 KVM Start 精确释放 | `47522929`、`e7881524`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s1.1/README.md) | 云端真实 Cube VM 成功链路、清理验收与 subagent 复审 |
 | S1.2 OCI Task | `NOT_STARTED` | 待指定 | — | — | 打通单容器 Create/Start/Wait/Kill/Delete |
 | S1.3 CRI 基础交互 | `NOT_STARTED` | 待指定 | — | — | 实现 logs、非 TTY exec、信号和退出码 |
 | S1.4 清理与共存 | `NOT_STARTED` | 待指定 | — | — | 验证资源清理、runc 和 legacy 回归 |
