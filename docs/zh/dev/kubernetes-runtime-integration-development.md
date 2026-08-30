@@ -127,7 +127,7 @@ tests/e2e/kubernetes-runtime/
 | S0.1 Sandbox API | `DONE` | Codex | 双服务探针、独立配置、固定 CRI 输入和一键验收脚本已提交；真实正常链路及四类明确异常通过，10 类残留均为 0 | 实现 `f38622c2`、`6a53a52d`、`33dbf479`；TAT `inv-68246d0jt1`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.1/README.md)；subagent `APPROVE` | S0.2 RootFS/virtiofs |
 | S0.2 RootFS/virtiofs | `DONE` | Codex | 标准 OCI active snapshot 已在真实 Cube Guest 运行；动态 bind/rename/只读与卸载约束已验证；20 次创建删除无残留 | 实现 `c014d3c6`；TAT `inv-9827ikgt4f`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.2/README.md)；subagent `APPROVE` | S0.3 CNI 网络 |
 | S0.3 CNI 网络 | `DONE` | Codex | Cilium tcfilter/TAP 跨 netns FD 已接入；Pod IP/MAC/MTU、DNS、Service、跨节点和 NetworkPolicy 通过，成功/失败资源残留均为 0 | 实现 `e16411fd`、`80bacacb`、`168cd061`；完整验收 `inv-a82g9g0x1f`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.3/README.md)；subagent `APPROVE` | S0.4 组件接口 |
-| S0.4 组件接口 | `VALIDATING` | Codex | RuntimeResource v1、持久化 lease 状态机、带 generation/lease/token 栅栏的 FD handoff、直接 gRPC 注册、Agent capability negotiation 已实现；第二轮线性化与 peer-auth 问题已整改 | 实现 `40f4389a`、`30bf3365`、`eb7aed1a`、`2e2612a4`、整改 `ea192ecb`、`e3205220`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s0.4/README.md) | 独立 subagent 审查至 `APPROVE` |
+| S0.4 组件接口 | `VALIDATING` | Codex | RuntimeResource v1、持久化 lease 状态机、带 generation/lease/token 栅栏的 FD handoff、直接 gRPC 注册、Agent capability negotiation 已实现；第三轮 commit-unknown 问题已整改 | 实现 `40f4389a`、`30bf3365`、`eb7aed1a`、`2e2612a4`、整改 `ea192ecb`、`e3205220`、`aace4c4a`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s0.4/README.md) | 独立 subagent 审查至 `APPROVE` |
 
 ### S0.1 云上开发基线（2026-08-30）
 
