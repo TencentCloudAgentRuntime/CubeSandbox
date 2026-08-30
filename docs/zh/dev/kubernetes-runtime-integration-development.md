@@ -124,7 +124,7 @@ tests/e2e/kubernetes-runtime/
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
-| S0.1 Sandbox API | `IN_PROGRESS` | Codex | 香港 PVM 开发节点、containerd 2.3.4、XFS reflink、CubeShim 构建与单测基线已就绪 | 本节“[S0.1 云上开发基线](#s0-1-云上开发基线-2026-08-30)”；TAT `inv-3822g20r7i` | 实现 containerd 2.3 最小 Sandbox shim，记录 CRI/Sandbox/Task 调用 trace 和异常清理 |
+| S0.1 Sandbox API | `VALIDATING` | Codex | 增加显式启用的双服务探针、独立 containerd/CNI 配置和 trace；真实 CRI 正常链路及四类异常清理已通过 | 本节“[S0.1 Sandbox API 探针结果](#s0-1-sandbox-api-探针结果-2026-08-30)”；TAT `inv-6823ei0b0e`、`inv-0823cv0q03` | subagent 独立 review；问题清零并确认通过后改为 `DONE` |
 | S0.2 RootFS/virtiofs | `NOT_STARTED` | 待指定 | — | — | 验证标准 rootfs 和动态 bind/unmount |
 | S0.3 CNI 网络 | `NOT_STARTED` | 待指定 | — | — | 选择首个 CNI 并建立 VM 网络原型 |
 | S0.4 组件接口 | `NOT_STARTED` | 待指定 | — | — | 形成最小版本化 RPC 草案 |
@@ -142,7 +142,40 @@ tests/e2e/kubernetes-runtime/
 | 网络/访问 | 复用账号内现有 `cubesandbox-cluster-subnet`；PoC 专属安全组 `sg-k3absy6z`。TAT Agent 在线；公网 SSH 转发返回 `502 Server UnReachable`，当前以 TAT 执行命令，不阻塞自动化验证 |
 | 集群 | 已确认香港地域可创建 Kubernetes 1.36.2；为避免在架构探针前扩张成本，尚未创建专属 TKE 集群 |
 
-上述结果只证明云上开发基线、KVM API 和现有 CubeShim 可构建/可测试。尚未证明完整 Cube Guest 启动，也未得到 containerd Sandbox API 调用 trace，因此 S0.1 保持 `IN_PROGRESS`。
+上述基线当时只证明云上开发环境、KVM API 和现有 CubeShim 可构建/可测试；后续 Sandbox API trace 与清理结论见下一节。完整 Cube Guest 和 virtiofs 仍由 S0.2 验证。
+
+### S0.1 Sandbox API 探针结果（2026-08-30）
+
+探针位于 `CubeShim/sandbox-probe`，必须单独构建，不进入默认产物。它采用 containerd
+2.3.4 的 bootstrap v3，在一个 ttrpc endpoint 同时注册 Sandbox Service 与官方
+runc Task v3 Service。此处复用 runc 只用于隔离验证 containerd 契约；S1.1 必须把
+这些契约移植到 Rust CubeShim，并替换为 Cube-backed Task，之后删除 Go 探针。
+
+| 项目 | 结果 |
+|---|---|
+| 配置 | 独立 root/state/socket，不替换节点主 containerd；handler `cube-s0` 使用 `runtime_type = "io.containerd.cube-s0.v1"`、绝对 `runtime_path` 和 `sandboxer = "shim"` |
+| 正常链路 | CNI ADD → bootstrap v3 → Sandbox Create/Start/Wait → Sandbox Status/Platform → Task v3 Create/Start/Wait/Kill/Delete → Sandbox Stop → CNI DEL → Sandbox Shutdown → shim delete |
+| CRI 结果 | `SANDBOX_READY`，Pod IP `10.88.0.11`；BusyBox 标准 OCI snapshot 进程输出 `cube-s0-task-ok` 并准确返回 exit code 23 |
+| 正常清理 | 删除后 CRI Pod=0、Container=0、mount=0、shim 进程=0、containerd sandbox metadata=0 |
+| 异常清理 | `CreateSandbox` 失败、`StartSandbox` 失败、Create 中 shim exit(86)、延迟 Create 后客户端取消均回到上述五项 0；每例均有 CNI ADD/DEL |
+| 本地验证 | `go test -race ./...`、`go vet ./...`、`git diff --check` 通过 |
+| 云端证据 | 基线复验 `inv-a8234e07gq`；最终正常 trace `inv-6823ei0b0e`；四类异常 `inv-0823cv0q03` |
+
+实测确认以下非显然契约：
+
+- Sandbox bundle 没有 pause 容器 `config.json`，不能直接复用 runc shim manager 的
+  spec/grouping 启动逻辑；
+- bootstrap 必须返回 `version=3, protocol=ttrpc`，Task 才会复用 Sandbox endpoint；
+- `SandboxStatusResponse.state` 必须使用 CRI 枚举字符串
+  `SANDBOX_READY/SANDBOX_NOTREADY`，自由文本 `ready/running` 会被映射为 NotReady；
+- CNI ADD 在 Sandbox Create 前完成；Stop 时先清 Task 和 Sandbox，再执行 CNI DEL；
+  Remove 阶段可能以空 netns 再调用一次 CNI DEL，因此 CNI DEL 必须幂等；
+- Create/Start 失败由 shim controller 调用 Shutdown 并删除 shim/bundle；shim 已崩溃时
+  Shutdown 可能失败，但 containerd 仍执行 shim delete；客户端取消由 CRI 回滚 CNI，
+  最终同样不能残留 metadata、mount、socket 或进程。
+
+S0.1 尚未证明 Cube Guest、virtiofs 或 Cube-backed Task；这些属于 S0.2，不能用本
+探针中的 runc 成功结果代替。
 
 
 ### 目标
