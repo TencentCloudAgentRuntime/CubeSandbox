@@ -2,32 +2,32 @@
 
 ## 当前 Stage
 
-`S0.2 RootFS/virtiofs`，状态 `IN_PROGRESS`，Owner `Codex`。
+`S0.2 RootFS/virtiofs`，状态 `VALIDATING`，Owner `Codex`。
 
 ## 基线
 
-最后验证实现 `33dbf479`；S0.1 证据提交 `7161973c`；CubeSandbox 基线 `09274501dd12e47dbed2dcc77d8eb67dd661d49c`。
+实现 `c014d3c6`；证据 `929739af`；CubeSandbox 基线 `09274501dd12e47dbed2dcc77d8eb67dd661d49c`。
 
 ## 已完成
 
-S0.1 已获 subagent `APPROVE` 并标为 `DONE`；containerd 2.3.4 正常与四异常链路在香港 PVM 节点通过，10 类残留均为 0。`K8S-OQ-001` 已决定。
+标准 containerd overlay active snapshot 已通过 opt-in annotation 转为 Guest 分层只读 rootfs；动态 bind、rename、只读与 detach 语义及 20 次循环已在香港 PVM 节点通过。
 
 ## 未完成
 
-S0.2 尚未验证标准 OCI active snapshot 进入 Cube Guest、VM 启动后动态 bind/rename/只读 mount/unmount，以及 20 次循环清理。
+等待 subagent 独立审查；未获 `APPROVE` 前不得标记 `DONE` 或进入 S0.3。
 
 ## 验证
 
-S0.1 TAT `inv-68246d0jt1` 为 `SUCCESS`；原始 trace 在 `evidence/s0.1/`；VitePress 与 handoff validator 通过。
+构建 TAT `inv-9827fk0njh`：69 tests 通过；验收 TAT `inv-9827ikgt4f`：`S0_2_ROOTFS_PROBE_OK`，残留全 0；证据见 `evidence/s0.2/`。
 
 ## 阻塞
 
-无已知技术阻塞。
+无。普通 Host unmount 可能因 Guest stale inode 返回 EBUSY；已决定 S3 采用 Guest 先卸载、Host `MNT_DETACH`、路径不复用。
 
 ## 受保护路径
 
-`CubeShim/`、`guest-tools/`、`docs/zh/dev/kubernetes-runtime-integration-development.md`、`docs/handoffs/kubernetes-runtime/`。
+`CubeShim/`、`docs/zh/dev/kubernetes-runtime-integration-development.md`、`docs/handoffs/kubernetes-runtime/`。
 
 ## 下一步
 
-subagent 复核 `33dbf479`、TAT 与原始证据；若 APPROVE，将 S0.1 标记 `DONE`，单独更新 handoff 后进入 S0.2；否则修复并重审。
+subagent 复核实现、证据与 S0.2 验收；`APPROVE` 后更新 Stage/handoff 并进入 S0.3，否则修复后重审。
