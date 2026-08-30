@@ -1,6 +1,6 @@
 # CubeSandbox Kubernetes RuntimeClass PoC 开发计划
 
-> 状态：执行中（S0.3 CNI 网络审查）
+> 状态：执行中（S0.4 组件接口）
 > 日期：2026-08-30  
 > 总体设计：[CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)  
 > 活动交接：[Kubernetes RuntimeClass PoC Handoff](../../../docs/handoffs/kubernetes-runtime/README.md)
@@ -120,14 +120,14 @@ tests/e2e/kubernetes-runtime/
 | 方案与开发准备 | `DONE` | 总体设计、S0～S6 开发计划、轻量 handoff 和未决问题表 | `95b3164a`、`3b564b76`；VitePress 构建通过 | 从 S0.1 开始技术探针 |
 
 ## 5. S0：架构技术探针
-> Milestone 状态：`IN_PROGRESS`。S0.1、S0.2 已通过独立审查；当前 S0.3 已进入独立审查。
+> Milestone 状态：`IN_PROGRESS`。S0.1、S0.2、S0.3 已通过独立审查；当前执行 S0.4。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
 | S0.1 Sandbox API | `DONE` | Codex | 双服务探针、独立配置、固定 CRI 输入和一键验收脚本已提交；真实正常链路及四类明确异常通过，10 类残留均为 0 | 实现 `f38622c2`、`6a53a52d`、`33dbf479`；TAT `inv-68246d0jt1`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.1/README.md)；subagent `APPROVE` | S0.2 RootFS/virtiofs |
 | S0.2 RootFS/virtiofs | `DONE` | Codex | 标准 OCI active snapshot 已在真实 Cube Guest 运行；动态 bind/rename/只读与卸载约束已验证；20 次创建删除无残留 | 实现 `c014d3c6`；TAT `inv-9827ikgt4f`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.2/README.md)；subagent `APPROVE` | S0.3 CNI 网络 |
-| S0.3 CNI 网络 | `VALIDATING` | Codex | Cilium tcfilter/TAP 跨 netns FD 已接入；Pod IP/MAC/MTU、DNS、Service、跨节点和 NetworkPolicy 通过，成功/失败资源残留均为 0 | build `inv-982ekw0q2u`；完整验收 `inv-a82g9g0x1f`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.3/README.md) | 等待 subagent 明确 `APPROVE`；通过后标记 `DONE` 并进入 S0.4 |
-| S0.4 组件接口 | `NOT_STARTED` | 待指定 | — | — | 形成最小版本化 RPC 草案 |
+| S0.3 CNI 网络 | `DONE` | Codex | Cilium tcfilter/TAP 跨 netns FD 已接入；Pod IP/MAC/MTU、DNS、Service、跨节点和 NetworkPolicy 通过，成功/失败资源残留均为 0 | 实现 `e16411fd`、`80bacacb`、`168cd061`；完整验收 `inv-a82g9g0x1f`；[原始证据](../../handoffs/kubernetes-runtime/evidence/s0.3/README.md)；subagent `APPROVE` | S0.4 组件接口 |
+| S0.4 组件接口 | `IN_PROGRESS` | Codex | 已冻结目标：CubeShim ↔ Cubelet 资源 RPC、CubeShim ↔ Agent capability negotiation、无递归 containerd 依赖 | — | 盘点现有接口并形成可验证的最小版本化草案 |
 
 ### S0.1 云上开发基线（2026-08-30）
 
