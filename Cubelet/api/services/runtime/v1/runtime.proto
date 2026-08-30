@@ -1,0 +1,175 @@
+// Copyright (c) 2024 Tencent Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+
+syntax = "proto3";
+
+package cubelet.services.runtime.v1;
+
+option go_package = "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1;runtime";
+
+// RuntimeResource exposes node-resource operations to CubeShim.
+//
+// This service is intentionally not a CRI, image, snapshot, container, task, or
+// sandbox runtime. Implementations MUST NOT call Cubelet embedded containerd to
+// create the same sandbox. The host containerd remains the sole owner of OCI
+// images, snapshots, CNI ordering, and Kubernetes sandbox/task state.
+service RuntimeResource {
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+  rpc PrepareSandbox(PrepareSandboxRequest) returns (PrepareSandboxResponse);
+  rpc ReleaseSandbox(ReleaseSandboxRequest) returns (ReleaseSandboxResponse);
+  rpc InspectSandbox(InspectSandboxRequest) returns (InspectSandboxResponse);
+  // ReconcileSandboxes is report-only in v1. Cleanup always requires an
+  // explicit idempotent ReleaseSandbox call.
+  rpc ReconcileSandboxes(ReconcileSandboxesRequest) returns (ReconcileSandboxesResponse);
+}
+
+message GetCapabilitiesRequest {
+  uint32 client_api_version = 1;
+}
+
+message Capability {
+  string name = 1;
+  uint32 version = 2;
+}
+
+message GetCapabilitiesResponse {
+  uint32 api_version = 1;
+  repeated Capability capabilities = 2;
+  // v1 MUST return "node-resources-only".
+  string service_mode = 3;
+  // Unix socket used for one-shot TAP delivery with SCM_RIGHTS. File
+  // descriptors are never encoded in protobuf.
+  string fd_handoff_endpoint = 4;
+}
+
+message PodIdentity {
+  string uid = 1;
+  string namespace = 2;
+  string name = 3;
+  uint32 attempt = 4;
+}
+
+message ResourceRequest {
+  uint32 vcpu_count = 1;
+  uint64 memory_bytes = 2;
+}
+
+message NetworkIntent {
+  // Network namespace already created by host containerd/CNI.
+  string netns_path = 1;
+  string interface_name = 2;
+  string pod_ip = 3;
+  repeated string dns = 4;
+}
+
+message PrepareSandboxRequest {
+  string sandbox_id = 1;
+  // Stable across retries of the same desired generation.
+  string idempotency_key = 2;
+  // Monotonically increases when the caller replaces a sandbox with the same ID.
+  uint64 generation = 3;
+  PodIdentity pod = 4;
+  ResourceRequest resources = 5;
+  NetworkIntent network = 6;
+}
+
+message RuntimeAssets {
+  string kernel_path = 1;
+  string agent_path = 2;
+  string guest_image_path = 3;
+  string shared_root = 4;
+}
+
+message Route {
+  string destination = 1;
+  string gateway = 2;
+  string source = 3;
+  string device = 4;
+  uint32 scope = 5;
+}
+
+message Neighbor {
+  string ip = 1;
+  string mac = 2;
+  string device = 3;
+}
+
+message NetworkAttachment {
+  string network_handle = 1;
+  string tap_name = 2;
+  string guest_interface_name = 3;
+  string mac = 4;
+  uint32 mtu = 5;
+  repeated string ips = 6;
+  repeated Route routes = 7;
+  repeated Neighbor neighbors = 8;
+}
+
+message PreparedSandbox {
+  string sandbox_id = 1;
+  string lease_id = 2;
+  uint64 generation = 3;
+  RuntimeAssets assets = 4;
+  NetworkAttachment network = 5;
+}
+
+message PrepareSandboxResponse {
+  PreparedSandbox sandbox = 1;
+  // True when an idempotent retry returned an existing matching generation.
+  bool reused = 2;
+}
+
+message ReleaseSandboxRequest {
+  string sandbox_id = 1;
+  string lease_id = 2;
+  uint64 generation = 3;
+  string idempotency_key = 4;
+}
+
+message ReleaseSandboxResponse {
+  // True both after a successful release and when the generation was absent.
+  bool released = 1;
+}
+
+message InspectSandboxRequest {
+  string sandbox_id = 1;
+}
+
+enum SandboxResourceState {
+  SANDBOX_RESOURCE_STATE_UNSPECIFIED = 0;
+  SANDBOX_RESOURCE_STATE_PREPARING = 1;
+  SANDBOX_RESOURCE_STATE_READY = 2;
+  SANDBOX_RESOURCE_STATE_RELEASING = 3;
+  SANDBOX_RESOURCE_STATE_RELEASED = 4;
+  SANDBOX_RESOURCE_STATE_ERROR = 5;
+}
+
+message InspectSandboxResponse {
+  bool found = 1;
+  SandboxResourceState state = 2;
+  PreparedSandbox sandbox = 3;
+  string last_error = 4;
+}
+
+message ReconcileSandboxesRequest {
+  repeated string live_sandbox_ids = 1;
+}
+
+enum ReconcileDisposition {
+  RECONCILE_DISPOSITION_UNSPECIFIED = 0;
+  RECONCILE_DISPOSITION_LIVE = 1;
+  RECONCILE_DISPOSITION_ORPHAN_CANDIDATE = 2;
+  RECONCILE_DISPOSITION_MISSING = 3;
+}
+
+message ReconcileEntry {
+  string sandbox_id = 1;
+  uint64 generation = 2;
+  ReconcileDisposition disposition = 3;
+  string detail = 4;
+}
+
+message ReconcileSandboxesResponse {
+  repeated ReconcileEntry entries = 1;
+}

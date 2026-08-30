@@ -177,6 +177,33 @@
   
     - [CubeLet](#cubelet-services-cubebox-v1-CubeLet)
   
+- [api/services/runtime/v1/runtime.proto](#api_services_runtime_v1_runtime-proto)
+    - [Capability](#cubelet-services-runtime-v1-Capability)
+    - [GetCapabilitiesRequest](#cubelet-services-runtime-v1-GetCapabilitiesRequest)
+    - [GetCapabilitiesResponse](#cubelet-services-runtime-v1-GetCapabilitiesResponse)
+    - [InspectSandboxRequest](#cubelet-services-runtime-v1-InspectSandboxRequest)
+    - [InspectSandboxResponse](#cubelet-services-runtime-v1-InspectSandboxResponse)
+    - [Neighbor](#cubelet-services-runtime-v1-Neighbor)
+    - [NetworkAttachment](#cubelet-services-runtime-v1-NetworkAttachment)
+    - [NetworkIntent](#cubelet-services-runtime-v1-NetworkIntent)
+    - [PodIdentity](#cubelet-services-runtime-v1-PodIdentity)
+    - [PrepareSandboxRequest](#cubelet-services-runtime-v1-PrepareSandboxRequest)
+    - [PrepareSandboxResponse](#cubelet-services-runtime-v1-PrepareSandboxResponse)
+    - [PreparedSandbox](#cubelet-services-runtime-v1-PreparedSandbox)
+    - [ReconcileEntry](#cubelet-services-runtime-v1-ReconcileEntry)
+    - [ReconcileSandboxesRequest](#cubelet-services-runtime-v1-ReconcileSandboxesRequest)
+    - [ReconcileSandboxesResponse](#cubelet-services-runtime-v1-ReconcileSandboxesResponse)
+    - [ReleaseSandboxRequest](#cubelet-services-runtime-v1-ReleaseSandboxRequest)
+    - [ReleaseSandboxResponse](#cubelet-services-runtime-v1-ReleaseSandboxResponse)
+    - [ResourceRequest](#cubelet-services-runtime-v1-ResourceRequest)
+    - [Route](#cubelet-services-runtime-v1-Route)
+    - [RuntimeAssets](#cubelet-services-runtime-v1-RuntimeAssets)
+
+    - [ReconcileDisposition](#cubelet-services-runtime-v1-ReconcileDisposition)
+    - [SandboxResourceState](#cubelet-services-runtime-v1-SandboxResourceState)
+
+    - [RuntimeResource](#cubelet-services-runtime-v1-RuntimeResource)
+
 - [api/services/snapshot/v1/snapshot.proto](#api_services_snapshot_v1_snapshot-proto)
     - [BatchStatusRequest](#cubelet-services-snapshot-v1-BatchStatusRequest)
     - [BatchStatusResponse](#cubelet-services-snapshot-v1-BatchStatusResponse)
@@ -3059,6 +3086,417 @@ Service for machine level operations.
 | InitHost | [InitRequest](#cubelet-services-cubebox-v1-InitRequest) | [InitResponse](#cubelet-services-cubebox-v1-InitResponse) | Initialize the host, destroy all of the container and initialize metadata. This is a dangerous operation. |
 
  
+
+
+
+<a name="api_services_runtime_v1_runtime-proto"></a>
+<p align="right"><a href="#top">Top</a></p>
+
+## api/services/runtime/v1/runtime.proto
+
+
+
+<a name="cubelet-services-runtime-v1-Capability"></a>
+
+### Capability
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| name | [string](#string) |  |  |
+| version | [uint32](#uint32) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-GetCapabilitiesRequest"></a>
+
+### GetCapabilitiesRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| client_api_version | [uint32](#uint32) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-GetCapabilitiesResponse"></a>
+
+### GetCapabilitiesResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| api_version | [uint32](#uint32) |  |  |
+| capabilities | [Capability](#cubelet-services-runtime-v1-Capability) | repeated |  |
+| service_mode | [string](#string) |  | v1 MUST return &#34;node-resources-only&#34;. |
+| fd_handoff_endpoint | [string](#string) |  | Unix socket used for one-shot TAP delivery with SCM_RIGHTS. File descriptors are never encoded in protobuf. |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-InspectSandboxRequest"></a>
+
+### InspectSandboxRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| sandbox_id | [string](#string) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-InspectSandboxResponse"></a>
+
+### InspectSandboxResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| found | [bool](#bool) |  |  |
+| state | [SandboxResourceState](#cubelet-services-runtime-v1-SandboxResourceState) |  |  |
+| sandbox | [PreparedSandbox](#cubelet-services-runtime-v1-PreparedSandbox) |  |  |
+| last_error | [string](#string) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-Neighbor"></a>
+
+### Neighbor
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| ip | [string](#string) |  |  |
+| mac | [string](#string) |  |  |
+| device | [string](#string) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-NetworkAttachment"></a>
+
+### NetworkAttachment
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| network_handle | [string](#string) |  |  |
+| tap_name | [string](#string) |  |  |
+| guest_interface_name | [string](#string) |  |  |
+| mac | [string](#string) |  |  |
+| mtu | [uint32](#uint32) |  |  |
+| ips | [string](#string) | repeated |  |
+| routes | [Route](#cubelet-services-runtime-v1-Route) | repeated |  |
+| neighbors | [Neighbor](#cubelet-services-runtime-v1-Neighbor) | repeated |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-NetworkIntent"></a>
+
+### NetworkIntent
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| netns_path | [string](#string) |  | Network namespace already created by host containerd/CNI. |
+| interface_name | [string](#string) |  |  |
+| pod_ip | [string](#string) |  |  |
+| dns | [string](#string) | repeated |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-PodIdentity"></a>
+
+### PodIdentity
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| uid | [string](#string) |  |  |
+| namespace | [string](#string) |  |  |
+| name | [string](#string) |  |  |
+| attempt | [uint32](#uint32) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-PrepareSandboxRequest"></a>
+
+### PrepareSandboxRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| sandbox_id | [string](#string) |  |  |
+| idempotency_key | [string](#string) |  | Stable across retries of the same desired generation. |
+| generation | [uint64](#uint64) |  | Monotonically increases when the caller replaces a sandbox with the same ID. |
+| pod | [PodIdentity](#cubelet-services-runtime-v1-PodIdentity) |  |  |
+| resources | [ResourceRequest](#cubelet-services-runtime-v1-ResourceRequest) |  |  |
+| network | [NetworkIntent](#cubelet-services-runtime-v1-NetworkIntent) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-PrepareSandboxResponse"></a>
+
+### PrepareSandboxResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| sandbox | [PreparedSandbox](#cubelet-services-runtime-v1-PreparedSandbox) |  |  |
+| reused | [bool](#bool) |  | True when an idempotent retry returned an existing matching generation. |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-PreparedSandbox"></a>
+
+### PreparedSandbox
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| sandbox_id | [string](#string) |  |  |
+| lease_id | [string](#string) |  |  |
+| generation | [uint64](#uint64) |  |  |
+| assets | [RuntimeAssets](#cubelet-services-runtime-v1-RuntimeAssets) |  |  |
+| network | [NetworkAttachment](#cubelet-services-runtime-v1-NetworkAttachment) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-ReconcileEntry"></a>
+
+### ReconcileEntry
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| sandbox_id | [string](#string) |  |  |
+| generation | [uint64](#uint64) |  |  |
+| disposition | [ReconcileDisposition](#cubelet-services-runtime-v1-ReconcileDisposition) |  |  |
+| detail | [string](#string) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-ReconcileSandboxesRequest"></a>
+
+### ReconcileSandboxesRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| live_sandbox_ids | [string](#string) | repeated |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-ReconcileSandboxesResponse"></a>
+
+### ReconcileSandboxesResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| entries | [ReconcileEntry](#cubelet-services-runtime-v1-ReconcileEntry) | repeated |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-ReleaseSandboxRequest"></a>
+
+### ReleaseSandboxRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| sandbox_id | [string](#string) |  |  |
+| lease_id | [string](#string) |  |  |
+| generation | [uint64](#uint64) |  |  |
+| idempotency_key | [string](#string) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-ReleaseSandboxResponse"></a>
+
+### ReleaseSandboxResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| released | [bool](#bool) |  | True both after a successful release and when the generation was absent. |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-ResourceRequest"></a>
+
+### ResourceRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| vcpu_count | [uint32](#uint32) |  |  |
+| memory_bytes | [uint64](#uint64) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-Route"></a>
+
+### Route
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| destination | [string](#string) |  |  |
+| gateway | [string](#string) |  |  |
+| source | [string](#string) |  |  |
+| device | [string](#string) |  |  |
+| scope | [uint32](#uint32) |  |  |
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-RuntimeAssets"></a>
+
+### RuntimeAssets
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| kernel_path | [string](#string) |  |  |
+| agent_path | [string](#string) |  |  |
+| guest_image_path | [string](#string) |  |  |
+| shared_root | [string](#string) |  |  |
+
+
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-ReconcileDisposition"></a>
+
+### ReconcileDisposition
+
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| RECONCILE_DISPOSITION_UNSPECIFIED | 0 |  |
+| RECONCILE_DISPOSITION_LIVE | 1 |  |
+| RECONCILE_DISPOSITION_ORPHAN_CANDIDATE | 2 |  |
+| RECONCILE_DISPOSITION_MISSING | 3 |  |
+
+
+
+<a name="cubelet-services-runtime-v1-SandboxResourceState"></a>
+
+### SandboxResourceState
+
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| SANDBOX_RESOURCE_STATE_UNSPECIFIED | 0 |  |
+| SANDBOX_RESOURCE_STATE_PREPARING | 1 |  |
+| SANDBOX_RESOURCE_STATE_READY | 2 |  |
+| SANDBOX_RESOURCE_STATE_RELEASING | 3 |  |
+| SANDBOX_RESOURCE_STATE_RELEASED | 4 |  |
+| SANDBOX_RESOURCE_STATE_ERROR | 5 |  |
+
+
+
+
+
+
+
+<a name="cubelet-services-runtime-v1-RuntimeResource"></a>
+
+### RuntimeResource
+RuntimeResource exposes node-resource operations to CubeShim.
+
+This service is intentionally not a CRI, image, snapshot, container, task, or
+sandbox runtime. Implementations MUST NOT call Cubelet embedded containerd to
+create the same sandbox. The host containerd remains the sole owner of OCI
+images, snapshots, CNI ordering, and Kubernetes sandbox/task state.
+
+| Method Name | Request Type | Response Type | Description |
+| ----------- | ------------ | ------------- | ------------|
+| GetCapabilities | [GetCapabilitiesRequest](#cubelet-services-runtime-v1-GetCapabilitiesRequest) | [GetCapabilitiesResponse](#cubelet-services-runtime-v1-GetCapabilitiesResponse) |  |
+| PrepareSandbox | [PrepareSandboxRequest](#cubelet-services-runtime-v1-PrepareSandboxRequest) | [PrepareSandboxResponse](#cubelet-services-runtime-v1-PrepareSandboxResponse) |  |
+| ReleaseSandbox | [ReleaseSandboxRequest](#cubelet-services-runtime-v1-ReleaseSandboxRequest) | [ReleaseSandboxResponse](#cubelet-services-runtime-v1-ReleaseSandboxResponse) |  |
+| InspectSandbox | [InspectSandboxRequest](#cubelet-services-runtime-v1-InspectSandboxRequest) | [InspectSandboxResponse](#cubelet-services-runtime-v1-InspectSandboxResponse) |  |
+| ReconcileSandboxes | [ReconcileSandboxesRequest](#cubelet-services-runtime-v1-ReconcileSandboxesRequest) | [ReconcileSandboxesResponse](#cubelet-services-runtime-v1-ReconcileSandboxesResponse) | ReconcileSandboxes is report-only in v1. Cleanup always requires an explicit idempotent ReleaseSandbox call. |
+
+
 
 
 
