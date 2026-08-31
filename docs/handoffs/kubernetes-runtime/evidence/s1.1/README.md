@@ -1,6 +1,6 @@
 # S1.1 Sandbox VM 生命周期验收证据
 
-> 状态：`VALIDATING`。本地协议、状态机、FD handoff、乱序 cleanup、dead-shim job-only 恢复和 production 云测入口已通过代码复审；真实 PVM/KVM Cube VM 的云端成功链路尚待离线依赖传输门禁解除。
+> 状态：`DONE`。本地可靠性闭环和真实 PVM/KVM Cube VM 云端终验均已通过，同一 reviewer 最终复审 `APPROVE`。
 
 ## 实现范围
 
@@ -21,7 +21,11 @@
 - `a1b6173f`：关闭取消上下文、READY commit-unknown、FD control truncation、multi-queue TAP 和长时重试被 containerd kill 的恢复缺口。
 - `80c3050a`：实现 Release-before-Prepare durable fence、Go/Rust 共享身份向量、持久 reaper queue fsync 与 Cubelet startup/continuous scanner。
 - `37e08b32`：确保 exact active/tombstone Release 重试成功前重新 fsync 父目录，覆盖重启后 post-rename response-loss。
-- `76c7f760`：增加使用 production Linux adapter 的独立 RuntimeResource 云测服务，以及覆盖 Create→Start→Status→Platform→Stop→Wait→Shutdown 的 containerd Controller 探针；探针验证真实 bundle/cleanup record 的存在与消失，并处理 Create 响应丢失和同 ID 并发 ownership。
+- `76c7f760`：增加使用 production Linux adapter 的独立 RuntimeResource 云测服务，以及覆盖 Create→Created Status→Platform→Start→Ready Status→Stop→Stopped Status→Wait→Shutdown 的 containerd Controller 探针；探针验证真实 bundle/cleanup record 的存在与消失，并处理 Create 响应丢失和同 ID 并发 ownership。
+- `7b79ba97`：在 tc redirect 生效前解析 Cilium 网关邻居，并修正多 TAP queue 删除时过早返回。
+- `d7ab89f7`：优先调用 containerd public Platform；仅在返回 `Unimplemented` 时校验 bootstrap v3/ttrpc/绝对 Unix socket 并直连 CubeShim Platform。
+- `f2708859`：接受 Cilium 已创建的网关直连 host route，避免重复添加返回 `EEXIST`。
+- `22716267`：Stop 已完成 VMM destroy/join 后，Shutdown 只做防御性 Release、最终状态和退出通知，不再向关闭的 VMM channel 二次发送 abort；直接 Shutdown 仍执行 force abort。
 
 ## 官方 containerd wire 验证
 
@@ -86,14 +90,25 @@ go vet ./...
 
 结果：`105 passed; 0 failed`，`cargo fmt --all --check` 与 `cargo check -p containerd-shim-cube-rs --all-targets` 通过。Cubelet RuntimeResource/plugin 与 sandbox-probe 的 Go race/vet 均通过；依赖仓库原有 generated code 警告仍存在，没有新增编译错误。
 
-## 云端状态
+## 云端严格构建与终验
 
-- 运行目标：香港二区我们创建的 `ins-4dyul5ag`（名称含“勿删”），16C32G，Linux 6.6 PVM host，`/dev/kvm` 可用，containerd 2.3.4；构建节点为我们创建的 `ins-pl7mznaa`（名称含“勿删”）。
-- 只读基线 TAT：`inv-b82na40m3i` 成功；确认 `/opt/cubesandbox-src` 仅含早期 S0.3 overlay，不含 RuntimeResource/S1.1 源码。
-- 源码同步：用户已批准 207627-byte gzip binary patch（SHA-256 `532ddfcb57d22c77a5f50c8b9ae74621f90fd906359a89611976a3e82dd503c5`）上传到私有 COS `cubesandbox-k8s-poc-20260831-1251707795`；`inv-082uv90m3d` 在运行节点、`inv-a82vki0tnp` 在构建节点成功展开到提交 `37e08b32` 对应 tree `404ecb2d1a0fab21c1edcb6c74c8145c86950658`。
-- 云端依赖预检：Rust 1.97.1/1.89 镜像版本正确，但严格 offline 分别缺少 `anyhow`、`async-trait`；Tencent Go proxy 返回的 containerd v2.2.2 模块校验和与仓库 `go.sum` 不一致，因此不得作为构建来源或验收证据。
-- 待授权 payload 1：从云端现有 `37e08b32` 到实现 `76c7f760` 的 10385-byte gzip binary patch，SHA-256 `546ecb63fbf5f97a062ef5b5e526ff0b5a7d48df1f50b2bcc4f5de1f1764c90f`；本地临时 clone 重放后 tree 为 `6b152141e2346c5446d344bec26a6465d4353401`，与目标完全一致。
-- 待授权 payload 2：84415811-byte 离线 vendor 包，SHA-256 `68c419e6c89e6e6751620952a67c2c55352a859f31696588492f8f2b659935d9`，仅含 `cargo/`、`go-cubelet/`、`go-sandbox-probe/`；已审计为普通文件、无 symlink/special/unsafe path/凭证命中。
-- 阻塞：执行策略要求用户明确批准上述两个新 payload 上传到同一私有 COS 并下载到我们创建的 CVM；未获批准前不上传或通过其他传输方式绕过。
+- 目标：香港二区我们创建的运行节点 `ins-4dyul5ag` 和构建节点 `ins-pl7mznaa`（名称均含“勿删”）；16C32G、Linux 6.6 PVM host、`/dev/kvm` 可用、containerd 2.3.4。
+- 源码：两台 CVM 的最终云测投影 tree 均为 `6e3b76eb94f378d5a8c2b02368c2dd28f6f2d90b`；Shutdown 文件 blob `fc0edf2e3d84c5b8b4230fd61c9c00dca3d94dc0`。同步验证 `inv-8831v50a2j`、`inv-9831v30ak5` 均为 `SUCCESS`。
+- CubeShim：固定 Rust 1.97.1、offline、locked 构建执行 lib 单测、all-targets check 和 release build，TAT `inv-b831vp0wan` 为 `SUCCESS`；`containerd-shim-cube-rs` SHA-256 `805658814730f6440b1ee8d281c8e84ef7f07f5543378d844feb78df984812ff`，`cube-runtime` SHA-256 `d685f5ea004be79348b7ef8224b697247c2ed956b19b1d5d668092c2a229a2e0`。
+- Go 云测产物：严格构建 `inv-b831k5g4a8` 为 `SUCCESS`；runtime harness SHA-256 `58fdc92b0fb6f60e8535eb08e7f27c06e2ac1b1358dbb9ac3f3ddd2360a071e2`，lifecycle probe SHA-256 `144b0f3cd8b938520b16fb685a26ab5630d92ce5bde2326f3270889abf5a6f67`。
+- Agent：静态二进制 SHA-256 `d5f53e7f253eb26aa62c52ea000ce5bdba7feeb788101de6f484a4b7cb63a243`，验收 ext4 SHA-256 `6d4efcd1ef0285696cfd66eb91637e532fc3e89d55a3db02019b2ba0be8d320f`。该资产用 `seccomp=no` 构建，仅证明 S1.1 生命周期，不宣称 S3 seccomp 支持。
 
-代码 reviewer 已对 `76c7f760` 的云测入口在第五轮复审明确 `APPROVE`。S1.1 在真实 VM 成功链路、宿主残留/异常回滚检查和云端结果最终复审 `APPROVE` 前不得标记 `DONE`。
+终验 TAT `inv-38324c05ra` 在 `ins-4dyul5ag` 为 `SUCCESS`，证据目录 `/data/cubelet/s1.1-evidence/20260831T053104Z`。关键结果：
+
+```text
+S11_CUBE_LIFECYCLE_OK sandbox=s11-live-sandbox ... generation=1
+S11_PLATFORM_DIRECT_TTRPC_FALLBACK sandbox=s11-live-sandbox
+S11_HOST_RESIDUE_CLEAN adapter=0 shared=0 reaper=0 cleanup_records=0 taps=0 filters=0 active_leases=0
+S11_EXPECTED_ROLLBACK_OK sandbox=s11-fail-sandbox rc=2
+S11_LIVE_ACCEPTANCE_OK tree=6e3b76eb94f378d5a8c2b02368c2dd28f6f2d90b pod_ip=10.244.2.113 lease_records=2
+S11_STATIC_ANCHOR_CLEAN
+```
+
+成功链路真实执行 Create→Created Status→Platform→Start→Ready Status→Stop→Stopped Status→Wait→Shutdown。失败链路使用缺少 `eth0` 的 netns，在 Controller Create 的 RuntimeResource Prepare 阶段失败；回滚后 adapter/shared/reaper/cleanup record、sandbox metadata、shim、TAP、tc filter、mount 和 active lease 全部回到零，同时保留 2 条 durable tombstone lease record；Cilium anchor 最终删除。
+
+代码 reviewer 已分别对 Platform fallback、Cilium route 修复和 Stop→Shutdown 幂等修复给出 `APPROVE`，并对最终证据、生命周期顺序、失败阶段、active lease 清理与 durable tombstone 结论完成复核，明确 `APPROVE` S1.1 `DONE`。

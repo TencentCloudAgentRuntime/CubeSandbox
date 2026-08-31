@@ -2,27 +2,27 @@
 
 ## 当前 Stage
 
-S1.1 `VALIDATING`：本地与隔离 containerd 可靠性闭环、production 云测入口及代码复审已通过，等待云端真实 TAP/完整 Cube VM 成功链路。
+S1.2 `IN_PROGRESS`：S1.1 真实 Cube VM 生命周期已收口，开始打通标准 OCI 单容器 Task 生命周期。
 
 ## 基线
 
-S1.1 最后已验证实现 `76c7f760`（tree `6b152141e2346c5446d344bec26a6465d4353401`）；云端当前源码为 `37e08b32`（tree `404ecb2d1a0fab21c1edcb6c74c8145c86950658`）；S0 收口 `8db49456`。
+S1.1 最后验证实现 `22716267`（本地完整 tree `6e94b184ac065d43d2405b50e35598a146c9ea31`）；两台自建 CVM 的云测源码投影 tree 均为 `6e3b76eb94f378d5a8c2b02368c2dd28f6f2d90b`；S0 收口 `8db49456`。S1.2 尚无实现提交。
 
 ## 已完成
 
-S1.1 已实现 Sandbox VM 生命周期、Cubelet adapter/recovery、真实 FD handoff、确定性 cleanup identity、Release-before-Prepare durable fence、dead-shim bundle 外持久 reaper queue 与 Cubelet startup/continuous scanner；production Linux RuntimeResource 云测服务和完整 Controller 生命周期探针已加入。隔离 containerd 的 job-only 重启恢复通过，新增入口经五轮复审 `APPROVE`。
+S1.1 `DONE`：Sandbox 生命周期、RuntimeResource lease/FD handoff、Cilium attachment、失败回滚和 dead-shim 恢复已经实现。containerd 2.3.4 的 public Platform wrapper 缺失时仅对 `Unimplemented` 使用 bootstrap v3 直连 ttrpc fallback；Cilium 网关邻居/直连路由和 Stop 后 Shutdown 重入问题已经实机修复；最终 reviewer `APPROVE`。
 
 ## 未完成
 
-尚未在我们创建的 `ins-4dyul5ag`（名称含“勿删”）用当前源码完成真实 TAP/完整 Cube VM Create→Start→Status→Stop→Shutdown、清理检查和 S1.1 最终复审。
+S1.2 尚未完成标准 OCI rootfs 到 Guest 单容器 Create/Start/Wait/Kill/Delete 的纵向链路和云端验收。
 
 ## 验证
 
-CubeShim 105 项单测、cargo fmt check 与 all-targets cargo check 通过；Cubelet RuntimeResource/plugin/production harness 与 sandbox-probe Go race/vet 通过。隔离 containerd 2.3.4 中停止 Cubelet、生成 durable job、终止本次 detached reaper 后，仅靠同状态重启的 startup scanner 完成 Release；job/adapter/bundle 清空且 containerd 未重启。证据见 `evidence/s1.1/README.md`。
+源码同步验证 `inv-8831v50a2j`、`inv-9831v30ak5` 均成功。严格 CubeShim 构建 `inv-b831vp0wan` 成功，二进制 SHA-256 `805658814730f6440b1ee8d281c8e84ef7f07f5543378d844feb78df984812ff`。真实生命周期及回滚终验 `inv-38324c05ra` 成功：Create→Created Status→Platform→Start→Ready Status→Stop→Stopped Status→Wait→Shutdown；预期失败回滚后 TAP/tc/shared mount/adapter/reaper/shim 和 active lease 均为零，保留 2 条 durable tombstone lease record，anchor 已删除。
 
 ## 阻塞
 
-旧 207627-byte 源码补丁已按用户授权上传到我们创建的私有 COS `cubesandbox-k8s-poc-20260831-1251707795`，并在我们创建的两台 CVM 展开校验成功。云端公网 Cargo 源不可用，Tencent Go proxy 的 containerd 模块校验和不可信；继续构建需要用户明确批准两个新 payload 上传到同一私有 COS 并下载到我们创建的 CVM：一是 10385-byte 增量补丁（SHA-256 `546ecb63fbf5f97a062ef5b5e526ff0b5a7d48df1f50b2bcc4f5de1f1764c90f`），二是 84415811-byte 离线 vendor 包（SHA-256 `68c419e6c89e6e6751620952a67c2c55352a859f31696588492f8f2b659935d9`）。不得绕过明确授权。
+无外部阻塞。S1.1 Agent 资产以 `seccomp=no` 构建，只用于生命周期验证；不构成 S3 seccomp 支持结论。
 
 ## 受保护路径
 
@@ -30,4 +30,4 @@ CubeShim 105 项单测、cargo fmt check 与 all-targets cargo check 通过；Cu
 
 ## 下一步
 
-获得上述两个精确 payload/目的地传输批准后，在 `ins-pl7mznaa` 离线构建，在 `ins-4dyul5ag` 跑真实 TAP/完整 Cube VM 生命周期、宿主残留与异常回滚验收；通过后交同一 subagent 做 S1.1 最终复审直至 `APPROVE`，再进入 S1.2。
+梳理现有 Task Service、standard rootfs adapter 和 Guest Agent 进程契约；冻结 S1.2 最小改动与验收矩阵，再实现并用隔离 containerd + 真实 Cube VM 验证 Create/Start/Wait/Kill/Delete。

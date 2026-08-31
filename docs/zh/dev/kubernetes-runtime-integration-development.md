@@ -1,6 +1,6 @@
 # CubeSandbox Kubernetes RuntimeClass PoC 开发计划
 
-> 状态：执行中（S1.1 Sandbox VM 生命周期验证）
+> 状态：执行中（S1.2 OCI Task）
 > 日期：2026-08-30  
 > 总体设计：[CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)  
 > 活动交接：[Kubernetes RuntimeClass PoC Handoff](../../../docs/handoffs/kubernetes-runtime/README.md)
@@ -264,12 +264,12 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 - 不要求生产代码质量；探针代码若合入必须 feature-gated，并附删除或演进说明。
 
 ## 6. S1：单容器纵向 PoC
-> Milestone 状态：`IN_PROGRESS`。S0.1～S0.4 已完成；当前执行 S1.1。
+> Milestone 状态：`IN_PROGRESS`。S1.1 已完成；当前执行 S1.2。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
-| S1.1 Sandbox VM 生命周期 | `VALIDATING` | Codex | 生命周期、持久 lease、FD handoff、失败回滚、dead-shim durable reaper queue 与 Release-before-Prepare 围栏已实现；新增 production RuntimeResource 云测服务与完整 Controller 生命周期探针；隔离 containerd job-only 重启恢复和第五轮代码复审通过 | `47522929`～`76c7f760`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s1.1/README.md) | 获批并上传精确增量补丁与离线依赖包，在自建 CVM 跑真实 TAP/完整 Cube VM、宿主残留和异常回滚验收，再做 S1.1 最终复审 |
-| S1.2 OCI Task | `NOT_STARTED` | 待指定 | — | — | 打通单容器 Create/Start/Wait/Kill/Delete |
+| S1.1 Sandbox VM 生命周期 | `DONE` | Codex | 生命周期、持久 lease、FD handoff、失败回滚、dead-shim recovery 和 durable fence 已实现；真实 Cilium TAP/PVM Cube VM 的 Create→Created Status→Platform→Start→Ready Status→Stop→Stopped Status→Wait→Shutdown、异常回滚及宿主零残留终验通过 | `47522929`～`22716267`；云端严格构建 `inv-b831vp0wan`；终验 `inv-38324c05ra`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s1.1/README.md)；最终 subagent `APPROVE` | S1.2 OCI Task |
+| S1.2 OCI Task | `IN_PROGRESS` | Codex | 已进入现有 Task Service、standard rootfs adapter 与 Guest Agent 契约梳理 | — | 冻结最小改动和验收矩阵，打通单容器 Create/Start/Wait/Kill/Delete |
 | S1.3 CRI 基础交互 | `NOT_STARTED` | 待指定 | — | — | 实现 logs、非 TTY exec、信号和退出码 |
 | S1.4 清理与共存 | `NOT_STARTED` | 待指定 | — | — | 验证资源清理、runc 和 legacy 回归 |
 
