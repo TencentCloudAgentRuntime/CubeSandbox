@@ -2,32 +2,32 @@
 
 ## 当前 Stage
 
-S1.2 `BLOCKED`：标准 OCI 单容器 Task 实现和 probe 已完成并通过 reviewer；等待新源码/vendor 对象的私有 COS 上传授权后执行云端构建与真实 Cube VM 验收。
+S1.3 `IN_PROGRESS`：S1.2 标准 OCI Task 已完成；当前开始接通 kubelet/CRI 的 logs、非 TTY exec 和 termination grace period。
 
 ## 基线
 
-S1.2 最后实现 `cf07e446`（完整 tree `c49c87d2afaea4ae90517a223c349bffdb86f246`），rootfs bridge 实现 `9c679855`；两台自建 CVM 的云测源码投影仍为 S1.1 tree `6e3b76eb94f378d5a8c2b02368c2dd28f6f2d90b`；S1.1 最后验证实现 `22716267`，S0 收口 `8db49456`。
+最后一项已验证实现 commit 为 `d47af8c213f802a3f0cd69593752d1f9c560c3ad`，完整 tree 为 `17224716902ca1ace56c1d68915bbb31c5a766d8`。S1.2 rootfs bridge/probe 起点为 `9c679855`、`cf07e446`，Task API v3、稳定 rootfs 父 inode 和 Agent 信号退出码修复分别为 `781cd8f8`、`32a49105`、`d47af8c2`。
 
 ## 已完成
 
-S1.1 `DONE`。S1.2 已实现 managed Sandbox Task 的标准 OCI rootfs bridge、共享 root 严格校验、并发 Create/Shutdown fence 和跨 generation 安全清理；已新增真实 OCI Task probe，覆盖自然退出 23、SIGKILL 137、stdout、mount 生命周期及异常清理。实现和 probe 分别经过多轮同一 subagent review，最终均为 `APPROVE`。
+S0、S1.1、S1.2 均为 `DONE`。S1.2 已让 containerd 2.3.4 标准 overlayfs `CreateTaskRequest.rootfs` 在真实 Cube Guest 运行；同一 Sandbox/Cube VM 内连续 Task 自然退出 23、SIGKILL 返回 137。删除后 container、Task、Sandbox、Task 新增 snapshot、mount、shim、TAP/filter 和 active lease 残留全部为 0，验收前后的既有 snapshot 集合一致。同一 reviewer 已对实现修复、源码同步、严格构建、制品交付和真实终验逐项 `APPROVE`。
 
 ## 未完成
 
-S1.2 尚未完成严格云端构建和标准 OCI rootfs 到真实 Guest 的 Create/Start/Wait/Kill/Delete 验收，因此不能标记 `DONE`。
+S1.3 尚未实现 kubelet/CRI 端到端 logs、非 TTY exec、termination grace period 和对应退出事件；S1.4 的 100 次清理、runc 共存和 legacy Cubebox 回归也未开始。因此 S1 Milestone 仍为 `IN_PROGRESS`。
 
 ## 验证
 
-S1.2 本地 `cargo check --tests` 通过；目标 `s12-oci-task-probe` 的 Go test、vet、build 通过。云端只读基线核对 `inv-6833mh023e`、`inv-0833mh0qv8` 均成功：只操作自建 `ins-pl7mznaa` 与 `ins-4dyul5ag`，两端 tree 均为 `6e3b76eb94f378d5a8c2b02368c2dd28f6f2d90b`、无 unstaged/untracked 内容。S1.1 严格构建 `inv-b831vp0wan` 和真实终验 `inv-38324c05ra` 仍是最后一项云端闭环证据。
+CubeShim 离线/locked 构建 115 项测试通过；Agent/workspace offline/locked 共 203 项通过，另有一个修改 TAT/Docker stdio UID 的环境用例显式过滤，信号转换 3 项在断网容器内点名通过。最终真实验收 `inv-9837xq0wnq` 为 `SUCCESS`：`S12_OCI_TASK_OK ... exit=23 killed=137`、`S12_HOST_RESIDUE_CLEAN ... active_leases=0`、`S12_STATIC_ANCHOR_CLEAN`。原始摘要、制品 SHA 和构建 invocation 见 `evidence/s1.2/README.md`。
 
 ## 阻塞
 
-平台审批拒绝上传两个新的私有 COS 对象，因为此前用户授权仅覆盖另一个特定补丁包；审批明确禁止改用 TAT 内嵌等方式绕过。待授权对象为源码归档 29,458,366 bytes、SHA-256 `c6509cf895b8fbdf7fc3ba922c1435df78c0b801ec7b18dad6a8c2fd0cfdcdaf`，以及 sandbox-probe vendor 归档 4,464,250 bytes、SHA-256 `e69a4484cf4544dc83300a21dc450e356853adfc2a577b939c318b5ee1665168`；目标为既有私有 bucket 的 `s12/source/` 与 `s12/vendor/`。未上传任何新对象。S1.1 Agent 资产仍以 `seccomp=no` 构建，只用于生命周期验证。
+无外部阻塞。S1.3 的准确 CRI streaming/exec 调用路径和 CubeShim/Agent 最小增量仍需先做只读 trace；这属于本阶段工作，不是 blocker。S1.2 Agent 继续以 `seccomp=no` 构建，仅用于生命周期验证，不宣称 S3 seccomp 支持。
 
 ## 受保护路径
 
-`CubeShim/`、`Cubelet/`、`agent/`、相关文档；仅操作本 PoC 自建云资源 `ins-pl7mznaa`、`ins-4dyul5ag` 及既有私有 COS，不修改其他账号内资源。
+`CubeShim/`、`Cubelet/`、`agent/`、`deploy/kubernetes/runtimeclass/`、`tests/e2e/kubernetes-runtime/` 和本 handoff bundle。云端只操作本 PoC 创建的 `ins-pl7mznaa`、`ins-4dyul5ag`、对应私有 COS/TKE，不修改账号内其他资源；现有 S0/S1.1 云测资产不覆盖。
 
 ## 下一步
 
-取得上述两个精确对象的上传授权；上传后在两台自建 CVM 的新 S1.2 目录物化 tree `c49c87d2afaea4ae90517a223c349bffdb86f246`，不覆盖 S1.1 目录。先在 build CVM 完成 Rust lib test/check/release build 与 Go race test/vet/build并交 reviewer，随后仅在 runtime CVM 以隔离 containerd + 真实 Cube VM 验证自然退出 23、SIGKILL 137、stdout、mount/Task/Sandbox 全量清理，再交 reviewer。
+接手者先核对 `evidence/s1.2/README.md` 与终验 `inv-9837xq0wnq` 的 23/137 和零残留结论。随后在 S1.3 先只读追踪 CRI logs/exec/StopContainer 到 containerd Task/streaming API 的调用边界，冻结最小接口与失败清理；再按 logs、非 TTY exec、graceful signal/exit 事件三个小步实现，每步完成本地/云端测试并交同一 reviewer。不要提前展开 TTY/stdin 或 S1.4 的 100 Pod/legacy 回归。

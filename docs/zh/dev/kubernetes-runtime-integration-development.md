@@ -1,6 +1,6 @@
 # CubeSandbox Kubernetes RuntimeClass PoC 开发计划
 
-> 状态：执行中（S1.2 OCI Task）
+> 状态：执行中（S1.3 CRI 基础交互）
 > 日期：2026-08-30  
 > 总体设计：[CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)  
 > 活动交接：[Kubernetes RuntimeClass PoC Handoff](../../../docs/handoffs/kubernetes-runtime/README.md)
@@ -264,13 +264,13 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 - 不要求生产代码质量；探针代码若合入必须 feature-gated，并附删除或演进说明。
 
 ## 6. S1：单容器纵向 PoC
-> Milestone 状态：`IN_PROGRESS`。S1.1 已完成；当前执行 S1.2。
+> Milestone 状态：`IN_PROGRESS`。S1.1、S1.2 已完成；当前执行 S1.3。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
 | S1.1 Sandbox VM 生命周期 | `DONE` | Codex | 生命周期、持久 lease、FD handoff、失败回滚、dead-shim recovery 和 durable fence 已实现；真实 Cilium TAP/PVM Cube VM 的 Create→Created Status→Platform→Start→Ready Status→Stop→Stopped Status→Wait→Shutdown、异常回滚及宿主零残留终验通过 | `47522929`～`22716267`；云端严格构建 `inv-b831vp0wan`；终验 `inv-38324c05ra`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s1.1/README.md)；最终 subagent `APPROVE` | S1.2 OCI Task |
-| S1.2 OCI Task | `BLOCKED` | Codex | managed Sandbox Task 已无条件桥接标准 `CreateTaskRequest.rootfs`，共享 root、并发 Create/Shutdown fence、跨 generation 清理已实现；新增真实 OCI Task probe，覆盖自然退出和 SIGKILL 的 Create/Start/Wait/Kill/Delete、stdout、mount 与异常清理；实现及 probe 均经多轮 subagent review `APPROVE` | 实现 `9c679855`，probe `cf07e446`；本地 `cargo check --tests`、目标 Go test/vet/build 通过；云端源码基线核对 `inv-6833mh023e`、`inv-0833mh0qv8` 通过 | 获得两个新私有 COS 对象的明确上传授权后，同步到两台自建 CVM，完成严格云端构建与真实 Cube VM 验收 |
-| S1.3 CRI 基础交互 | `NOT_STARTED` | 待指定 | — | — | 实现 logs、非 TTY exec、信号和退出码 |
+| S1.2 OCI Task | `DONE` | Codex | 标准 OCI overlayfs rootfs 已进入真实 Guest；Task API v3、共享 root/generation fence、稳定 rootfs 父 inode 和 Agent `128+signal` 退出码已实现；同一 Cube 内自然退出与 SIGKILL Task 均完成并全量清理 | `9c679855`、`cf07e446`、`781cd8f8`、`32a49105`、`d47af8c2`；Shim 115 项、Agent/workspace 203 项通过；真实终验 `inv-9837xq0wnq`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s1.2/README.md)；最终 subagent `APPROVE` | S1.3 CRI 基础交互 |
+| S1.3 CRI 基础交互 | `IN_PROGRESS` | Codex | S1.2 已证明 Task stdout、自然/信号退出码和 Kill/Wait 基础语义；尚未接通 kubelet/CRI 的 logs、非 TTY exec 和 termination grace period | 前置真实 Task 终验 `inv-9837xq0wnq` | 冻结 CRI 调用路径，依次实现 logs、非 TTY exec、graceful signal/exit 事件 |
 | S1.4 清理与共存 | `NOT_STARTED` | 待指定 | — | — | 验证资源清理、runc 和 legacy 回归 |
 
 
