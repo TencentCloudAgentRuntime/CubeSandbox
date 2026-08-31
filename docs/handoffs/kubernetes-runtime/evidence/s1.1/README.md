@@ -1,6 +1,6 @@
 # S1.1 Sandbox VM 生命周期验收证据
 
-> 状态：`VALIDATING`。本地协议、状态机、FD handoff、乱序 cleanup 和 dead-shim job-only 恢复已通过代码复审；真实 PVM/KVM Cube VM 的云端成功链路尚待精确源码同步门禁解除。
+> 状态：`VALIDATING`。本地协议、状态机、FD handoff、乱序 cleanup、dead-shim job-only 恢复和 production 云测入口已通过代码复审；真实 PVM/KVM Cube VM 的云端成功链路尚待离线依赖传输门禁解除。
 
 ## 实现范围
 
@@ -21,6 +21,7 @@
 - `a1b6173f`：关闭取消上下文、READY commit-unknown、FD control truncation、multi-queue TAP 和长时重试被 containerd kill 的恢复缺口。
 - `80c3050a`：实现 Release-before-Prepare durable fence、Go/Rust 共享身份向量、持久 reaper queue fsync 与 Cubelet startup/continuous scanner。
 - `37e08b32`：确保 exact active/tombstone Release 重试成功前重新 fsync 父目录，覆盖重启后 post-rename response-loss。
+- `76c7f760`：增加使用 production Linux adapter 的独立 RuntimeResource 云测服务，以及覆盖 Create→Start→Status→Platform→Stop→Wait→Shutdown 的 containerd Controller 探针；探针验证真实 bundle/cleanup record 的存在与消失，并处理 Create 响应丢失和同 ID 并发 ownership。
 
 ## 官方 containerd wire 验证
 
@@ -65,11 +66,11 @@ S11_SHIM_KILL_RETRY_RELEASE_OK
 
 ```bash
 cd Cubelet
-go test -race ./services/runtime/... ./plugins/cube/runtime_resource
-go vet ./services/runtime/... ./plugins/cube/runtime_resource
+go test -race ./services/runtime/... ./plugins/cube/runtime_resource/...
+go vet ./services/runtime/... ./plugins/cube/runtime_resource/...
 ```
 
-结果：RuntimeResource service、handoff、state 和 plugin 全部通过，race 0、vet 0。
+结果：RuntimeResource service、handoff、state、plugin 和 production 云测服务全部通过，race 0、vet 0；服务层禁止依赖 containerd/legacy service 的 import graph 防线仍通过。
 
 ```bash
 cd CubeShim
@@ -87,10 +88,12 @@ go vet ./...
 
 ## 云端状态
 
-- 目标：香港二区我们创建的 `ins-4dyul5ag`（名称含“勿删”），16C32G，Linux 6.6 PVM host，`/dev/kvm` 可用，containerd 2.3.4。
+- 运行目标：香港二区我们创建的 `ins-4dyul5ag`（名称含“勿删”），16C32G，Linux 6.6 PVM host，`/dev/kvm` 可用，containerd 2.3.4；构建节点为我们创建的 `ins-pl7mznaa`（名称含“勿删”）。
 - 只读基线 TAT：`inv-b82na40m3i` 成功；确认 `/opt/cubesandbox-src` 仅含早期 S0.3 overlay，不含 RuntimeResource/S1.1 源码。
-- 待执行：把基线 `09274501dd12e47dbed2dcc77d8eb67dd661d49c` 到实现 `37e08b325b5dd39f3a06b44d7da941aa800141b1` 的 207627-byte gzip binary patch（SHA-256 `532ddfcb57d22c77a5f50c8b9ae74621f90fd906359a89611976a3e82dd503c5`）同步到该 CVM，构建当前 CubeShim/Cubelet，并完成真实 TAP/完整 Cube VM Create→Start→Status→Stop→Shutdown 与异常回滚。
-- 重放：临时干净克隆从上述基线应用补丁成功，tree `404ecb2d1a0fab21c1edcb6c74c8145c86950658` 与目标提交完全一致。
-- 阻塞：执行策略要求用户在聊天中明确批准上述具体 payload、我们创建的私有 COS 和我们创建的目的 CVM；未获批准前不通过公开 push、其他 bucket 或间接命令绕过。
+- 源码同步：用户已批准 207627-byte gzip binary patch（SHA-256 `532ddfcb57d22c77a5f50c8b9ae74621f90fd906359a89611976a3e82dd503c5`）上传到私有 COS `cubesandbox-k8s-poc-20260831-1251707795`；`inv-082uv90m3d` 在运行节点、`inv-a82vki0tnp` 在构建节点成功展开到提交 `37e08b32` 对应 tree `404ecb2d1a0fab21c1edcb6c74c8145c86950658`。
+- 云端依赖预检：Rust 1.97.1/1.89 镜像版本正确，但严格 offline 分别缺少 `anyhow`、`async-trait`；Tencent Go proxy 返回的 containerd v2.2.2 模块校验和与仓库 `go.sum` 不一致，因此不得作为构建来源或验收证据。
+- 待授权 payload 1：从云端现有 `37e08b32` 到实现 `76c7f760` 的 10385-byte gzip binary patch，SHA-256 `546ecb63fbf5f97a062ef5b5e526ff0b5a7d48df1f50b2bcc4f5de1f1764c90f`；本地临时 clone 重放后 tree 为 `6b152141e2346c5446d344bec26a6465d4353401`，与目标完全一致。
+- 待授权 payload 2：84415811-byte 离线 vendor 包，SHA-256 `68c419e6c89e6e6751620952a67c2c55352a859f31696588492f8f2b659935d9`，仅含 `cargo/`、`go-cubelet/`、`go-sandbox-probe/`；已审计为普通文件、无 symlink/special/unsafe path/凭证命中。
+- 阻塞：执行策略要求用户明确批准上述两个新 payload 上传到同一私有 COS 并下载到我们创建的 CVM；未获批准前不上传或通过其他传输方式绕过。
 
-代码 reviewer 已对 `37e08b32` 明确 `APPROVE`。S1.1 在真实 VM 成功链路、清理检查和云端结果最终复审 `APPROVE` 前不得标记 `DONE`。
+代码 reviewer 已对 `76c7f760` 的云测入口在第五轮复审明确 `APPROVE`。S1.1 在真实 VM 成功链路、宿主残留/异常回滚检查和云端结果最终复审 `APPROVE` 前不得标记 `DONE`。
