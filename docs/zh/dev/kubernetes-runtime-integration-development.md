@@ -1,6 +1,6 @@
 # CubeSandbox Kubernetes RuntimeClass PoC 开发计划
 
-> 状态：执行中（S1.3 CRI 基础交互）
+> 状态：执行中（S3.1 基础 Volume）
 > 日期：2026-08-30  
 > 总体设计：[CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)  
 > 活动交接：[Kubernetes RuntimeClass PoC Handoff](../../../docs/handoffs/kubernetes-runtime/README.md)
@@ -296,14 +296,14 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 - legacy Cubebox 创建/删除 smoke test 通过。
 
 ## 7. S2：多容器与 Pod 生命周期
-> Milestone 状态：`IN_PROGRESS`。S1.1～S1.4、S2.1～S2.3 已完成；当前执行 S2.4。
+> Milestone 状态：`DONE`。S2.1～S2.4 均已完成并通过同一 reviewer 门禁。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
 | S2.1 动态多容器 | `DONE` | Codex | 双普通容器已在同一 Sandbox/VM/Pod IP 内以独立 Task/rootfs 运行；分别 logs/exec 成功；CRI 删除 alpha 后旧 Task/rootfs 清理，beta 与 VM/IP 不变，kubelet 仅重建 alpha 并恢复 Pod Ready；整 Pod 删除恢复全量基线 | 实现 `ce3afe4c`；严格构建 `inv-083fdrgb3k`；完整加固终验 `inv-083g3u0npg`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s2.1/README.md)；最终同一 reviewer `APPROVE` | S2.2 Init 与重启 |
 | S2.2 Init 与重启 | `DONE` | Codex | 双 init 严格串行、失败 init 新 Task 重试且 app 不启动、alpha exit 23 后仅定向重建 alpha 均通过；每例旧 Task/rootfs 清理，survivor/Pod UID/IP/VM/shim PID 不变并恢复全量基线 | 验收 `9467e4a0`；诊断 `inv-983ggb0u6k`；reviewer 加固后终验 `inv-a83gx50k5f`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s2.2/README.md)；最终同一 reviewer `APPROVE` | S2.3 Namespace |
 | S2.3 Namespace | `DONE` | Codex | CRI namespace/hostname 已映射；默认 net/IPC/UTS 共享而 PID/mount 隔离；共享 PID 使用加固的专用 PID 1，容器替换后 holder 与 survivor 稳定；hostNetwork/hostPID/hostIPC 在资源分配前拒绝；逐例恢复全量基线 | 实现 `e1bc2b7a`、holder 加固 `72beea45`、打包修复 `9b0c14fa`、验收 `a50425d3`；严格构建 `inv-v83iix062d`；终验 `inv-a83j9u0q12`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s2.3/README.md)；最终同一 reviewer `APPROVE` | S2.4 Sidecar 与 Pod 生命周期 |
-| S2.4 Sidecar 与 Pod 生命周期 | `IN_PROGRESS` | Codex | 已继承 S2.1～S2.3 的动态多 Task、init/restart、namespace、survivor 和全量清理基线 | S2.3 终验 `inv-a83j9u0q12` 与最终 reviewer `APPROVE` | 盘点原生 sidecar、ephemeral container、probe、lifecycle hook 与 graceful termination 的现状和差距 |
+| S2.4 Sidecar 与 Pod 生命周期 | `DONE` | Codex | 两个原生 sidecar、动态 ephemeral container、startup/readiness/liveness probe、PostStart/幂等 PreStop、优雅 exit 0 与 grace 后 SIGKILL 137 均在同一 Cube VM 内通过；单容器加入/重建未影响 survivor、Pod UID/IP、Sandbox、shim 或 VM；修复 Cilium TAP 12-byte vnet header | 网络修复 `df548000`、验收脚本 `495ac4ca`；D1 `inv-383kh2g6w4`、D2 `inv-983kt80r3f`、D3 `inv-683nbagv5s`、D4 `inv-383nsc0was`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s2.4/README.md)；最终同一 reviewer `APPROVE` | S3.1 基础 Volume；TARGET PID 缺口归 `K8S-OQ-012` / S5.3 |
 
 
 ### 目标
@@ -328,11 +328,11 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 - 终止宽限期、SIGTERM/SIGKILL 和 TaskExit 事件时序有自动化测试。
 
 ## 8. S3：存储、安全与资源
-> Milestone 状态：`NOT_STARTED`。依赖 S2.1～S2.4 完成。
+> Milestone 状态：`IN_PROGRESS`。S2 已完成；当前执行 S3.1。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
-| S3.1 基础 Volume | `NOT_STARTED` | 待指定 | — | — | 实现 emptyDir 和 projected 类 volume |
+| S3.1 基础 Volume | `IN_PROGRESS` | Codex | 已冻结 S2.4 删除基线并继承标准 OCI rootfs、Pod 固定 shared root 与动态 Task 能力；已知可写 bind 缺口为 `K8S-OQ-011` | S2.4 终验 `inv-383nsc0was` 与最终 reviewer `APPROVE` | 盘点 kubelet 传入的 emptyDir、ConfigMap、Secret、projected、downwardAPI 和 subPath mount，建立读写/更新/清理诊断矩阵 |
 | S3.2 PVC | `NOT_STARTED` | 待指定 | — | — | 实现文件系统 PVC 挂载和清理 |
 | S3.3 SecurityContext | `NOT_STARTED` | 待指定 | — | — | 映射并验证常用安全字段 |
 | S3.4 资源控制 | `NOT_STARTED` | 待指定 | — | — | 实现 Host/Guest 双层 cgroup |
