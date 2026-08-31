@@ -41,6 +41,17 @@ func (nsenterRunner) Run(ctx context.Context, netnsPath string, command ...strin
 
 var commandContext = newExecCommand
 
+const runtimeResourceVnetHeaderSize = 12
+
+var runtimeResourceIoctlSetPointerInt = unix.IoctlSetPointerInt
+var runtimeResourceIoctlSetTunOffload = func(fd int, features uintptr) error {
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(unix.TUNSETOFFLOAD), features)
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
 // Kept behind a variable to make privileged commands replaceable in unit tests.
 var newExecCommand = func(ctx context.Context, name string, args ...string) command {
 	return osCommand{ctx: ctx, name: name, args: args}
@@ -402,7 +413,28 @@ func openTap(tapName string) (*os.File, error) {
 		unix.Close(fd)
 		return nil, err
 	}
+	if err := prepareTapForHandoff(fd); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
 	return os.NewFile(uintptr(fd), "/dev/net/tun"), nil
+}
+
+// prepareTapForHandoff must run while the TAP's owning netns is current.
+// The VMM uses virtio_net_hdr_v1 (12 bytes), while Linux defaults a newly
+// opened IFF_VNET_HDR queue to the legacy 10-byte header. A mismatch leaks the
+// final two header bytes into the Ethernet frame and makes CNI datapaths reject
+// otherwise valid IPv4/IPv6 traffic. Offloads stay disabled because the fd is
+// handed to a VMM outside the TAP netns and the tcfilter path expects complete
+// packets, matching CubeShim's existing S0 cross-netns contract.
+func prepareTapForHandoff(fd int) error {
+	if err := runtimeResourceIoctlSetPointerInt(fd, unix.TUNSETVNETHDRSZ, runtimeResourceVnetHeaderSize); err != nil {
+		return fmt.Errorf("set RuntimeResource TAP vnet header size: %w", err)
+	}
+	if err := runtimeResourceIoctlSetTunOffload(fd, 0); err != nil {
+		return fmt.Errorf("disable RuntimeResource TAP offloads: %w", err)
+	}
+	return nil
 }
 
 func routeScope(scope string) uint32 {

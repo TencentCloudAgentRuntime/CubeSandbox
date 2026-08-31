@@ -12,7 +12,84 @@ import (
 	"testing"
 
 	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
+	"golang.org/x/sys/unix"
 )
+
+func TestPrepareTapForHandoffMatchesVMMHeaderContract(t *testing.T) {
+	originalHeader := runtimeResourceIoctlSetPointerInt
+	originalOffload := runtimeResourceIoctlSetTunOffload
+	t.Cleanup(func() {
+		runtimeResourceIoctlSetPointerInt = originalHeader
+		runtimeResourceIoctlSetTunOffload = originalOffload
+	})
+
+	var gotFD, gotHeaderSize int
+	var gotRequest uint
+	var gotOffload uintptr
+	runtimeResourceIoctlSetPointerInt = func(fd int, request uint, value int) error {
+		gotFD, gotRequest, gotHeaderSize = fd, request, value
+		return nil
+	}
+	runtimeResourceIoctlSetTunOffload = func(fd int, features uintptr) error {
+		if fd != gotFD {
+			t.Fatalf("offload fd=%d, want %d", fd, gotFD)
+		}
+		gotOffload = features
+		return nil
+	}
+
+	if err := prepareTapForHandoff(41); err != nil {
+		t.Fatal(err)
+	}
+	if gotFD != 41 || gotRequest != unix.TUNSETVNETHDRSZ || gotHeaderSize != runtimeResourceVnetHeaderSize {
+		t.Fatalf("vnet header fd=%d request=%d size=%d", gotFD, gotRequest, gotHeaderSize)
+	}
+	if gotOffload != 0 {
+		t.Fatalf("offloads=%#x, want disabled", gotOffload)
+	}
+}
+
+func TestPrepareTapForHandoffStopsAfterHeaderFailure(t *testing.T) {
+	originalHeader := runtimeResourceIoctlSetPointerInt
+	originalOffload := runtimeResourceIoctlSetTunOffload
+	t.Cleanup(func() {
+		runtimeResourceIoctlSetPointerInt = originalHeader
+		runtimeResourceIoctlSetTunOffload = originalOffload
+	})
+
+	want := errors.New("header failed")
+	runtimeResourceIoctlSetPointerInt = func(int, uint, int) error { return want }
+	offloadCalled := false
+	runtimeResourceIoctlSetTunOffload = func(int, uintptr) error {
+		offloadCalled = true
+		return nil
+	}
+
+	err := prepareTapForHandoff(42)
+	if !errors.Is(err, want) {
+		t.Fatalf("prepareTapForHandoff error=%v, want %v", err, want)
+	}
+	if offloadCalled {
+		t.Fatal("offload configured after vnet header failure")
+	}
+}
+
+func TestPrepareTapForHandoffReportsOffloadFailure(t *testing.T) {
+	originalHeader := runtimeResourceIoctlSetPointerInt
+	originalOffload := runtimeResourceIoctlSetTunOffload
+	t.Cleanup(func() {
+		runtimeResourceIoctlSetPointerInt = originalHeader
+		runtimeResourceIoctlSetTunOffload = originalOffload
+	})
+
+	want := errors.New("offload failed")
+	runtimeResourceIoctlSetPointerInt = func(int, uint, int) error { return nil }
+	runtimeResourceIoctlSetTunOffload = func(int, uintptr) error { return want }
+
+	if err := prepareTapForHandoff(43); !errors.Is(err, want) {
+		t.Fatalf("prepareTapForHandoff error=%v, want %v", err, want)
+	}
+}
 
 type scriptedRunner struct {
 	commands         []string
