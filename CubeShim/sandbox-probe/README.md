@@ -48,6 +48,33 @@ shim 进程/socket、state/root bundle、mount、netns、host-local IP 分配均
 CNI ADD/DEL 实际执行成功。原始 RPC/CNI trace、失败输出和摘要写入
 `ARTIFACT_DIR`。
 
+## S1.3 真实 CRI 验收
+
+`scripts/verify-s13-cri-cloud.sh` 使用独立的 containerd root、state 和 socket，
+不会替换节点主 containerd。它复用节点的 Cilium CNI 配置和主 containerd 中的
+BusyBox 镜像，验证真实 `io.containerd.cube.rs` RuntimeClass 路径：
+
+- 宿主日志文件符合 CRI 日志格式，`crictl logs` 可读取；
+- `ExecSync` 与非 TTY、非 stdin 的 streaming exec 可传递 stdout、stderr 和进程
+  退出码；
+- `StopContainer` 可传递 `SIGTERM`，并在进程忽略信号时等待 timeout 后升级为
+  `SIGKILL`；
+- 删除后 CRI/containerd 元数据、Task 新增 snapshot、RuntimeResource 状态、
+  shared-root mount、shim/reaper 进程、netns 和 active lease 均为零残留。
+
+云端节点需预先安装 S1.2 产物到
+`/opt/cubesandbox-s12-runtime-artifacts-rootfs-inode` 和
+`/opt/cubesandbox-s12-agent-exit-status-v1`，并具备 containerd 2.3.4、crictl
+1.36、`/dev/kvm`、`/opt/cni/bin/cilium-cni` 和
+`/etc/cni/net.d/05-cilium.conflist`。执行：
+
+```bash
+sudo scripts/verify-s13-cri-cloud.sh
+```
+
+脚本只重建 `/data/cubelet/s13-cri-live` 和 `/run/cubesandbox-s13`，证据保存在
+`/data/cubelet/s1.3-evidence/diagnostic-<UTC>`。
+
 shim 默认写 `/run/cube-s0/trace.jsonl`，CNI wrapper 写
 `/run/cube-s0/cni.jsonl`；可用 `CUBE_S0_TRACE_PATH` 改写 shim trace 位置。
 
