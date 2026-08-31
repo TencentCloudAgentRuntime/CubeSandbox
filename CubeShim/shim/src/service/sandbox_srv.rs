@@ -10,8 +10,10 @@ use containerd_shim::protos::{sandbox_api as api, sandbox_async::Sandbox};
 use containerd_shim::TtrpcResult;
 use oci_spec::runtime::Spec;
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Notify};
 use tokio::time::{sleep, Duration};
@@ -64,16 +66,49 @@ impl Default for LifecycleState {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct SandboxLifecycle {
     state: Mutex<LifecycleState>,
+    task_creates: StdMutex<HashSet<String>>,
     changed: Notify,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+impl Default for SandboxLifecycle {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(LifecycleState::default()),
+            task_creates: StdMutex::new(HashSet::new()),
+            changed: Notify::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TaskMode {
     Legacy,
-    ManagedReady,
+    ManagedReady { shared_root: PathBuf },
+}
+
+pub(crate) struct TaskCreateReservation {
+    lifecycle: Arc<SandboxLifecycle>,
+    task_id: String,
+    mode: TaskMode,
+}
+
+impl TaskCreateReservation {
+    pub(crate) fn mode(&self) -> &TaskMode {
+        &self.mode
+    }
+}
+
+impl Drop for TaskCreateReservation {
+    fn drop(&mut self) {
+        self.lifecycle
+            .task_creates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.task_id);
+        self.lifecycle.changed.notify_waiters();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,6 +123,11 @@ impl SandboxLifecycle {
         loop {
             let notified = self.changed.notified();
             let mut state = self.state.lock().await;
+            if self.has_task_creates() {
+                drop(state);
+                notified.await;
+                continue;
+            }
             match state.phase {
                 Phase::Creating | Phase::Starting | Phase::Stopping => {
                     drop(state);
@@ -107,18 +147,51 @@ impl SandboxLifecycle {
         }
     }
 
-    pub(crate) async fn task_mode(&self) -> Result<TaskMode, String> {
-        match self.state.lock().await.phase {
+    pub(crate) async fn reserve_task_create(
+        self: &Arc<Self>,
+        task_id: &str,
+    ) -> Result<TaskCreateReservation, String> {
+        let state = self.state.lock().await;
+        let mode = match state.phase {
             Phase::Unmanaged => Ok(TaskMode::Legacy),
-            Phase::Ready => Ok(TaskMode::ManagedReady),
+            Phase::Ready => {
+                let runtime = state
+                    .runtime
+                    .as_ref()
+                    .ok_or_else(|| "ready sandbox has no RuntimeResource lease".to_string())?;
+                Ok(TaskMode::ManagedReady {
+                    shared_root: runtime.shared_root()?,
+                })
+            }
             phase => Err(format!(
                 "sandbox is managed by Sandbox Service but is not ready (phase {phase:?})"
             )),
+        }?;
+        let inserted = self
+            .task_creates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(task_id.to_string());
+        if !inserted {
+            return Err(format!("task {task_id} Create is already in progress"));
         }
+        Ok(TaskCreateReservation {
+            lifecycle: self.clone(),
+            task_id: task_id.to_string(),
+            mode,
+        })
     }
 
     pub(crate) async fn is_managed(&self) -> bool {
         self.state.lock().await.phase != Phase::Unmanaged
+    }
+
+    fn has_task_creates(&self) -> bool {
+        !self
+            .task_creates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
     }
 }
 
@@ -695,6 +768,11 @@ impl Sandbox for SandboxService {
         let (should_stop, previous) = loop {
             let notified = self.lifecycle.changed.notified();
             let mut state = self.lifecycle.state.lock().await;
+            if self.lifecycle.has_task_creates() {
+                drop(state);
+                notified.await;
+                continue;
+            }
             match state.phase {
                 Phase::Creating | Phase::Starting => {
                     drop(state);
@@ -856,22 +934,81 @@ mod tests {
 
     #[tokio::test]
     async fn unmanaged_task_mode_preserves_legacy_runtime() {
-        let lifecycle = SandboxLifecycle::default();
-        assert_eq!(lifecycle.task_mode().await.unwrap(), TaskMode::Legacy);
+        let lifecycle = Arc::new(SandboxLifecycle::default());
+        let reservation = lifecycle.reserve_task_create("legacy-task").await.unwrap();
+        assert_eq!(reservation.mode(), &TaskMode::Legacy);
         assert!(!lifecycle.is_managed().await);
     }
 
     #[tokio::test]
     async fn managed_task_is_rejected_until_ready() {
-        let lifecycle = SandboxLifecycle::default();
+        let lifecycle = Arc::new(SandboxLifecycle::default());
         lifecycle.state.lock().await.phase = Phase::Created;
         assert!(lifecycle
-            .task_mode()
+            .reserve_task_create("task-before-ready")
             .await
-            .unwrap_err()
+            .err()
+            .unwrap()
             .contains("not ready"));
-        lifecycle.state.lock().await.phase = Phase::Ready;
-        assert_eq!(lifecycle.task_mode().await.unwrap(), TaskMode::ManagedReady);
+        let shared_root = PathBuf::from(format!(
+            "/data/cubelet/s11/shared/sb-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&shared_root).unwrap();
+        {
+            let mut state = lifecycle.state.lock().await;
+            state.phase = Phase::Ready;
+            state.runtime = Some(RuntimeLease::test_with_shared_root(
+                shared_root.to_str().unwrap(),
+            ));
+        }
+        let reservation = lifecycle.reserve_task_create("task-ready").await.unwrap();
+        assert_eq!(
+            reservation.mode(),
+            &TaskMode::ManagedReady {
+                shared_root: shared_root.clone()
+            }
+        );
+        drop(reservation);
+        std::fs::remove_dir_all(&shared_root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_create_reservation_rejects_duplicate_and_blocks_shutdown() {
+        let lifecycle = Arc::new(SandboxLifecycle::default());
+        let shared_root = PathBuf::from(format!(
+            "/data/cubelet/s11/shared/sb-reservation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&shared_root).unwrap();
+        {
+            let mut state = lifecycle.state.lock().await;
+            state.phase = Phase::Ready;
+            state.runtime = Some(RuntimeLease::test_with_shared_root(
+                shared_root.to_str().unwrap(),
+            ));
+        }
+
+        let reservation = lifecycle.reserve_task_create("same-task").await.unwrap();
+        assert!(lifecycle
+            .reserve_task_create("same-task")
+            .await
+            .err()
+            .unwrap()
+            .contains("already in progress"));
+        let shutdown = {
+            let lifecycle = lifecycle.clone();
+            tokio::spawn(async move { lifecycle.begin_shutdown().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!shutdown.is_finished());
+
+        drop(reservation);
+        assert_eq!(
+            shutdown.await.unwrap(),
+            ShutdownAction::Run { force_abort: true }
+        );
+        std::fs::remove_dir_all(&shared_root).unwrap();
     }
 
     #[tokio::test]

@@ -2,17 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-//! S0-only adapter from containerd's standard `CreateTaskRequest.rootfs` to
-//! the legacy Cube guest rootfs annotation.
+//! Adapter from containerd's standard `CreateTaskRequest.rootfs` to the
+//! current Cube guest rootfs contract.
 //!
-//! This probe is deliberately opt-in.  It is deleted or evolved into the
-//! Kubernetes rootfs adapter when S1 moves Sandbox lifecycle into CubeShim.
+//! Sandbox-managed tasks always export beneath the RuntimeResource shared
+//! root that was fixed before VM start. Legacy tasks retain the explicit S0
+//! annotation and private share root so the original probes keep working.
 
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use containerd_shim::protos::types::mount::Mount;
 use oci_spec::runtime::Spec;
@@ -20,16 +22,19 @@ use serde_json::json;
 
 use crate::container::rootfs::{OverlayInfo, RootfsInfo, ANNOTATION_K_ROOTFS_INFO};
 use crate::sandbox::config::ANNO_VMM_FS;
+use crate::service::runtime_resource::canonical_runtime_shared_root;
 
 pub const ENABLE_ANNOTATION: &str = "io.containerd.cube.s0.standard-rootfs";
 pub const SHARE_BASE: &str = "/data/cubelet/s0.2-share";
 const VIRTIOFS_SHARED_DIR: &str = "/data/cubelet";
+static EXPORT_ATTEMPT: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 pub struct PreparedRootfs {
     target: PathBuf,
     share_root: PathBuf,
     mounts: Vec<PathBuf>,
+    remove_share_root: bool,
 }
 
 impl PreparedRootfs {
@@ -67,7 +72,9 @@ impl PreparedRootfs {
         if let Some(rootfs_dir) = rootfs_dir {
             remove_empty_dir(rootfs_dir);
         }
-        remove_empty_dir(&self.share_root);
+        if self.remove_share_root {
+            remove_empty_dir(&self.share_root);
+        }
     }
 }
 
@@ -96,7 +103,7 @@ pub fn enabled(spec: &Spec) -> bool {
 /// Mount a standard containerd rootfs and inject only the legacy annotations
 /// needed by the current Guest Agent.  VM asset/resource annotations remain a
 /// Sandbox-resource concern and are supplied by the S0 replay fixture.
-pub fn prepare(
+pub fn prepare_legacy(
     sandbox_id: &str,
     task_id: &str,
     mounts: &[Mount],
@@ -105,44 +112,98 @@ pub fn prepare(
     if !enabled(spec) {
         return Ok(None);
     }
-    validate_id("sandbox", sandbox_id)?;
+    let share_root = Path::new(SHARE_BASE).join(sandbox_id);
+    let prepared = prepare_at(&share_root, sandbox_id, task_id, mounts, spec, true, true)?;
+    Ok(Some(prepared))
+}
+
+/// Prepare a task rootfs inside the immutable shared root selected by
+/// RuntimeResource before the sandbox VM was started. No per-task virtiofs
+/// configuration is accepted or injected on this path.
+pub fn prepare_managed(
+    shared_root: &Path,
+    task_id: &str,
+    mounts: &[Mount],
+    spec: &mut Spec,
+) -> Result<PreparedRootfs, String> {
+    let shared_root = canonical_runtime_shared_root(shared_root)?;
+    let guest_share_name = guest_share_name(&shared_root)?;
+    prepare_at(
+        &shared_root,
+        &guest_share_name,
+        task_id,
+        mounts,
+        spec,
+        false,
+        false,
+    )
+}
+
+fn prepare_at(
+    share_root: &Path,
+    guest_share_name: &str,
+    task_id: &str,
+    mounts: &[Mount],
+    spec: &mut Spec,
+    inject_virtiofs: bool,
+    remove_share_root: bool,
+) -> Result<PreparedRootfs, String> {
+    validate_id("guest share", guest_share_name)?;
     validate_id("task", task_id)?;
     if mounts.len() != 1 {
         return Err(format!(
-            "S0 standard-rootfs probe requires exactly one rootfs mount, got {}",
+            "standard rootfs requires exactly one rootfs mount, got {}",
             mounts.len()
         ));
     }
 
-    let share_root = Path::new(SHARE_BASE).join(sandbox_id);
-    // A previous shim may still be running its deferred cleanup while
-    // containerd starts a replacement with the same task ID. Give every
-    // shim process its own export directory so the old generation cannot
-    // remove the new generation between mkdir(2) and mount(2).
-    let export_id = export_generation(task_id, std::process::id());
+    // A previous shim, a duplicate Create, or a concurrent Delete may still
+    // own an export for this task ID. Every Create attempt gets a distinct
+    // directory so neither a failed attempt nor old-task cleanup can unmount
+    // or remove another generation.
+    let export_id = next_export_generation(task_id, std::process::id());
     let target = share_root.join("rootfs").join(&export_id);
     fs::create_dir_all(&target)
         .map_err(|e| format!("create rootfs export {} failed: {e}", target.display()))?;
 
     let mut prepared = PreparedRootfs {
         target: target.clone(),
-        share_root: share_root.clone(),
+        share_root: share_root.to_path_buf(),
         mounts: Vec::new(),
+        remove_share_root,
     };
     let guest_lowerdirs = export_rootfs(
-        sandbox_id,
+        guest_share_name,
         &export_id,
         &mounts[0],
         &target,
         &mut prepared.mounts,
     )?;
 
-    inject_annotations(spec, &share_root, guest_lowerdirs)?;
-    Ok(Some(prepared))
+    inject_annotations(spec, share_root, guest_lowerdirs, inject_virtiofs)?;
+    Ok(prepared)
 }
 
-fn export_generation(task_id: &str, pid: u32) -> String {
-    format!("{task_id}-{pid}")
+fn guest_share_name(shared_root: &Path) -> Result<String, String> {
+    shared_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!(
+                "managed shared root has no UTF-8 export name: {}",
+                shared_root.display()
+            )
+        })
+}
+
+fn next_export_generation(task_id: &str, pid: u32) -> String {
+    let attempt = EXPORT_ATTEMPT.fetch_add(1, Ordering::Relaxed);
+    export_generation(task_id, pid, attempt)
+}
+
+fn export_generation(task_id: &str, pid: u32, attempt: u64) -> String {
+    format!("{task_id}-{pid}-{attempt}")
 }
 
 fn validate_id(kind: &str, id: &str) -> Result<(), String> {
@@ -156,30 +217,33 @@ fn inject_annotations(
     spec: &mut Spec,
     share_root: &Path,
     guest_lowerdirs: Vec<String>,
+    inject_virtiofs: bool,
 ) -> Result<(), String> {
     let mut annotations: HashMap<String, String> =
         spec.annotations().as_ref().cloned().unwrap_or_default();
     if annotations.contains_key(ANNO_VMM_FS) {
         return Err(format!(
-            "{ENABLE_ANNOTATION} cannot be combined with an existing {ANNO_VMM_FS} annotation"
+            "standard rootfs cannot be combined with an existing {ANNO_VMM_FS} annotation"
         ));
     }
     if annotations.contains_key(ANNOTATION_K_ROOTFS_INFO) {
         return Err(format!(
-            "{ENABLE_ANNOTATION} cannot be combined with an existing {ANNOTATION_K_ROOTFS_INFO} annotation"
+            "standard rootfs cannot be combined with an existing {ANNOTATION_K_ROOTFS_INFO} annotation"
         ));
     }
 
-    let fs_config = json!({
-        "backendfs_config": {
-            "shared_dir": VIRTIOFS_SHARED_DIR,
-            "allowed_dirs": [share_root.to_string_lossy()],
-            "announce_submounts": false,
-            "cache": 2,
-            "read_only": true
-        }
-    });
-    annotations.insert(ANNO_VMM_FS.to_string(), fs_config.to_string());
+    if inject_virtiofs {
+        let fs_config = json!({
+            "backendfs_config": {
+                "shared_dir": VIRTIOFS_SHARED_DIR,
+                "allowed_dirs": [share_root.to_string_lossy()],
+                "announce_submounts": false,
+                "cache": 2,
+                "read_only": true
+            }
+        });
+        annotations.insert(ANNO_VMM_FS.to_string(), fs_config.to_string());
+    }
 
     let rootfs_info = RootfsInfo {
         pmem_file: None,
@@ -400,8 +464,12 @@ mod tests {
     }
 
     #[test]
-    fn export_generation_is_process_scoped() {
-        assert_eq!(export_generation("task-a", 42), "task-a-42");
+    fn export_generation_is_process_and_attempt_scoped() {
+        assert_eq!(export_generation("task-a", 42, 7), "task-a-42-7");
+        assert_ne!(
+            next_export_generation("task-a", 42),
+            next_export_generation("task-a", 42)
+        );
     }
 
     #[test]
@@ -456,6 +524,7 @@ mod tests {
                 "sandbox-a/rootfs/task-a/layers/000".to_string(),
                 "sandbox-a/rootfs/task-a/layers/001".to_string(),
             ],
+            true,
         )
         .unwrap();
         let annotations = spec.annotations().as_ref().unwrap();
@@ -477,5 +546,108 @@ mod tests {
             rootfs["overlay_info"]["virtiofs_lower_dir"][1],
             "sandbox-a/rootfs/task-a/layers/001"
         );
+    }
+
+    #[test]
+    fn managed_rootfs_uses_runtime_share_export_name() {
+        assert_eq!(
+            guest_share_name(Path::new("/data/cubelet/s11/shared/sb-generation")).unwrap(),
+            "sb-generation"
+        );
+    }
+
+    #[test]
+    fn managed_rootfs_injects_only_guest_rootfs_contract() {
+        let mut spec = Spec::default();
+        inject_annotations(
+            &mut spec,
+            Path::new("/data/cubelet/s11/shared/sb-generation"),
+            vec!["sb-generation/rootfs/task-a-42/layers/000".to_string()],
+            false,
+        )
+        .unwrap();
+
+        let annotations = spec.annotations().as_ref().unwrap();
+        assert!(!annotations.contains_key(ANNO_VMM_FS));
+        let rootfs: serde_json::Value =
+            serde_json::from_str(annotations.get(ANNOTATION_K_ROOTFS_INFO).unwrap()).unwrap();
+        assert_eq!(
+            rootfs["overlay_info"]["virtiofs_lower_dir"][0],
+            "sb-generation/rootfs/task-a-42/layers/000"
+        );
+    }
+
+    #[test]
+    fn managed_cleanup_preserves_runtime_shared_root() {
+        let share_root = std::env::temp_dir().join(format!(
+            "cubesandbox-managed-rootfs-test-{}",
+            std::process::id()
+        ));
+        let target = share_root.join("rootfs/task-a-42");
+        let _ = fs::remove_dir_all(&share_root);
+        fs::create_dir_all(&target).unwrap();
+
+        PreparedRootfs {
+            target,
+            share_root: share_root.clone(),
+            mounts: Vec::new(),
+            remove_share_root: false,
+        }
+        .cleanup()
+        .unwrap();
+
+        assert!(share_root.is_dir());
+        fs::remove_dir(&share_root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_of_old_attempt_preserves_recreated_task_export() {
+        let share_root = std::env::temp_dir().join(format!(
+            "cubesandbox-rootfs-recreate-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let old_target = share_root
+            .join("rootfs")
+            .join(export_generation("same-task", 42, 1));
+        let new_target = share_root
+            .join("rootfs")
+            .join(export_generation("same-task", 42, 2));
+        fs::create_dir_all(&old_target).unwrap();
+        fs::create_dir_all(&new_target).unwrap();
+
+        PreparedRootfs {
+            target: old_target.clone(),
+            share_root: share_root.clone(),
+            mounts: Vec::new(),
+            remove_share_root: false,
+        }
+        .cleanup()
+        .unwrap();
+
+        assert!(!old_target.exists());
+        assert!(new_target.is_dir());
+        fs::remove_dir_all(&share_root).unwrap();
+    }
+
+    #[test]
+    fn legacy_cleanup_removes_its_private_shared_root() {
+        let share_root = std::env::temp_dir().join(format!(
+            "cubesandbox-legacy-rootfs-test-{}",
+            std::process::id()
+        ));
+        let target = share_root.join("rootfs/task-a-42");
+        let _ = fs::remove_dir_all(&share_root);
+        fs::create_dir_all(&target).unwrap();
+
+        PreparedRootfs {
+            target,
+            share_root: share_root.clone(),
+            mounts: Vec::new(),
+            remove_share_root: true,
+        }
+        .cleanup()
+        .unwrap();
+
+        assert!(!share_root.exists());
     }
 }

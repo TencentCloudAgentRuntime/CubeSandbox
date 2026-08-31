@@ -32,8 +32,8 @@ use crate::common::utils::Utils;
 use crate::container::{container_mgr::ContainerInfo, exec::Tty};
 use crate::log::{stat_defer, Log, LogLevel};
 use crate::sandbox::sb;
-use crate::service::s0_rootfs::{self, PreparedRootfs};
 use crate::service::sandbox_srv::{SandboxLifecycle, TaskMode};
+use crate::service::standard_rootfs::{self, PreparedRootfs};
 use crate::service::update_ext;
 use crate::{debugf, errf, infof, warnf};
 const MODULE: &str = "Shim";
@@ -48,7 +48,7 @@ fn create_error_with_rootfs_cleanup(
     if let Some(rootfs) = prepared_rootfs.take() {
         if let Err(cleanup_error) = rootfs.cleanup() {
             return Error::Other(format!(
-                "{message}; cleanup S0 standard rootfs failed:{cleanup_error}"
+                "{message}; cleanup standard rootfs failed:{cleanup_error}"
             ));
         }
     }
@@ -291,7 +291,7 @@ pub struct TaskService {
     sandbox_id: String,
     //ns: String,
     sandbox: Arc<Mutex<sb::SandBox>>,
-    s0_rootfs: Arc<Mutex<HashMap<String, PreparedRootfs>>>,
+    standard_rootfs: Arc<Mutex<HashMap<String, PreparedRootfs>>>,
     sandbox_lifecycle: Arc<SandboxLifecycle>,
     log: Log,
     //debug: bool,
@@ -323,7 +323,7 @@ impl TaskService {
             sandbox_id: id,
             //ns,
             sandbox: Arc::new(Mutex::new(sb)),
-            s0_rootfs: Arc::new(Mutex::new(HashMap::new())),
+            standard_rootfs: Arc::new(Mutex::new(HashMap::new())),
             sandbox_lifecycle: Arc::new(SandboxLifecycle::default()),
             log,
             //debug: debug,
@@ -372,120 +372,153 @@ impl Task for TaskService {
             self.log.clone(),
         );
 
-        let task_mode =
-            self.sandbox_lifecycle.task_mode().await.map_err(|error| {
-                Error::Other(format!("Create task before sandbox ready: {error}"))
-            })?;
+        let task_reservation = self
+            .sandbox_lifecycle
+            .reserve_task_create(&req.id)
+            .await
+            .map_err(|error| Error::Other(format!("Create task before sandbox ready: {error}")))?;
+        let task_mode = task_reservation.mode();
 
-        let bundle = req.bundle.as_str();
+        let result = async {
+            let bundle = req.bundle.as_str();
 
-        let mut spec = Utils::load_spec(bundle).map_err(|e| {
-            errf!(self.log, "Load spec failed:{}", e.clone());
-            Others(format!("Load spec failed:{}", e))
-        })?;
-        let mut prepared_rootfs =
-            s0_rootfs::prepare(&self.sandbox_id, &req.id, &req.rootfs, &mut spec).map_err(|e| {
-                errf!(self.log, "Prepare S0 standard rootfs failed:{}", e);
-                Error::Other(format!("Prepare S0 standard rootfs failed:{}", e))
+            let mut spec = Utils::load_spec(bundle).map_err(|e| {
+                errf!(self.log, "Load spec failed:{}", e.clone());
+                Others(format!("Load spec failed:{}", e))
             })?;
-        if let Some(rootfs) = prepared_rootfs.as_ref() {
+            let mut prepared_rootfs = match task_mode {
+                TaskMode::Legacy => standard_rootfs::prepare_legacy(
+                    &self.sandbox_id,
+                    &req.id,
+                    &req.rootfs,
+                    &mut spec,
+                ),
+                TaskMode::ManagedReady { shared_root } => {
+                    standard_rootfs::prepare_managed(shared_root, &req.id, &req.rootfs, &mut spec)
+                        .map(Some)
+                }
+            }
+            .map_err(|e| {
+                errf!(self.log, "Prepare standard rootfs failed:{}", e);
+                Error::Other(format!("Prepare standard rootfs failed:{}", e))
+            })?;
+            if let Some(rootfs) = prepared_rootfs.as_ref() {
+                infof!(
+                    self.log,
+                    "standard rootfs mounted at {}",
+                    rootfs.target().display()
+                );
+            }
+
             infof!(
                 self.log,
-                "S0 standard rootfs mounted at {}",
-                rootfs.target().display()
+                "load spec finish at:{}",
+                start.elapsed().as_millis()
             );
-        }
 
-        infof!(
-            self.log,
-            "load spec finish at:{}",
-            start.elapsed().as_millis()
-        );
-
-        let mut sb = self.sandbox.lock().await;
-        if sb.paused().await {
-            let message = "sandbox not in normal state".to_string();
-            errf!(self.log, "{}", message);
-            return Err(create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into());
-        }
-        if !sb.inited() {
-            if task_mode == TaskMode::ManagedReady {
-                let message = "managed sandbox is ready but Cube configuration is not initialized"
-                    .to_string();
-                return Err(create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into());
-            }
-            stat.set_callee_act(stat_defer::CALLEE_ACT_CREATE_POD_SANDBOX.to_string());
-            infof!(self.log, "shim pid {}", std::process::id());
-            if let Err(e) = Utils::record_pid() {
-                let message = format!("Create pid file failed:{}", e);
+            let mut sb = self.sandbox.lock().await;
+            if sb.paused().await {
+                let message = "sandbox not in normal state".to_string();
                 errf!(self.log, "{}", message);
                 return Err(create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into());
             }
-            if let Err(e) = sb.init(spec.clone()) {
-                let message = format!("Init sandbox config failed:{}", e);
+            if !sb.inited() {
+                if matches!(task_mode, TaskMode::ManagedReady { .. }) {
+                    let message =
+                        "managed sandbox is ready but Cube configuration is not initialized"
+                            .to_string();
+                    return Err(
+                        create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into(),
+                    );
+                }
+                stat.set_callee_act(stat_defer::CALLEE_ACT_CREATE_POD_SANDBOX.to_string());
+                infof!(self.log, "shim pid {}", std::process::id());
+                if let Err(e) = Utils::record_pid() {
+                    let message = format!("Create pid file failed:{}", e);
+                    errf!(self.log, "{}", message);
+                    return Err(
+                        create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into(),
+                    );
+                }
+                if let Err(e) = sb.init(spec.clone()) {
+                    let message = format!("Init sandbox config failed:{}", e);
+                    errf!(self.log, "{}", message);
+                    return Err(
+                        create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into(),
+                    );
+                }
+
+                if let Err(e) = sb.create_sandbox().await {
+                    let message = format!("Create sandbox failed:{}", e);
+                    errf!(self.log, "{}", message);
+                    return Err(
+                        create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into(),
+                    );
+                }
+            }
+
+            infof!(
+                self.log,
+                "start sandbox finish at:{}",
+                start.elapsed().as_millis()
+            );
+            let info = ContainerInfo {
+                id: req.id.clone(),
+                bundle: req.bundle.clone(),
+                stdin: req.stdin.clone(),
+                stdout: req.stdout.clone(),
+                stderr: req.stderr.clone(),
+                terminal: req.terminal,
+                ..Default::default()
+            };
+            if let Err(e) = sb.create_container(req.id.clone(), spec, info).await {
+                let message = format!("Create container failed:{}", e);
                 errf!(self.log, "{}", message);
                 return Err(create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into());
             }
-
-            if let Err(e) = sb.create_sandbox().await {
-                let message = format!("Create sandbox failed:{}", e);
-                errf!(self.log, "{}", message);
-                return Err(create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into());
+            if let Some(rootfs) = prepared_rootfs {
+                self.standard_rootfs
+                    .lock()
+                    .await
+                    .insert(req.id.clone(), rootfs);
             }
-        }
+            infof!(
+                self.log,
+                "start container finish at:{}",
+                start.elapsed().as_millis()
+            );
 
-        infof!(
-            self.log,
-            "start sandbox finish at:{}",
-            start.elapsed().as_millis()
-        );
-        let info = ContainerInfo {
-            id: req.id.clone(),
-            bundle: req.bundle.clone(),
-            stdin: req.stdin.clone(),
-            stdout: req.stdout.clone(),
-            stderr: req.stderr.clone(),
-            terminal: req.terminal,
-            ..Default::default()
-        };
-        if let Err(e) = sb.create_container(req.id.clone(), spec, info).await {
-            let message = format!("Create container failed:{}", e);
-            errf!(self.log, "{}", message);
-            return Err(create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into());
+            let io = TaskIO {
+                stdin: req.stdin.clone(),
+                stdout: req.stdout.clone(),
+                stderr: req.stderr.clone(),
+                terminal: req.terminal,
+                ..Default::default()
+            };
+            let event = TaskCreate {
+                container_id: req.id.clone(),
+                bundle: req.bundle.clone(),
+                rootfs: req.rootfs.clone(),
+                checkpoint: req.checkpoint.clone(),
+                pid: sb.pid(),
+                io: Some(io).into(),
+                ..Default::default()
+            };
+            let topic = event.topic();
+            self.tx_event(topic, Box::new(event)).await;
+            stat.set_ok();
+            infof!(self.log, "create req finish");
+            Ok(api::CreateTaskResponse {
+                pid: sb.pid(),
+                ..Default::default()
+            })
         }
-        if let Some(rootfs) = prepared_rootfs {
-            self.s0_rootfs.lock().await.insert(req.id.clone(), rootfs);
-        }
-        infof!(
-            self.log,
-            "start container finish at:{}",
-            start.elapsed().as_millis()
-        );
-
-        let io = TaskIO {
-            stdin: req.stdin.clone(),
-            stdout: req.stdout.clone(),
-            stderr: req.stderr.clone(),
-            terminal: req.terminal,
-            ..Default::default()
-        };
-        let event = TaskCreate {
-            container_id: req.id.clone(),
-            bundle: req.bundle.clone(),
-            rootfs: req.rootfs.clone(),
-            checkpoint: req.checkpoint.clone(),
-            pid: sb.pid(),
-            io: Some(io).into(),
-            ..Default::default()
-        };
-        let topic = event.topic();
-        self.tx_event(topic, Box::new(event)).await;
-        stat.set_ok();
-        infof!(self.log, "create req finish");
-        Ok(api::CreateTaskResponse {
-            pid: sb.pid(),
-            ..Default::default()
-        })
+        .await;
+        // Dropping the reservation synchronously releases the task ID and
+        // wakes Stop/Shutdown. This also runs when the Create future is
+        // cancelled, so lifecycle operations cannot wait on a leaked count.
+        drop(task_reservation);
+        result
     }
     async fn start(
         &self,
@@ -680,12 +713,12 @@ impl Task for TaskService {
                             seconds: tm.timestamp(),
                             ..Default::default()
                         };
-                        let rootfs = { self.s0_rootfs.lock().await.remove(&req.id) };
+                        let rootfs = { self.standard_rootfs.lock().await.remove(&req.id) };
                         if let Some(rootfs) = rootfs {
                             if let Err(e) = rootfs.cleanup() {
                                 // Drop performs a lazy-unmount fallback. The S0
                                 // replay separately asserts no mount remains.
-                                warnf!(self.log, "cleanup S0 standard rootfs failed:{}", e);
+                                warnf!(self.log, "cleanup standard rootfs failed:{}", e);
                             }
                         }
                         let event = TaskDelete {

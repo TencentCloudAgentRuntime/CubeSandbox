@@ -5,9 +5,9 @@
 mod bootstrap;
 mod runner;
 mod runtime_resource;
-mod s0_rootfs;
 mod sandbox_srv;
 mod srv;
+mod standard_rootfs;
 mod task_srv;
 mod tools;
 mod update_ext;

@@ -21,7 +21,7 @@ use std::io::{IoSliceMut, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use tokio::net::UnixStream;
@@ -350,6 +350,32 @@ pub(crate) struct RuntimeLease {
 }
 
 impl RuntimeLease {
+    pub(crate) fn shared_root(&self) -> Result<PathBuf, String> {
+        let assets = self
+            .sandbox
+            .assets
+            .as_ref()
+            .ok_or_else(|| "RuntimeResource lease has no assets".to_string())?;
+        canonical_runtime_shared_root(Path::new(&assets.shared_root))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_with_shared_root(shared_root: &str) -> Self {
+        Self {
+            endpoint: "/run/cubesandbox-test/runtime-resource.sock".to_string(),
+            sandbox: PreparedSandbox {
+                sandbox_id: "sandbox-test".to_string(),
+                lease_id: "lease-test".to_string(),
+                generation: 1,
+                assets: Some(RuntimeAssets {
+                    shared_root: shared_root.to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        }
+    }
+
     fn cleanup_record(&self) -> RuntimeCleanupRecord {
         RuntimeCleanupRecord {
             endpoint: self.endpoint.clone(),
@@ -881,7 +907,7 @@ pub(crate) async fn prepare(
         Ok(response) => response,
         Err(error) => return Err(release_after_prepare_error(&cleanup_lease, error).await),
     };
-    let sandbox = match response.sandbox {
+    let mut sandbox = match response.sandbox {
         Some(sandbox) => sandbox,
         None => {
             return Err(release_after_prepare_error(
@@ -891,9 +917,15 @@ pub(crate) async fn prepare(
             .await)
         }
     };
-    if let Err(error) = validate_prepared(sandbox_id, generation, &expected_lease_id, &sandbox) {
-        return Err(release_after_prepare_error(&cleanup_lease, error).await);
-    }
+    let shared_root = match validate_prepared(sandbox_id, generation, &expected_lease_id, &sandbox)
+    {
+        Ok(shared_root) => shared_root,
+        Err(error) => return Err(release_after_prepare_error(&cleanup_lease, error).await),
+    };
+    // From this point on both the virtiofs annotation and Task rootfs bridge
+    // use the canonical path that was validated as a strict /data/cubelet
+    // descendant. Do not retain a server-supplied symlink spelling.
+    sandbox.assets.as_mut().unwrap().shared_root = shared_root.display().to_string();
     if let Err(error) = inject_annotations(spec, &resources, &sandbox) {
         return Err(release_after_prepare_error(&cleanup_lease, error).await);
     }
@@ -1002,7 +1034,7 @@ fn validate_prepared(
     generation: u64,
     expected_lease_id: &str,
     sandbox: &PreparedSandbox,
-) -> Result<(), String> {
+) -> Result<PathBuf, String> {
     if sandbox.sandbox_id != sandbox_id
         || sandbox.generation != generation
         || sandbox.lease_id != expected_lease_id
@@ -1036,13 +1068,53 @@ fn validate_prepared(
     {
         return Err("Cubelet returned incomplete RuntimeResource data".to_string());
     }
-    if !Path::new(&assets.shared_root).starts_with(VIRTIOFS_SHARED_DIR) {
+    canonical_runtime_shared_root(Path::new(&assets.shared_root))
+}
+
+/// Resolve a server-provided virtiofs export without permitting lexical or
+/// symlink traversal outside Cubelet's owned directory. The base directory
+/// itself is deliberately not a valid per-Sandbox export.
+pub(crate) fn canonical_runtime_shared_root(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
         return Err(format!(
-            "RuntimeResource shared root {} is outside {}",
-            assets.shared_root, VIRTIOFS_SHARED_DIR
+            "RuntimeResource shared root must be an absolute normalized path below {VIRTIOFS_SHARED_DIR}: {}",
+            path.display()
         ));
     }
-    Ok(())
+
+    let base = std::fs::canonicalize(VIRTIOFS_SHARED_DIR).map_err(|error| {
+        format!("canonicalize RuntimeResource shared root base {VIRTIOFS_SHARED_DIR}: {error}")
+    })?;
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        format!(
+            "canonicalize RuntimeResource shared root {}: {error}",
+            path.display()
+        )
+    })?;
+    let metadata = canonical.metadata().map_err(|error| {
+        format!(
+            "stat RuntimeResource shared root {}: {error}",
+            canonical.display()
+        )
+    })?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "RuntimeResource shared root is not a directory: {}",
+            canonical.display()
+        ));
+    }
+    if canonical == base || !canonical.starts_with(&base) {
+        return Err(format!(
+            "RuntimeResource shared root {} is not a strict descendant of {}",
+            canonical.display(),
+            base.display()
+        ));
+    }
+    Ok(canonical)
 }
 
 fn inject_annotations(
@@ -1440,6 +1512,7 @@ fn status_string(status: Status) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
 
     fn sample_network() -> NetworkAttachment {
         NetworkAttachment {
@@ -1523,6 +1596,38 @@ mod tests {
                 .contains("stat RuntimeResource kernel")
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_shared_root_requires_normalized_strict_descendant() {
+        let root = PathBuf::from(format!(
+            "/data/cubelet/runtime-shared-root-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let valid = root.join("valid");
+        std::fs::create_dir_all(&valid).unwrap();
+
+        assert_eq!(
+            canonical_runtime_shared_root(&valid).unwrap(),
+            valid.canonicalize().unwrap()
+        );
+        assert!(canonical_runtime_shared_root(Path::new("/data/cubelet")).is_err());
+        assert!(canonical_runtime_shared_root(Path::new(
+            "/data/cubelet/../cubelet/runtime-shared-root-test"
+        ))
+        .is_err());
+
+        let outside = std::env::temp_dir().join(format!(
+            "runtime-shared-root-outside-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&outside).unwrap();
+        let escape = root.join("escape");
+        symlink(&outside, &escape).unwrap();
+        assert!(canonical_runtime_shared_root(&escape).is_err());
+
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
     }
 
     fn handoff_sandbox(endpoint: String) -> PreparedSandbox {
