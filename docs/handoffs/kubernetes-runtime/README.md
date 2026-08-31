@@ -2,27 +2,27 @@
 
 ## 当前 Stage
 
-S1.4 `IN_PROGRESS`：S1.3 CRI 基础交互已完成；当前开始清理、runc 共存、Job/Deployment 和 legacy Cubebox 回归。
+S2.1 `IN_PROGRESS`：S1 单容器纵向 PoC 已全部完成并获同一 reviewer `APPROVE`；当前开始验证同一 Cube VM 内动态创建、运行和删除多个普通容器。
 
 ## 基线
 
-最后一项已验证实现 commit 为 `14354f09cd9d7b384f4170e3ef1ccafb12e4bccd`，完整 tree 为 `5ce41abfaa77f1979cca53b7751b620506415538`。S1.3 最终 shim SHA-256 为 `f873cdbe2cf63cbcf5c809ffc9035ba4066d6a92dc658599c50fd513586c253d`。
+最后一项已验证实现 commit 为 `517c62b309edcc25d890de26a6495a6b07517ada`，完整 tree 为 `b8130de93b38d563add6b8c0615814b8ba595133`。S1.4 最终 shim SHA-256 为 `39b68b08c17d27798b8ef1bf414db9eb5804aa09d21d2ebfb5a39b5042b9d9dd`。
 
 ## 已完成
 
-S0、S1.1、S1.2、S1.3 均为 `DONE`。S1.3 已让标准 Kubernetes `RuntimeClass/cube` 单容器 Pod 在真实 Cube VM 运行；logs、非 TTY/非 stdin exec、退出码、termination grace period 和退出事件正确。Kubernetes host bind mount 经 Pod 固定 virtio-fs share 导入 Guest；unmount 失败时保留 export。删除后 containerd、snapshot、netns、RuntimeResource、mount、shim 和 active lease 全部恢复基线，同一 reviewer 最终 `APPROVE`。
+S0 和 S1.1～S1.4 均为 `DONE`。S1.4 已补齐合法 Sandbox OCI Any，并通过默认 runc、Job、Deployment、强制删除、创建中取消、100 Pod 循环、Cubebox race tests 和 unmanaged shim 20 次循环。所有 owned runtime resource 与 `/run/vc/vm` 恢复基线，Sandbox Spec warning 为 0；同一 reviewer 最终 `APPROVE`。
 
 ## 未完成
 
-S1.4 尚未完成正常/强制/创建中取消清理矩阵、100 次循环、Job/Deployment、默认 runc 共存和 legacy Cubebox smoke。因此 S1 Milestone 仍为 `IN_PROGRESS`。TTY/stdin 属于后续范围，不纳入 S1.4。
+S2.1 尚未验证同一 Sandbox 内第二个普通容器的动态 Create/Start/Wait/Delete、分别 logs/exec、单容器退出不影响同 Pod 其他容器，以及整 Pod 删除零残留。TTY/stdin 不纳入 S2.1。
 
 ## 验证
 
-最终严格构建 `inv-683bb60cjf` 通过 CubeShim lib tests、all-targets check 和 release build；最终部署 `inv-883besgxts` 成功。真实 Kubernetes 终验 `inv-383bfj082n` 为 `SUCCESS`：exec 进程/客户端返回 19，3 秒 grace 后 SIGKILL 返回 137，删除耗时 4451 ms，所有断言资源恢复基线。完整摘要见 `evidence/s1.3/README.md`。
+S1.4 严格构建 `inv-a83cu30ran`、部署 `inv-a83cxjgftm`、Spec `inv-983d0j0cbd`、最终 smoke `inv-083ehrgqpm`、100 循环 `inv-883ep9gvt6`、Cubebox race tests `inv-b83ejs0618` 和 legacy shim `inv-683f0pg8ge` 均为 `SUCCESS`。最终 TAT 均先断言仓库脚本 SHA；同一 reviewer 最终 `APPROVE`。完整摘要见 `evidence/s1.4/README.md`。
 
 ## 阻塞
 
-无外部阻塞。containerd verbose status 对 Sandbox 空 `Spec.type_url` 的 warning 已记录为 `K8S-OQ-009`，在 S1.4 兼容性回归处理，不影响已验证生命周期。
+无外部阻塞。`K8S-OQ-006`、`K8S-OQ-009` 已关闭；durable tombstone 的生产保留/压缩记录为 `K8S-OQ-010`，目标 S5，不阻塞 S2.1。
 
 ## 受保护路径
 
@@ -30,4 +30,4 @@ S1.4 尚未完成正常/强制/创建中取消清理矩阵、100 次循环、Job
 
 ## 下一步
 
-接手者先复现 `evidence/s1.3/README.md` 的最终制品 SHA、`inv-383bfj082n` 的 logs/exec/137 和零残留结论。随后冻结 S1.4 验收矩阵，依次验证正常删除、强制删除、创建中取消、100 次循环、默认 runc、Job/Deployment 和 legacy smoke；每个独立小步保留前后基线，完成后交同一 reviewer。不要提前展开 S2 多容器或 TTY/stdin。
+先复现 `evidence/s1.4/README.md` 的最终制品 SHA 与 `inv-683f0pg8ge` 零残留结论。随后为 S2.1 建立最小双普通容器 Pod 基线，确认 containerd 在同一 Sandbox 发出多个 Task 请求；依次验证第二容器动态加入、分别 logs/exec/exit、删除一个 Task 不终止另一 Task/VM，以及整 Pod 删除恢复 S1.4 的全量基线。完成后交同一 reviewer。

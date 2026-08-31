@@ -264,14 +264,14 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 - 不要求生产代码质量；探针代码若合入必须 feature-gated，并附删除或演进说明。
 
 ## 6. S1：单容器纵向 PoC
-> Milestone 状态：`IN_PROGRESS`。S1.1～S1.3 已完成；当前执行 S1.4。
+> Milestone 状态：`DONE`。S1.1～S1.4 均已完成并通过同一 reviewer 门禁。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
 | S1.1 Sandbox VM 生命周期 | `DONE` | Codex | 生命周期、持久 lease、FD handoff、失败回滚、dead-shim recovery 和 durable fence 已实现；真实 Cilium TAP/PVM Cube VM 的 Create→Created Status→Platform→Start→Ready Status→Stop→Stopped Status→Wait→Shutdown、异常回滚及宿主零残留终验通过 | `47522929`～`22716267`；云端严格构建 `inv-b831vp0wan`；终验 `inv-38324c05ra`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s1.1/README.md)；最终 subagent `APPROVE` | S1.2 OCI Task |
 | S1.2 OCI Task | `DONE` | Codex | 标准 OCI overlayfs rootfs 已进入真实 Guest；Task API v3、共享 root/generation fence、稳定 rootfs 父 inode 和 Agent `128+signal` 退出码已实现；同一 Cube 内自然退出与 SIGKILL Task 均完成并全量清理 | `9c679855`、`cf07e446`、`781cd8f8`、`32a49105`、`d47af8c2`；Shim 115 项、Agent/workspace 203 项通过；真实终验 `inv-9837xq0wnq`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s1.2/README.md)；最终 subagent `APPROVE` | S1.3 CRI 基础交互 |
 | S1.3 CRI 基础交互 | `DONE` | Codex | Kubernetes OCI host bind mount 已经由 Pod 固定 virtio-fs shared root 导入 Guest；标准 PATH shim 选择已加制品一致性门禁；真实 `RuntimeClass/cube` Pod 的 logs、非 TTY/非 stdin exec、stdout/stderr、进程/客户端退出码 19、3 秒 grace 后 137 和删除全量基线均通过；unmount 失败时保留 export，避免目录 bind 下误删宿主数据 | `14354f09`；最终严格构建 `inv-683bb60cjf`；最终部署 `inv-883besgxts`；真实终验 `inv-383bfj082n`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s1.3/README.md)；最终同一 subagent `APPROVE` | S1.4 清理与共存 |
-| S1.4 清理与共存 | `IN_PROGRESS` | Codex | S1.3 已证明单个 RuntimeClass Pod 的正常删除零残留，runc 仍为默认 runtime | 前置真实终验 `inv-383bfj082n` | 冻结正常删除、强制删除、创建中取消、100 次循环、runc 默认路径、Job/Deployment 和 legacy Cubebox 回归矩阵 |
+| S1.4 清理与共存 | `DONE` | Codex | Sandbox Spec 已返回 containerd 标准 OCI Any；默认 runc、Job/Deployment、正常/强制/创建中取消、100 Pod 循环、legacy Cubebox race tests 和 unmanaged shim 20 次循环均通过；全部 owned runtime resource 及 `/run/vc/vm` 恢复基线，legacy 安全清理和固定 Git tree 输入门禁通过 | 实现 `517c62b3`；最终构建 `inv-a83cu30ran`；部署 `inv-a83cxjgftm`；Spec `inv-983d0j0cbd`；smoke `inv-083ehrgqpm`；100 循环 `inv-883ep9gvt6`；Cubebox `inv-b83ejs0618`；legacy shim `inv-683f0pg8ge`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s1.4/README.md)；最终同一 reviewer `APPROVE` | S2.1 动态多容器 |
 
 
 ### 目标
@@ -296,11 +296,11 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 - legacy Cubebox 创建/删除 smoke test 通过。
 
 ## 7. S2：多容器与 Pod 生命周期
-> Milestone 状态：`NOT_STARTED`。依赖 S1.1～S1.4 完成。
+> Milestone 状态：`IN_PROGRESS`。S1.1～S1.4 已完成；当前执行 S2.1。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
-| S2.1 动态多容器 | `NOT_STARTED` | 待指定 | — | — | 在运行中的 VM 动态增删普通容器 |
+| S2.1 动态多容器 | `IN_PROGRESS` | Codex | 已继承 S1.4 的同一 Sandbox/VM、Task、日志、exec 和全量清理基线 | S1.4 实现 `517c62b3` 与最终 reviewer `APPROVE` | 验证双普通容器共享一个 Cube VM；动态 Task 加入、独立 logs/exec/exit/delete 不影响同 Pod 另一容器，整 Pod 删除零残留 |
 | S2.2 Init 与重启 | `NOT_STARTED` | 待指定 | — | — | 实现 init 顺序和单容器重启 |
 | S2.3 Namespace | `NOT_STARTED` | 待指定 | — | — | 实现 Pod 共享和隔离 namespace 语义 |
 | S2.4 Sidecar 与 Pod 生命周期 | `NOT_STARTED` | 待指定 | — | — | 实现 sidecar、ephemeral、probe 和 hook |
