@@ -296,14 +296,14 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 - legacy Cubebox 创建/删除 smoke test 通过。
 
 ## 7. S2：多容器与 Pod 生命周期
-> Milestone 状态：`IN_PROGRESS`。S1.1～S1.4、S2.1～S2.2 已完成；当前执行 S2.3。
+> Milestone 状态：`IN_PROGRESS`。S1.1～S1.4、S2.1～S2.3 已完成；当前执行 S2.4。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
 | S2.1 动态多容器 | `DONE` | Codex | 双普通容器已在同一 Sandbox/VM/Pod IP 内以独立 Task/rootfs 运行；分别 logs/exec 成功；CRI 删除 alpha 后旧 Task/rootfs 清理，beta 与 VM/IP 不变，kubelet 仅重建 alpha 并恢复 Pod Ready；整 Pod 删除恢复全量基线 | 实现 `ce3afe4c`；严格构建 `inv-083fdrgb3k`；完整加固终验 `inv-083g3u0npg`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s2.1/README.md)；最终同一 reviewer `APPROVE` | S2.2 Init 与重启 |
 | S2.2 Init 与重启 | `DONE` | Codex | 双 init 严格串行、失败 init 新 Task 重试且 app 不启动、alpha exit 23 后仅定向重建 alpha 均通过；每例旧 Task/rootfs 清理，survivor/Pod UID/IP/VM/shim PID 不变并恢复全量基线 | 验收 `9467e4a0`；诊断 `inv-983ggb0u6k`；reviewer 加固后终验 `inv-a83gx50k5f`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s2.2/README.md)；最终同一 reviewer `APPROVE` | S2.3 Namespace |
-| S2.3 Namespace | `IN_PROGRESS` | Codex | 已继承 S2.2 的多 Task、init/restart、survivor 和逐例全量清理基线 | S2.2 验收 `9467e4a0` 与最终 reviewer `APPROVE` | 盘点 net/IPC/UTS/PID namespace 现状，验证 Pod 默认隔离与 `shareProcessNamespace`，并明确拒绝 host namespace |
-| S2.4 Sidecar 与 Pod 生命周期 | `NOT_STARTED` | 待指定 | — | — | 实现 sidecar、ephemeral、probe 和 hook |
+| S2.3 Namespace | `DONE` | Codex | CRI namespace/hostname 已映射；默认 net/IPC/UTS 共享而 PID/mount 隔离；共享 PID 使用加固的专用 PID 1，容器替换后 holder 与 survivor 稳定；hostNetwork/hostPID/hostIPC 在资源分配前拒绝；逐例恢复全量基线 | 实现 `e1bc2b7a`、holder 加固 `72beea45`、打包修复 `9b0c14fa`、验收 `a50425d3`；严格构建 `inv-v83iix062d`；终验 `inv-a83j9u0q12`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s2.3/README.md)；最终同一 reviewer `APPROVE` | S2.4 Sidecar 与 Pod 生命周期 |
+| S2.4 Sidecar 与 Pod 生命周期 | `IN_PROGRESS` | Codex | 已继承 S2.1～S2.3 的动态多 Task、init/restart、namespace、survivor 和全量清理基线 | S2.3 终验 `inv-a83j9u0q12` 与最终 reviewer `APPROVE` | 盘点原生 sidecar、ephemeral container、probe、lifecycle hook 与 graceful termination 的现状和差距 |
 
 
 ### 目标
