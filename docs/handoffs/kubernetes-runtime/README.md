@@ -2,27 +2,27 @@
 
 ## 当前 Stage
 
-S3.2 `IN_PROGRESS`：S3.2a～S3.2c 已获同一 reviewer `APPROVE` 并标记 `DONE`；当前执行 S3.2d 回归与支持矩阵。
+S3.3 `IN_PROGRESS`：S3.2a～S3.2d 已获同一 reviewer `APPROVE`，S3.2 整体标记为 `DONE`；当前开始 SecurityContext。
 
 ## 基线
 
-最后一项已验证实现 commit 为 `0bd252724523be144946f1e0f190121ff55344f7`，完整 tree 为 `68ab2419c8b8686aae6537384b3154f70ced2eef`。S3.2c 验收脚本 SHA-256 为 `9c2bd640164dc1fd3cc8e7522d448ff67f60b8796f9484ca6963fe3e0065f1ee`；运行时仍使用 S3.1 冻结的 shim 与 Guest 资产。
+最后一项已验证实现 commit 为 `83902212a85158c8c5fd947e8b06a661f0e1075c`，完整 tree 为 `61b4cf897e957ddeea4b15b3eb91db27106abd16`。S3.2d 回归脚本 SHA-256 为 `2b4ca34d10bf74e30e39296c98e2881b175fad18ace9bd15d624237bf2414325`；运行时仍使用 S3.1 冻结的 shim 与 Guest 资产。
 
 ## 已完成
 
-S0、S1、S2.1～S2.4、S3.1a～S3.1d、S3.2a～S3.2c 均为 `DONE`。S3.2c 证明 PVC 已进入 runtime 后的精确启动失败会清空 Task generation/mount；取证时 VM runtime 目录仍存在且 PVC 数据保持，健康 Pod 可继续复用。static-local Retain PV 经 Released gate 和管理员移除 claimRef 后可绑定新 PVC UID 并保持三个 marker。三次生命周期均恢复 runtime 基线，最终全量清理。同一 reviewer 明确 `APPROVE`。
+S0、S1、S2.1～S2.4、S3.1a～S3.1d、S3.2a～S3.2d 均为 `DONE`。S3.2d 以固定 SHA 顺序重放前三个子阶段，三次组件运行均恢复精确 runtime/storage/CSI/local-path 基线；六个 Sandbox 各产生且仅产生一条 inactive durable lease，总增量为 6，最终无 active lease 或固定对象残留。20 项矩阵只确认 static-local Filesystem/RWO runtime 语义基线，同一 reviewer 明确 `APPROVE`。
 
 ## 未完成
 
-S3.2d 尚未完成最终组合回归和支持矩阵。CSI、动态制备、CBS/CFS、跨节点 attach、RWX、扩容与 VolumeSnapshot 均未验证；static local 只是 runtime 语义基线，不是生产存储方案。普通 `hostPath` 仍是 `NOT_VALIDATED`，raw block 与 mountPropagation 不在 PoC 首版范围。
+S3.3、S3.4 尚未完成。S3.3 需要冻结并验证 UID/GID、supplemental groups、capabilities、只读 rootfs、`no_new_privileges`、seccomp 和 privileged 双门禁；TTY/stdin 仍可不支持。CSI、动态制备、CBS/CFS/COSFS、跨节点 attach、RWX、扩容与 VolumeSnapshot 仍未验证；static local 只是 runtime 语义基线，不是生产存储方案。
 
 ## 验证
 
-S3.2c 最终云验 `inv-b83w9pgt64` 和收紧后的只读审计 `inv-b83wguggpg` 均为 `SUCCESS`；证据目录为 `/data/cubelet/s3.2-evidence/s3.2c-reclaim-failure-20260831T213231Z`。失败回滚、健康复用、Released negative gate、手工重绑、三个数据 hash 和三条 Sandbox tombstone 均被独立核对；最终 active lease 和所有固定残留为 0。同一 reviewer 最终 `APPROVE`。完整摘要见 `evidence/s3.2/README.md`。
+S3.2d 组合终验 `inv-a83x7s0g04` 和收紧后的只读审计 `inv-883xivg7ub` 均为 `SUCCESS`；总证据目录为 `/data/cubelet/s3.2-evidence/s3.2d-regression-20260831T220436Z`。审计逐项核对四个脚本 SHA、三个组件证据目录、精确基线、四组 S3.2b mount 与 marker hash、S3.2c 失败/回收证据、六条 Sandbox lease 和 20 项矩阵；最终 active lease 与固定残留均为 0。同一 reviewer 最终 `APPROVE`。完整摘要见 `evidence/s3.2/README.md`。
 
 ## 阻塞
 
-无外部阻塞。S3.2d 必须组合重放 S3.2a～S3.2c 的 filesystem PVC 主路径并冻结支持矩阵；static-local Delete 在没有 deleter 时为不适用，CSI/dynamic/CBS/CFS 等未实测项必须保持未验证，不得从 static-local 结果外推。不触碰非本 PoC 创建的 TKE 集群。
+无外部阻塞。S3.3 必须从 CRI/OCI/Guest 三层区分字段是否传入、是否执行和是否可观察，不能只凭 Pod Ready 宣称安全语义生效；privileged 保持节点开关与 Pod 请求双门禁。不触碰非本 PoC 创建的 TKE 集群。
 
 ## 受保护路径
 
@@ -30,4 +30,4 @@ S3.2c 最终云验 `inv-b83w9pgt64` 和收紧后的只读审计 `inv-b83wguggpg`
 
 ## 下一步
 
-执行 S3.2d：定义并运行覆盖 S3.2a～S3.2c 冻结输入、RWO 持久化、失败回滚和 Retain 手工重绑的组合回归；核对全量资源基线；生成 filesystem PVC 支持矩阵，把 RWO/static-local 已验证项与 CSI、dynamic、CBS/CFS、RWX、扩容、snapshot 等未验证项分开。同一 reviewer 审核设计和最终证据后再关闭 S3.2。
+执行 S3.3：先盘点 kubelet 传入的 CRI/OCI SecurityContext 和当前 Agent 行为，拆成可独立验收的子阶段；依次实现普通身份与组、capabilities/只读 rootfs/`no_new_privileges`/seccomp、privileged 双门禁，最后组合回归并冻结支持矩阵。每个子阶段继续由同一 reviewer 审核到 `APPROVE`。

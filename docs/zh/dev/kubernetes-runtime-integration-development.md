@@ -1,6 +1,6 @@
 # CubeSandbox Kubernetes RuntimeClass PoC 开发计划
 
-> 状态：执行中（S3.2d filesystem PVC 回归与支持矩阵）
+> 状态：执行中（S3.3 SecurityContext）
 > 日期：2026-08-30  
 > 总体设计：[CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)  
 > 活动交接：[Kubernetes RuntimeClass PoC Handoff](../../../docs/handoffs/kubernetes-runtime/README.md)
@@ -328,13 +328,13 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 - 终止宽限期、SIGTERM/SIGKILL 和 TaskExit 事件时序有自动化测试。
 
 ## 8. S3：存储、安全与资源
-> Milestone 状态：`IN_PROGRESS`。S2、S3.1 已完成；当前执行 S3.2d。
+> Milestone 状态：`IN_PROGRESS`。S2、S3.1、S3.2 已完成；当前执行 S3.3。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
 | S3.1 基础 Volume | `DONE` | Codex | 输入、独立 Pod Volume share、可写卷/失败回滚、四类投射卷动态更新、subPath 固定语义和最终支持矩阵均已关闭 | 实现 `5b504b58`；S3.1d 回归 `aafdef40` / `inv-a83u0wgvxv`；审计 `inv-v83u490xa8`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.1/README.md)；同一 reviewer 确认 S3.1 `DONE` | S3.2 filesystem PVC |
-| S3.2 PVC | `IN_PROGRESS` | Codex | S3.2a～S3.2c 已完成输入基线、跨容器/Pod 重建持久化、失败回滚与 static-local Retain 手工重绑 | `0bd25272`；`inv-b83w9pgt64`；`inv-b83wguggpg`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.2/README.md)；同一 reviewer 确认 S3.2c `DONE` | S3.2d 回归与支持矩阵 |
-| S3.3 SecurityContext | `NOT_STARTED` | 待指定 | — | — | 映射并验证常用安全字段 |
+| S3.2 PVC | `DONE` | Codex | S3.2a～S3.2d 已完成输入基线、跨容器/Pod 重建持久化、失败回滚、static-local Retain 手工重绑、组合回归与支持矩阵 | `83902212`；组合终验 `inv-a83x7s0g04`；独立审计 `inv-883xivg7ub`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.2/README.md)；同一 reviewer 确认 S3.2 `DONE` | S3.3 SecurityContext |
+| S3.3 SecurityContext | `IN_PROGRESS` | Codex | 开始冻结 CRI/OCI/Guest 安全字段输入和当前实现缺口 | — | 拆分子阶段并完成输入诊断 |
 | S3.4 资源控制 | `NOT_STARTED` | 待指定 | — | — | 实现 Host/Guest 双层 cgroup |
 
 ### S3.1 子阶段执行记录
@@ -353,7 +353,7 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 | S3.2a PVC/CSI 输入诊断 | `DONE` | 选择 PoC filesystem PVC 后端，冻结 kubelet/CRI/OCI 输入与回收边界 | 只读盘点 StorageClass/CSIDriver/CSINode/PV/PVC；runc 对照能绑定、挂载、读写、删除；Cube 标准 bind 输入完整；同一 reviewer `APPROVE` | `11ada44e` / `inv-983uns0e3g` / `inv-v83uqvgu6g`：集群没有 CSI；static local Filesystem/RWO/WFFC/Retain 基线绑定、CRI/OCI 等价、runc→Cube 数据保持、Guest 可写和全量清理通过；不外推为 CSI/动态制备/生产后端支持 |
 | S3.2b RWO 持久化 | `DONE` | 让 filesystem RWO PVC 在 Cube Pod 内跨容器、跨 Pod 重建持久化 | writer/peer 读写一致；Pod UID/Sandbox/VM 更换后数据保持；PVC/PV 仍绑定；删除 Pod 零 runtime 残留 | `6e2df6fb` / `inv-983v8eg0jr` / `inv-983vb002pg`：四 marker 持久，Pod UID/Sandbox/lease/source 更新，PVC/PV 四时点 UID/Bound 稳定，两轮 runtime 和最终全量基线恢复，tombstone +2；同一 reviewer `APPROVE` |
 | S3.2c 回收与故障 | `DONE` | 验证失败启动、卸载、重绑和 reclaim 语义 | 失败 Task generation/mount 清零；PVC 可重绑；Retain/Delete 行为与后端一致；无 active lease | `0bd25272` / `inv-b83w9pgt64` / `inv-b83wguggpg`：精确 `/dev/kvm` StartError 前已处理 PVC，连续 30 次 generation/mount 为 0 且取证时 VM runtime 目录存在；健康 Pod 复用数据；Retain PV 经 Released gate、管理员移除 claimRef 后绑定新 PVC，三个 marker 保持；三条 inactive tombstone、最终 active lease 和全量残留为 0；static-local Delete 明确为无 deleter 时不适用；同一 reviewer `APPROVE` |
-| S3.2d 回归与支持矩阵 | `IN_PROGRESS` | 组合回归并冻结 filesystem PVC 支持范围 | 自动化回归通过；资源基线恢复；RWO/RWX、CSI/非 CSI、扩容等未覆盖项明确记录；handoff 可复现 | 以 S3.2a～S3.2c 的冻结脚本和 static-local 边界为输入，开始设计最终组合回归与支持矩阵 |
+| S3.2d 回归与支持矩阵 | `DONE` | 组合回归并冻结 filesystem PVC 支持范围 | 自动化回归通过；资源基线恢复；RWO/RWX、CSI/非 CSI、扩容等未覆盖项明确记录；handoff 可复现 | `83902212` / `inv-a83x7s0g04` / `inv-883xivg7ub`：按 SHA 固定并顺序重放 S3.2a～S3.2c，三次精确基线均首轮恢复，durable tombstone 总增量 6 且六个 Sandbox 各一条 inactive lease；20 项矩阵仅把 static-local Filesystem/RWO runtime 基线标为 PoC 支持，CSI、动态制备、CBS/CFS/COSFS、RWX、跨节点、扩容保持未验证，raw block/mountPropagation 为 `OUT_OF_SCOPE_POC`，snapshot 路由 S6；同一 reviewer 确认 S3.2 `DONE` |
 
 
 ### 目标

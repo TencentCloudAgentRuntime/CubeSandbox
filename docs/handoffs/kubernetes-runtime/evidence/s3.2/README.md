@@ -185,3 +185,58 @@ static-local 手工回收。保存的测试前 Pod 清单中不存在 local volu
 tombstone 归属和无 provisioner 基线三处伪阳性空间，`inv-b83wguggpg` 最终通过。同一
 reviewer 明确 `APPROVE`；S3.2c 因此为 `DONE`，结论仍严格限于 static-local runtime
 语义和 Retain 手工回收。
+
+## S3.2d 组合回归与支持矩阵
+
+### 固定输入
+
+- 实现 commit：`83902212a85158c8c5fd947e8b06a661f0e1075c`
+- 完整 tree：`61b4cf897e957ddeea4b15b3eb91db27106abd16`
+- 回归脚本：`CubeShim/sandbox-probe/scripts/verify-s32d-pvc-regression-cloud.sh`
+- 脚本 SHA-256：
+  `2b4ca34d10bf74e30e39296c98e2881b175fad18ace9bd15d624237bf2414325`
+- 私有 COS 对象：`s3.2d/verify-s32d-pvc-regression-cloud-2b4ca34d.sh`
+- 最终组合云验：`inv-a83x7s0g04`，`SUCCESS`
+- 最终只读审计：`inv-883xivg7ub`，`SUCCESS`；审计脚本 SHA-256：
+  `9905b7a628c4f4f30696e3e724dea5a4316ff9ee12027fe552cca9fc000cd432`
+- 总证据目录：
+  `/data/cubelet/s3.2-evidence/s3.2d-regression-20260831T220436Z`
+
+### 组合回归结果
+
+回归脚本先校验自身及 S3.2a～S3.2c 三个冻结脚本的 SHA-256，再顺序重放输入诊断、
+RWO 持久化和回收/失败路径。三个组件分别生成且只生成一个新证据目录：
+
+- `/data/cubelet/s3.2-evidence/s3.2a-pvc-diagnostic-20260831T220439Z`
+- `/data/cubelet/s3.2-evidence/s3.2b-rwo-persistence-20260831T220513Z`
+- `/data/cubelet/s3.2-evidence/s3.2c-reclaim-failure-20260831T220714Z`
+
+每个组件结束后的 container、Task、Sandbox、snapshot、netns、shim、VM、share、mount、
+Kubernetes storage/CSI 对象和测试 local path 都与组合运行前的规范化基线精确一致，三次
+均在首个等待样本恢复。durable lease 计数从 409 依次增加为 410、412、415，总增量 6；
+六个不同 Sandbox ID 各自恰有一条 inactive 记录，active lease 为 0。最终节点保持 Ready、
+无 DiskPressure，根盘使用率 56%，containerd 与 kubelet 均为 active。
+
+独立审计不重新运行工作负载，而是从总证据出发复算全部关键结论：四个脚本 hash、三个
+证据目录集合差、组件返回码和空 trace、三组前后基线、S3.2a mount、S3.2b 四组 CRI/OCI
+mount 的 Pod UID/source/destination/bind/rw 语义及两轮 marker 内容 hash、S3.2c 精确失败
+顺序、Released gate、重绑和三个 marker，以及六条 lease 的唯一性。最终还确认
+container、Task、Sandbox、snapshot、netns、shim 等集合恢复运行前精确基线；adapter、
+shared、reaper、VM、cleanup record、active lease、固定对象和本地测试路径直接为 0。
+
+### 冻结的支持范围
+
+最终 20 项矩阵把 `static local + Filesystem + RWO` 的标准 PVC 输入、runc→Cube 数据保持、
+同 Pod 多容器读写、跨 Pod 重建持久化和失败回滚五项标为 `SUPPORTED_POC`，把 Retain
+手工重绑标为 `SUPPORTED_MANUAL_POC`。static-local `Delete`
+在无 deleter 时为 `NOT_APPLICABLE_WITHOUT_DELETER`。generic RWO/hostPath、CSI、动态制备、
+CBS、CFS、COSFS、RWX、跨节点 attach 和扩容均为 `NOT_VALIDATED`；raw block 与
+mountPropagation 为 `OUT_OF_SCOPE_POC`；VolumeSnapshot 为 `DEFERRED_S6`。矩阵因此不把本地
+语义验证外推为任一生产云存储后端兼容性声明。
+
+首次组合运行 `inv-v83x5rg5pg` 因 COS 下载不保留 executable bit 而在启动冻结脚本前以
+exit code 126 失败；诊断 `inv-683x6c0sfu` 确认 cleanup 为 0、runtime idle、本地路径和
+固定对象均为空。wrapper 改为通过 `bash` 执行冻结脚本后完成上述终验。首版只读审计
+`inv-b83xgf0j6h` 虽返回成功，但 reviewer 指出 S3.2b mount 与 hash 断言存在伪阳性空间；
+收紧为逐 Pod UID 的唯一 mount 与逐 marker 内容复算后，`inv-883xivg7ub` 通过。同一
+reviewer 最终明确 `APPROVE`；S3.2d 和聚合后的 S3.2 均为 `DONE`。
