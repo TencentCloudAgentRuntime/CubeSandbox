@@ -20,6 +20,7 @@ use containerd_shim::protos::types::mount::Mount;
 use oci_spec::runtime::Spec;
 use serde_json::json;
 
+use crate::common::GUEST_VIRTIOFS_MNT_PATH_DEPRECATED;
 use crate::container::rootfs::{OverlayInfo, RootfsInfo, ANNOTATION_K_ROOTFS_INFO};
 use crate::sandbox::config::ANNO_VMM_FS;
 use crate::service::runtime_resource::canonical_runtime_shared_root;
@@ -87,8 +88,12 @@ fn remove_empty_dir(path: &Path) {
 
 impl Drop for PreparedRootfs {
     fn drop(&mut self) {
-        let _ = self.unmount_all(true);
-        self.remove_dirs();
+        // Never remove an export while any bind mount may still be attached.
+        // For directory bind mounts, remove_dir_all would otherwise traverse
+        // into the host volume and could delete data from the bind source.
+        if self.unmount_all(true).is_ok() {
+            self.remove_dirs();
+        }
     }
 }
 
@@ -179,9 +184,110 @@ fn prepare_at(
         &target,
         &mut prepared.mounts,
     )?;
+    export_host_bind_mounts(
+        guest_share_name,
+        &export_id,
+        &target,
+        spec,
+        &mut prepared.mounts,
+    )?;
 
     inject_annotations(spec, share_root, guest_lowerdirs, inject_virtiofs)?;
     Ok(prepared)
+}
+
+/// Export host bind mounts through the sandbox's existing virtio-fs share and
+/// rewrite their OCI sources to paths that exist inside the Guest. Kubernetes
+/// injects files such as /etc/hosts, /etc/hostname and /etc/resolv.conf as host
+/// bind mounts, and uses the same mechanism for Pod volumes. Passing those
+/// host paths to the Guest unchanged makes runc fail with ENOENT.
+fn export_host_bind_mounts(
+    guest_share_name: &str,
+    export_id: &str,
+    target: &Path,
+    spec: &mut Spec,
+    mounted: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let Some(mounts) = spec.mounts_mut().as_mut() else {
+        return Ok(());
+    };
+
+    for (index, mount) in mounts.iter_mut().enumerate() {
+        if mount.typ().as_deref() != Some("bind") || mount.destination() == Path::new("/dev/shm") {
+            continue;
+        }
+        let source = mount
+            .source()
+            .as_ref()
+            .ok_or_else(|| {
+                format!(
+                    "host bind mount {} has no source",
+                    mount.destination().display()
+                )
+            })?
+            .clone();
+        if source.starts_with(GUEST_VIRTIOFS_MNT_PATH_DEPRECATED) {
+            continue;
+        }
+        if !source.is_absolute() {
+            return Err(format!(
+                "host bind mount source must be absolute for {}: {}",
+                mount.destination().display(),
+                source.display()
+            ));
+        }
+
+        let metadata = fs::metadata(&source).map_err(|error| {
+            format!(
+                "stat host bind mount source {} for {} failed: {error}",
+                source.display(),
+                mount.destination().display()
+            )
+        })?;
+        let export_target = target.join("volumes").join(format!("{index:03}"));
+        if metadata.is_dir() {
+            fs::create_dir_all(&export_target).map_err(|error| {
+                format!(
+                    "create host directory export {} failed: {error}",
+                    export_target.display()
+                )
+            })?;
+        } else if metadata.is_file() {
+            if let Some(parent) = export_target.parent() {
+                fs::create_dir_all(parent).map_err(|error| {
+                    format!(
+                        "create host file export parent {} failed: {error}",
+                        parent.display()
+                    )
+                })?;
+            }
+            fs::File::create(&export_target).map_err(|error| {
+                format!(
+                    "create host file export {} failed: {error}",
+                    export_target.display()
+                )
+            })?;
+        } else {
+            return Err(format!(
+                "host bind mount source is neither file nor directory: {}",
+                source.display()
+            ));
+        }
+
+        bind_mount(&source, &export_target, metadata.is_dir())?;
+        mounted.push(export_target);
+        mount.set_source(Some(guest_bind_source(guest_share_name, export_id, index)));
+    }
+    Ok(())
+}
+
+fn guest_bind_source(guest_share_name: &str, export_id: &str, index: usize) -> PathBuf {
+    Path::new(GUEST_VIRTIOFS_MNT_PATH_DEPRECATED)
+        .join(guest_share_name)
+        .join("rootfs")
+        .join(export_id)
+        .join("volumes")
+        .join(format!("{index:03}"))
 }
 
 fn guest_share_name(shared_root: &Path) -> Result<String, String> {
@@ -282,7 +388,7 @@ fn export_rootfs(
             fs::create_dir_all(&layer_target).map_err(|e| {
                 format!("create layer target {} failed: {e}", layer_target.display())
             })?;
-            bind_mount(source, &layer_target)?;
+            bind_mount(source, &layer_target, true)?;
             mounted.push(layer_target);
             guest_lowerdirs.push(format!("{sandbox_id}/rootfs/{task_id}/layers/{layer_name}"));
         }
@@ -341,15 +447,20 @@ fn validate_layer_source(kind: &str, value: &str) -> Result<PathBuf, String> {
     Ok(source)
 }
 
-fn bind_mount(source: &Path, target: &Path) -> Result<(), String> {
+fn bind_mount(source: &Path, target: &Path, recursive: bool) -> Result<(), String> {
     let source_c = path_cstring(source)?;
     let target_c = path_cstring(target)?;
+    let flags = if recursive {
+        libc::MS_BIND | libc::MS_REC
+    } else {
+        libc::MS_BIND
+    };
     let ret = unsafe {
         libc::mount(
             source_c.as_ptr(),
             target_c.as_ptr(),
             std::ptr::null(),
-            libc::MS_BIND | libc::MS_REC,
+            flags,
             std::ptr::null(),
         )
     };
@@ -557,6 +668,40 @@ mod tests {
     }
 
     #[test]
+    fn managed_bind_mount_uses_existing_guest_share() {
+        assert_eq!(
+            guest_bind_source("sb-generation", "task-a-42-7", 3),
+            PathBuf::from(
+                "/run/cube-containers/shared/containers/sb-generation/rootfs/task-a-42-7/volumes/003"
+            )
+        );
+    }
+
+    #[test]
+    fn managed_bind_mount_skips_guest_shared_shm() {
+        let mut mount = oci_spec::runtime::Mount::default();
+        mount.set_typ(Some("bind".to_string()));
+        mount.set_source(Some(PathBuf::from("/host/path/that/does/not/exist")));
+        mount.set_destination(PathBuf::from("/dev/shm"));
+        let mut spec = Spec::default();
+        spec.set_mounts(Some(vec![mount]));
+
+        export_host_bind_mounts(
+            "sb-generation",
+            "task-a-42-7",
+            Path::new("/unused"),
+            &mut spec,
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            spec.mounts().as_ref().unwrap()[0].source(),
+            &Some(PathBuf::from("/host/path/that/does/not/exist"))
+        );
+    }
+
+    #[test]
     fn managed_rootfs_injects_only_guest_rootfs_contract() {
         let mut spec = Spec::default();
         inject_annotations(
@@ -629,6 +774,38 @@ mod tests {
         fs::create_dir_all(&new_target).unwrap();
         assert_eq!(fs::metadata(&rootfs_dir).unwrap().ino(), rootfs_inode);
 
+        fs::remove_dir_all(&share_root).unwrap();
+    }
+
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn drop_preserves_export_when_unmount_fails() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let share_root = std::env::temp_dir().join(format!(
+            "cubesandbox-rootfs-unmount-failure-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let target = share_root.join("rootfs/task-a-42");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("must-remain"), b"host-volume-sentinel").unwrap();
+
+        drop(PreparedRootfs {
+            target: target.clone(),
+            share_root: share_root.clone(),
+            // A NUL path makes path_cstring fail before any umount2 syscall,
+            // providing a deterministic unmount failure without privileges.
+            mounts: vec![PathBuf::from(OsString::from_vec(
+                b"invalid\0mount".to_vec(),
+            ))],
+            remove_share_root: false,
+        });
+
+        assert_eq!(
+            fs::read(target.join("must-remain")).unwrap(),
+            b"host-volume-sentinel"
+        );
         fs::remove_dir_all(&share_root).unwrap();
     }
 

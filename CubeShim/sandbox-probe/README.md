@@ -75,6 +75,30 @@ sudo scripts/verify-s13-cri-cloud.sh
 脚本只重建 `/data/cubelet/s13-cri-live` 和 `/run/cubesandbox-s13`，证据保存在
 `/data/cubelet/s1.3-evidence/diagnostic-<UTC>`。
 
+`scripts/verify-s13-kubernetes-cloud.sh` 在 PoC 自建 Kubernetes 1.36 集群的主
+containerd 上验证同一能力。脚本创建 `RuntimeClass/cube` 和单个 BusyBox Pod，
+检查 `kubectl logs`、非 TTY/非 stdin `kubectl exec`、进程退出码、
+`terminationGracePeriodSeconds` 和删除后的全量基线。它要求节点名为
+`vm-200-2-ubuntu`，RuntimeResource 资产已安装在
+`/data/cubelet/s13-kubernetes`，并把证据写到
+`/data/cubelet/s1.3-kubernetes-evidence/<UTC>`。执行：
+
+```bash
+sudo scripts/verify-s13-kubernetes-cloud.sh
+```
+
+containerd 2.3.4 在 `sandboxer = "shim"` 路径创建 Sandbox shim 时按
+`runtime_type` 查找标准名称 `containerd-shim-cube-rs`；仅配置 `runtime_path`
+不足以覆盖这一步。因此节点必须把与配置对应、校验过 SHA-256 的 shim 安装到
+containerd 服务的 `PATH`（PoC 使用 `/usr/local/bin/containerd-shim-cube-rs`）。
+独立 CRI 验收脚本也会断言实际 PATH 解析结果与指定制品完全一致。
+
+Kubernetes 注入的 `/etc/hosts`、`/etc/hostname`、`/etc/resolv.conf` 和 Pod
+volume 都以宿主 bind mount 出现在 OCI spec。managed rootfs 会把这些源递归
+bind 到 Pod 已有的只读 virtio-fs shared root，并把 OCI source 改写为 Guest
+可见路径；`/dev/shm` 继续由现有 Guest shared-shm 逻辑处理。Task 清理时先解除
+这些 volume export，再解除 rootfs layer export。
+
 shim 默认写 `/run/cube-s0/trace.jsonl`，CNI wrapper 写
 `/run/cube-s0/cni.jsonl`；可用 `CUBE_S0_TRACE_PATH` 改写 shim trace 位置。
 

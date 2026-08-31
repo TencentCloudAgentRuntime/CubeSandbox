@@ -94,6 +94,10 @@ ln -s /data/cubelet/s0.2-assets/kernel/vmlinux "$assets/kernel"
 ln -s "$agent_artifact/agent/cube-agent.ext4" "$assets/agent"
 ln -s /data/cubelet/s0.2-assets/guest/cube-guest-image-cpu.img "$assets/guest.img"
 ln -s "$artifact/containerd-shim-cube-rs" "$live/bin/containerd-shim-cube-rs"
+resolved_shim="$(PATH="$live/bin:$PATH" command -v containerd-shim-cube-rs)"
+test "$(readlink -f "$resolved_shim")" = "$(readlink -f "$artifact/containerd-shim-cube-rs")"
+test "$(sha256sum "$resolved_shim" | awk '{print $1}')" = \
+  "$(sha256sum "$artifact/containerd-shim-cube-rs" | awk '{print $1}')"
 
 ctr --address /run/containerd/containerd.sock --namespace k8s.io images export \
   --platform linux/amd64 "$image_archive" "$image_ref" >"$evidence/image-export.log" 2>&1
