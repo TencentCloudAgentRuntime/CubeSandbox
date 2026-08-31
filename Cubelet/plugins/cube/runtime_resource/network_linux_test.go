@@ -10,13 +10,16 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
 )
 
 type scriptedRunner struct {
-	commands  []string
-	badLink   bool
-	ipv6Only  bool
-	dualStack bool
+	commands         []string
+	badLink          bool
+	ipv6Only         bool
+	dualStack        bool
+	gatewayHostRoute bool
 }
 
 func (r *scriptedRunner) Run(_ context.Context, _ string, command ...string) ([]byte, error) {
@@ -42,6 +45,9 @@ func (r *scriptedRunner) Run(_ context.Context, _ string, command ...string) ([]
 		if r.ipv6Only {
 			return []byte(`[]`), nil
 		}
+		if r.gatewayHostRoute {
+			return []byte(`[{"dst":"default","gateway":"10.0.0.1","dev":"eth0","prefsrc":"10.0.0.2"},{"dst":"10.0.0.1","dev":"eth0","scope":"link"}]`), nil
+		}
 		return []byte(`[{"dst":"default","gateway":"10.0.0.1","dev":"eth0","prefsrc":"10.0.0.2"},{"dst":"10.0.0.0/24","dev":"eth0","scope":"link"}]`), nil
 	case "ip -j -6 route show":
 		if r.ipv6Only || r.dualStack {
@@ -58,6 +64,53 @@ func (r *scriptedRunner) Run(_ context.Context, _ string, command ...string) ([]
 		return []byte(`[{"dst":"10.0.0.1","lladdr":"02:00:00:00:00:02","dev":"eth0"}]`), nil
 	default:
 		return nil, nil
+	}
+}
+
+func TestLinuxNetworkDoesNotDuplicateCNIProvidedGatewayHostRoute(t *testing.T) {
+	attachment, err := (&linuxNetwork{runner: &scriptedRunner{gatewayHostRoute: true}}).Prepare(context.Background(), t.TempDir(), "eth0", "cb123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attachment.GetRoutes()) != 2 {
+		t.Fatalf("routes=%+v, want the CNI gateway host route and default route only", attachment.GetRoutes())
+	}
+	gatewayRoutes := 0
+	for _, route := range attachment.GetRoutes() {
+		if hasGatewayHostRoute([]*runtimev1.Route{route}, "10.0.0.1") {
+			gatewayRoutes++
+		}
+	}
+	if gatewayRoutes != 1 {
+		t.Fatalf("gateway host routes=%d routes=%+v", gatewayRoutes, attachment.GetRoutes())
+	}
+}
+
+func TestHasGatewayHostRoute(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		destination string
+		gateway     string
+		routeVia    string
+		device      string
+		want        bool
+	}{
+		{name: "IPv4 bare host", destination: "10.0.0.1", gateway: "10.0.0.1", device: "eth0", want: true},
+		{name: "IPv4 host CIDR", destination: "10.0.0.1/32", gateway: "10.0.0.1", device: "eth0", want: true},
+		{name: "IPv4 subnet", destination: "10.0.0.0/24", gateway: "10.0.0.1", device: "eth0"},
+		{name: "different IPv4 host", destination: "10.0.0.2/32", gateway: "10.0.0.1", device: "eth0"},
+		{name: "route via another gateway", destination: "10.0.0.1/32", gateway: "10.0.0.1", routeVia: "10.0.0.254", device: "eth0"},
+		{name: "wrong guest device", destination: "10.0.0.1/32", gateway: "10.0.0.1", device: "eth1"},
+		{name: "IPv6 bare host", destination: "fe80::1", gateway: "fe80::1", device: "eth0", want: true},
+		{name: "IPv6 host CIDR", destination: "fe80::1/128", gateway: "fe80::1", device: "eth0", want: true},
+		{name: "IPv6 subnet", destination: "fe80::/64", gateway: "fe80::1", device: "eth0"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			route := &runtimev1.Route{Destination: test.destination, Gateway: test.routeVia, Device: test.device}
+			if got := hasGatewayHostRoute([]*runtimev1.Route{route}, test.gateway); got != test.want {
+				t.Fatalf("hasGatewayHostRoute()=%t, want %t", got, test.want)
+			}
+		})
 	}
 }
 

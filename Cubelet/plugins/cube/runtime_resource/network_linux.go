@@ -235,7 +235,9 @@ func (n *linuxNetwork) routes(ctx context.Context, netnsPath, device string, ips
 		if family == 6 {
 			prefix = "/128"
 		}
-		result = append(result, &runtimev1.Route{Destination: gateway + prefix, Source: source, Device: "eth0", Scope: 253})
+		if !hasGatewayHostRoute(familyRoutes, gateway) {
+			result = append(result, &runtimev1.Route{Destination: gateway + prefix, Source: source, Device: "eth0", Scope: 253})
+		}
 		result = append(result, familyRoutes...)
 		gateways = append(gateways, gateway)
 	}
@@ -243,6 +245,38 @@ func (n *linuxNetwork) routes(ctx context.Context, netnsPath, device string, ips
 		return nil, nil, errors.New("CNI interface has no default gateway")
 	}
 	return result, gateways, nil
+}
+
+func hasGatewayHostRoute(routes []*runtimev1.Route, gateway string) bool {
+	gatewayIP := net.ParseIP(gateway)
+	if gatewayIP == nil {
+		return false
+	}
+	wantBits := 128
+	if gatewayIP.To4() != nil {
+		wantBits = 32
+	}
+	for _, route := range routes {
+		if route.GetGateway() != "" || route.GetDevice() != "eth0" {
+			continue
+		}
+		destination := route.GetDestination()
+		if !strings.Contains(destination, "/") {
+			if destinationIP := net.ParseIP(destination); destinationIP != nil && destinationIP.Equal(gatewayIP) {
+				return true
+			}
+			continue
+		}
+		destinationIP, network, err := net.ParseCIDR(destination)
+		if err != nil {
+			continue
+		}
+		ones, bits := network.Mask.Size()
+		if bits == wantBits && ones == wantBits && destinationIP.Equal(gatewayIP) {
+			return true
+		}
+	}
+	return false
 }
 
 func (n *linuxNetwork) neighbors(ctx context.Context, netnsPath, device string, gateways []string) ([]*runtimev1.Neighbor, error) {
