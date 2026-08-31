@@ -316,10 +316,16 @@ func (s *Store) BeginRelease(request ReleaseRequest) (*ReleaseResult, error) {
 		}
 		if record.Active != nil && record.Active.Generation == request.Generation &&
 			record.Active.LeaseID == request.LeaseID && record.Active.ReleaseKey == request.IdempotencyKey {
+			if err := s.syncParent("confirm-release-retry"); err != nil {
+				return nil, err
+			}
 			return &ReleaseResult{Lease: *record.Active, Reused: true}, nil
 		}
 		if tombstone, ok := record.Tombstones[generationKey(request.Generation)]; ok &&
 			tombstone.LeaseID == request.LeaseID && tombstone.ReleaseKey == request.IdempotencyKey {
+			if err := s.syncParent("confirm-tombstone-retry"); err != nil {
+				return nil, err
+			}
 			return &ReleaseResult{Lease: leaseFromTombstone(tombstone), Reused: true}, nil
 		}
 		return nil, status.Error(codes.FailedPrecondition, "release key has no matching current or tombstoned lease")
@@ -365,8 +371,8 @@ func (s *Store) BeginRelease(request ReleaseRequest) (*ReleaseResult, error) {
 }
 
 // ConfirmReleaseDurable validates the exact releasing identity and fsyncs the
-// parent directory. It is the only operation that resolves a post-rename
-// commit-unknown result; both retry and restart recovery call it.
+// parent directory. Coordinator uses it to explicitly resolve post-rename
+// commit-unknown state; exact BeginRelease retries perform the same confirmation.
 func (s *Store) ConfirmReleaseDurable(request ReleaseRequest) (*ReleaseResult, error) {
 	if request.SandboxID == "" || request.Generation == 0 || request.LeaseID == "" || request.IdempotencyKey == "" {
 		return nil, status.Error(codes.InvalidArgument, "release confirmation fields must be non-zero")
