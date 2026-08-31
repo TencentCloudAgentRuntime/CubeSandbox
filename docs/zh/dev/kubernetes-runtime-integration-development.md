@@ -1,6 +1,6 @@
 # CubeSandbox Kubernetes RuntimeClass PoC 开发计划
 
-> 状态：执行中（S3.1 基础 Volume）
+> 状态：执行中（S3.2 filesystem PVC）
 > 日期：2026-08-30  
 > 总体设计：[CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)  
 > 活动交接：[Kubernetes RuntimeClass PoC Handoff](../../../docs/handoffs/kubernetes-runtime/README.md)
@@ -328,12 +328,12 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 - 终止宽限期、SIGTERM/SIGKILL 和 TaskExit 事件时序有自动化测试。
 
 ## 8. S3：存储、安全与资源
-> Milestone 状态：`IN_PROGRESS`。S2 已完成；当前执行 S3.1。
+> Milestone 状态：`IN_PROGRESS`。S2、S3.1 已完成；当前执行 S3.2。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
-| S3.1 基础 Volume | `IN_PROGRESS` | Codex | S3.1a 已冻结输入；S3.1b 已实现独立 Pod Volume share并通过可写卷/失败回滚；S3.1c 已通过四类投射卷启动值、mode、atomic-writer 动态更新和 subPath 固定语义 | 诊断 `e0c85aab`；实现 `5b504b58`；投射卷脚本 `20881f71`；构建 `inv-a83rxbgg0g`；S3.1b `inv-a83sdvgumu` / `inv-883sh80mpp`；S3.1c `inv-a83th50gfh`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.1/README.md)；同一 reviewer `APPROVE` | S3.1d 组合回归并冻结支持矩阵 |
-| S3.2 PVC | `NOT_STARTED` | 待指定 | — | — | 实现文件系统 PVC 挂载和清理 |
+| S3.1 基础 Volume | `DONE` | Codex | 输入、独立 Pod Volume share、可写卷/失败回滚、四类投射卷动态更新、subPath 固定语义和最终支持矩阵均已关闭 | 实现 `5b504b58`；S3.1d 回归 `aafdef40` / `inv-a83u0wgvxv`；审计 `inv-v83u490xa8`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.1/README.md)；同一 reviewer 确认 S3.1 `DONE` | S3.2 filesystem PVC |
+| S3.2 PVC | `IN_PROGRESS` | Codex | 已冻结为 4 个小阶段 | — | S3.2a 诊断 StorageClass/CSI 与标准 bind 输入 |
 | S3.3 SecurityContext | `NOT_STARTED` | 待指定 | — | — | 映射并验证常用安全字段 |
 | S3.4 资源控制 | `NOT_STARTED` | 待指定 | — | — | 实现 Host/Guest 双层 cgroup |
 
@@ -344,7 +344,16 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 | S3.1a 输入与现状诊断 | `DONE` | 冻结 kubelet/CRI/OCI Volume 输入和 Cube 当前语义 | runc 对照、Cube 读写/投射/更新/subPath 矩阵完整；活动与删除 mount 证据完整；同一 reviewer `APPROVE` | `inv-a83peh0hec` 通过；证实固定只读 share 同时导致可写卷 EROFS 和动态投射不可见 |
 | S3.1b 可写 Volume 通道 | `DONE` | 为 Pod 增加独立 Volume share，并把标准 OCI bind 重写到该通道 | disk/memory emptyDir 跨 init/app/sidecar 双向读写；同卷不同路径与 `ro/rw` 正确；rootfs share 仍只读；失败创建和删除零残留 | `5b504b58` 实现 `cubeVolumes` 与 mount-aware 生命周期；`inv-a83rxbgg0g` 通过 Rust 137 项、Go race/vet 和真实特权 bind cleanup；`inv-a83sdvgumu` 与 `inv-883sh80mpp` 终验通过；同一 reviewer `APPROVE` |
 | S3.1c 投射卷与 subPath | `DONE` | 验证启动注入、更新策略和 kubelet 已展开的 subPath | ConfigMap/Secret/projected/downwardAPI 启动值与 mode 正确；subPath 对照一致；动态更新支持状态明确写入 `K8S-OQ-007` | `20881f71` / `inv-a83th50gfh`：runc 1 秒、Cube 0 秒读到完整更新；Host/Guest generation 变化，subPath 值与 inode 固定，Sandbox/shim/VM/mount ID 稳定；清理恢复全量基线；同一 reviewer `APPROVE` |
-| S3.1d 回归与支持矩阵 | `IN_PROGRESS` | 完成多容器、更新、失败清理和兼容性回归 | 自动化矩阵通过；Pod UID/IP、Sandbox、shim、VM 稳定；删除恢复全量基线；文档和 handoff 可复现 | 组合复现 S3.1b/S3.1c 并冻结首版支持/限制矩阵 |
+| S3.1d 回归与支持矩阵 | `DONE` | 完成多容器、更新、失败清理和兼容性回归 | 自动化矩阵通过；Pod UID/IP、Sandbox、shim、VM 稳定；删除恢复全量基线；文档和 handoff 可复现 | `aafdef40` / `inv-a83u0wgvxv` / `inv-v83u490xa8`：组件 trace 为空，全局 8 组集合一致，tombstone +3，支持矩阵 14 项；同一 reviewer 确认 S3.1 `DONE` |
+
+### S3.2 子阶段执行记录
+
+| 子阶段 | 状态 | 目标 | 验收标准 | 当前结果/下一步 |
+|---|---|---|---|---|
+| S3.2a PVC/CSI 输入诊断 | `IN_PROGRESS` | 选择 PoC filesystem PVC 后端，冻结 kubelet/CRI/OCI 输入与回收边界 | 只读盘点 StorageClass/CSIDriver/CSINode/PV/PVC；runc 对照能绑定、挂载、读写、删除；Cube 标准 bind 输入完整；同一 reviewer `APPROVE` | 先诊断自建 Kubernetes；不修改非本 PoC 创建的 TKE 集群 |
+| S3.2b RWO 持久化 | `NOT_STARTED` | 让 filesystem RWO PVC 在 Cube Pod 内跨容器、跨 Pod 重建持久化 | writer/peer 读写一致；Pod UID/Sandbox/VM 更换后数据保持；PVC/PV 仍绑定；删除 Pod 零 runtime 残留 | 等待 S3.2a |
+| S3.2c 回收与故障 | `NOT_STARTED` | 验证失败启动、卸载、重绑和 reclaim 语义 | 失败 Task generation/mount 清零；PVC 可重绑；Retain/Delete 行为与后端一致；无 active lease | 等待 S3.2b |
+| S3.2d 回归与支持矩阵 | `NOT_STARTED` | 组合回归并冻结 filesystem PVC 支持范围 | 自动化回归通过；资源基线恢复；RWO/RWX、CSI/非 CSI、扩容等未覆盖项明确记录；handoff 可复现 | 等待 S3.2b、S3.2c |
 
 
 ### 目标
@@ -363,7 +372,7 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 
 - 同一 volume 可按不同目标路径/只读属性挂载到多个容器。
 - RWO 文件系统 PVC 可挂载、读写、卸载并在 Pod 删除后无引用泄漏。
-- ConfigMap/Secret 启动注入正确；动态更新作为 `K8S-OQ-007` 单独记录，不伪装为已支持。
+- ConfigMap、Secret、projected、downwardAPI 的启动值、mode 与 atomic-writer 动态更新正确；文件 `subPath` 保持 Pod 启动时的值和 inode，不随主卷更新（`K8S-OQ-007=DECIDED`）。
 - UID/GID/groups、capability add/drop、readonly rootfs、seccomp 均有正反用例。
 - privileged 未开启时请求被拒绝；开启后仍无法访问未授权 Host device/path。
 - Host/Guest CPU、内存限制在压力测试中生效，OOM 能归因到正确 Pod/容器。

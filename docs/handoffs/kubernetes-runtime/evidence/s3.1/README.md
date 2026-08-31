@@ -152,3 +152,64 @@ S31C_DONE active_leases=0 durable_tombstone_delta=1 kubelet_pod_dirs=removed
 ```
 
 S3.1c 因此为 `DONE`；S3.1d 继续执行全量回归并冻结支持矩阵。
+
+## S3.1d 回归与支持矩阵
+
+### 资产与执行
+
+- 回归实现 commit：`aafdef409f7d0303bf829c41509c53d0afc5321c`。
+- S3.1c 加固脚本 SHA-256：
+  `a31fdce8c89bc15705a87c2fd4064ca54abddc68b2e22d0f8d41f87599da4bb7`；
+  新增 runc/Cube Pod UID 与 Pod IP 在更新前后精确一致断言。
+- S3.1d 编排脚本 SHA-256：
+  `9df328afb0ebd833b0d3908c7e7b4fefae9bc1b5031506cea39ace9e0af60888`。
+- 私有 COS 对象位于 `s3.1d/`，分别锁定 S3.1b `1133a645...`、S3.1c
+  `a31fdce8...` 和 S3.1d `9df328af...` 三个脚本。
+- 完整回归 `inv-a83u0wgvxv` 为 `SUCCESS`；独立只读审计
+  `inv-v83u490xa8` 为 `SUCCESS`。
+- 汇总证据目录：
+  `/data/cubelet/s3.1-evidence/s3.1d-regression-20260831T201453Z`；本轮新建的
+  S3.1b、S3.1c 组件证据分别为 `s3.1b-writable-20260831T201455Z` 和
+  `s3.1c-projected-20260831T201610Z`。
+
+编排器把 TERM 清理宽限包含在组件硬 deadline 内：S3.1b 为 870+30=900 秒，
+S3.1c 为 570+30=600 秒。失败清理只处理确认带本阶段 owner label 的固定对象，
+每次 Kubernetes API 请求均有上限；随后确认所有 Pod、ConfigMap、Secret 消失并等待
+Cube runtime idle。同一 reviewer 先指出 deadline 与清理闭环问题，在修订后给出
+`APPROVE`，并对最终证据确认 S3.1d 与 S3.1 均可标记 `DONE`。
+
+### 最终支持矩阵
+
+| 能力 | 状态 | S3.1 冻结语义 |
+|---|---|---|
+| disk `emptyDir` | `SUPPORTED` | init/native sidecar/app 跨容器读写 |
+| memory `emptyDir` | `SUPPORTED` | init/native sidecar/app 跨容器读写 |
+| 同 source 的 `ro/rw` | `SUPPORTED` | 保持每个 OCI mount 的只读属性 |
+| read-only rootfs + 可写 Volume | `SUPPORTED` | rootfs share 只读，Volume share 独立可写 |
+| ConfigMap | `SUPPORTED` | 启动值、mode、atomic-writer 动态更新 |
+| Secret | `SUPPORTED` | 启动值、mode、atomic-writer 动态更新 |
+| projected | `SUPPORTED` | ConfigMap/Secret/downwardAPI source 原子更新 |
+| downwardAPI | `SUPPORTED` | 启动字段与 label 动态更新 |
+| 文件 `subPath` | `SUPPORTED_STATIC` | Pod 启动后值与 inode 固定，不随主卷更新 |
+| CreateTask 失败回滚 | `SUPPORTED` | Task generation/mount 清零，Sandbox VM 保持可用 |
+| filesystem PVC | `DEFERRED_S3.2` | S3.1 不声明支持 |
+| 普通文件/目录 `hostPath` | `NOT_VALIDATED` | S3.1 不声明支持 |
+| device `hostPath` | `OUT_OF_SCOPE` | 本阶段只证明失败回滚 |
+| raw block / mountPropagation | `OUT_OF_SCOPE` | PoC 首版不声明支持 |
+
+### 最终回归
+
+S3.1b 与加固后的 S3.1c 均 exit 0，父级与两个组件的 trace 均为空。整轮
+container、Task、Sandbox、snapshot、netns、Cube shim、VM runtime 和
+RuntimeResource 集合前后精确一致；Pod UID/IP、Sandbox、shim、VM 均稳定，固定对象
+全部删除，active lease 为 0，durable tombstone 总增量精确为 3。节点保持
+`Ready=True`、`DiskPressure=False`，根盘使用率 56%。最终摘要：
+
+```text
+S31D_BASELINE_CLEAN tag=after wait_attempt=1 lease_records=397
+S31D_REGRESSION_OK pod_uid_ip=stable sandbox_shim_vm=stable global_baseline=stable durable_tombstone_delta=3 node_ready=true disk_pressure=false root_use=56%
+S31D_DONE support_matrix=/data/cubelet/s3.1-evidence/s3.1d-regression-20260831T201453Z/support-matrix.tsv
+S31D_AUDIT_OK evidence=/data/cubelet/s3.1-evidence/s3.1d-regression-20260831T201453Z
+```
+
+S3.1 全部子阶段为 `DONE`；下一阶段为 S3.2 filesystem PVC。
