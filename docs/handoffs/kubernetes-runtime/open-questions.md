@@ -10,3 +10,4 @@
 | K8S-OQ-006 | PoC VM 规格如何确定？ | 固定 1 vCPU/256 MiB；生产再做资源聚合 | 待指定 | S1 | OPEN | 最小 Guest 开销和典型 workload 测量 |
 | K8S-OQ-007 | ConfigMap/Secret 动态更新能否透过 virtiofs 保持语义？ | PoC 先保证启动注入 | 待指定 | S3 | DEFERRED | symlink swap、cache、inotify 与更新延迟测试 |
 | K8S-OQ-008 | Snapshot/Restore CRD 和 artifact 格式如何定版？ | 二期优先从快照创建新 Pod | 待指定 | S6 | DEFERRED | 多容器一致性、远端存储和 CSI snapshot PoC |
+| K8S-OQ-009 | Sandbox API 的 `Spec` 应返回什么 protobuf `Any.type_url`？ | 空值不阻塞 S1.3，但 containerd verbose status 会记录 unmarshal warning | Codex | S1.4 | OPEN | 在兼容性回归中确认 containerd 期望类型；补齐合法值或明确 status 不返回 Spec |

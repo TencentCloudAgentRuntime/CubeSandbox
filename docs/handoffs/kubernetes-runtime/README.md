@@ -2,32 +2,32 @@
 
 ## 当前 Stage
 
-S1.3 `IN_PROGRESS`：S1.2 标准 OCI Task 已完成；当前开始接通 kubelet/CRI 的 logs、非 TTY exec 和 termination grace period。
+S1.4 `IN_PROGRESS`：S1.3 CRI 基础交互已完成；当前开始清理、runc 共存、Job/Deployment 和 legacy Cubebox 回归。
 
 ## 基线
 
-最后一项已验证实现 commit 为 `d47af8c213f802a3f0cd69593752d1f9c560c3ad`，完整 tree 为 `17224716902ca1ace56c1d68915bbb31c5a766d8`。S1.2 rootfs bridge/probe 起点为 `9c679855`、`cf07e446`，Task API v3、稳定 rootfs 父 inode 和 Agent 信号退出码修复分别为 `781cd8f8`、`32a49105`、`d47af8c2`。
+最后一项已验证实现 commit 为 `14354f09cd9d7b384f4170e3ef1ccafb12e4bccd`，完整 tree 为 `5ce41abfaa77f1979cca53b7751b620506415538`。S1.3 最终 shim SHA-256 为 `f873cdbe2cf63cbcf5c809ffc9035ba4066d6a92dc658599c50fd513586c253d`。
 
 ## 已完成
 
-S0、S1.1、S1.2 均为 `DONE`。S1.2 已让 containerd 2.3.4 标准 overlayfs `CreateTaskRequest.rootfs` 在真实 Cube Guest 运行；同一 Sandbox/Cube VM 内连续 Task 自然退出 23、SIGKILL 返回 137。删除后 container、Task、Sandbox、Task 新增 snapshot、mount、shim、TAP/filter 和 active lease 残留全部为 0，验收前后的既有 snapshot 集合一致。同一 reviewer 已对实现修复、源码同步、严格构建、制品交付和真实终验逐项 `APPROVE`。
+S0、S1.1、S1.2、S1.3 均为 `DONE`。S1.3 已让标准 Kubernetes `RuntimeClass/cube` 单容器 Pod 在真实 Cube VM 运行；logs、非 TTY/非 stdin exec、退出码、termination grace period 和退出事件正确。Kubernetes host bind mount 经 Pod 固定 virtio-fs share 导入 Guest；unmount 失败时保留 export。删除后 containerd、snapshot、netns、RuntimeResource、mount、shim 和 active lease 全部恢复基线，同一 reviewer 最终 `APPROVE`。
 
 ## 未完成
 
-S1.3 尚未实现 kubelet/CRI 端到端 logs、非 TTY exec、termination grace period 和对应退出事件；S1.4 的 100 次清理、runc 共存和 legacy Cubebox 回归也未开始。因此 S1 Milestone 仍为 `IN_PROGRESS`。
+S1.4 尚未完成正常/强制/创建中取消清理矩阵、100 次循环、Job/Deployment、默认 runc 共存和 legacy Cubebox smoke。因此 S1 Milestone 仍为 `IN_PROGRESS`。TTY/stdin 属于后续范围，不纳入 S1.4。
 
 ## 验证
 
-CubeShim 离线/locked 构建 115 项测试通过；Agent/workspace offline/locked 共 203 项通过，另有一个修改 TAT/Docker stdio UID 的环境用例显式过滤，信号转换 3 项在断网容器内点名通过。最终真实验收 `inv-9837xq0wnq` 为 `SUCCESS`：`S12_OCI_TASK_OK ... exit=23 killed=137`、`S12_HOST_RESIDUE_CLEAN ... active_leases=0`、`S12_STATIC_ANCHOR_CLEAN`。原始摘要、制品 SHA 和构建 invocation 见 `evidence/s1.2/README.md`。
+最终严格构建 `inv-683bb60cjf` 通过 CubeShim lib tests、all-targets check 和 release build；最终部署 `inv-883besgxts` 成功。真实 Kubernetes 终验 `inv-383bfj082n` 为 `SUCCESS`：exec 进程/客户端返回 19，3 秒 grace 后 SIGKILL 返回 137，删除耗时 4451 ms，所有断言资源恢复基线。完整摘要见 `evidence/s1.3/README.md`。
 
 ## 阻塞
 
-无外部阻塞。S1.3 的准确 CRI streaming/exec 调用路径和 CubeShim/Agent 最小增量仍需先做只读 trace；这属于本阶段工作，不是 blocker。S1.2 Agent 继续以 `seccomp=no` 构建，仅用于生命周期验证，不宣称 S3 seccomp 支持。
+无外部阻塞。containerd verbose status 对 Sandbox 空 `Spec.type_url` 的 warning 已记录为 `K8S-OQ-009`，在 S1.4 兼容性回归处理，不影响已验证生命周期。
 
 ## 受保护路径
 
-`CubeShim/`、`Cubelet/`、`agent/`、`deploy/kubernetes/runtimeclass/`、`tests/e2e/kubernetes-runtime/` 和本 handoff bundle。云端只操作本 PoC 创建的 `ins-pl7mznaa`、`ins-4dyul5ag`、对应私有 COS/TKE，不修改账号内其他资源；现有 S0/S1.1 云测资产不覆盖。
+`CubeShim/`、`Cubelet/`、`agent/`、`deploy/kubernetes/runtimeclass/`、`tests/e2e/kubernetes-runtime/` 和本 handoff bundle。云端只操作本 PoC 创建的 `ins-pl7mznaa`、`ins-4dyul5ag` 和对应私有 COS/自建 Kubernetes，不修改账号内其他资源；现有验证资产不覆盖。
 
 ## 下一步
 
-接手者先核对 `evidence/s1.2/README.md` 与终验 `inv-9837xq0wnq` 的 23/137 和零残留结论。随后在 S1.3 先只读追踪 CRI logs/exec/StopContainer 到 containerd Task/streaming API 的调用边界，冻结最小接口与失败清理；再按 logs、非 TTY exec、graceful signal/exit 事件三个小步实现，每步完成本地/云端测试并交同一 reviewer。不要提前展开 TTY/stdin 或 S1.4 的 100 Pod/legacy 回归。
+接手者先复现 `evidence/s1.3/README.md` 的最终制品 SHA、`inv-383bfj082n` 的 logs/exec/137 和零残留结论。随后冻结 S1.4 验收矩阵，依次验证正常删除、强制删除、创建中取消、100 次循环、默认 runc、Job/Deployment 和 legacy smoke；每个独立小步保留前后基线，完成后交同一 reviewer。不要提前展开 S2 多容器或 TTY/stdin。

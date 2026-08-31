@@ -264,14 +264,14 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 - 不要求生产代码质量；探针代码若合入必须 feature-gated，并附删除或演进说明。
 
 ## 6. S1：单容器纵向 PoC
-> Milestone 状态：`IN_PROGRESS`。S1.1、S1.2 已完成；当前执行 S1.3。
+> Milestone 状态：`IN_PROGRESS`。S1.1～S1.3 已完成；当前执行 S1.4。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
 | S1.1 Sandbox VM 生命周期 | `DONE` | Codex | 生命周期、持久 lease、FD handoff、失败回滚、dead-shim recovery 和 durable fence 已实现；真实 Cilium TAP/PVM Cube VM 的 Create→Created Status→Platform→Start→Ready Status→Stop→Stopped Status→Wait→Shutdown、异常回滚及宿主零残留终验通过 | `47522929`～`22716267`；云端严格构建 `inv-b831vp0wan`；终验 `inv-38324c05ra`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s1.1/README.md)；最终 subagent `APPROVE` | S1.2 OCI Task |
 | S1.2 OCI Task | `DONE` | Codex | 标准 OCI overlayfs rootfs 已进入真实 Guest；Task API v3、共享 root/generation fence、稳定 rootfs 父 inode 和 Agent `128+signal` 退出码已实现；同一 Cube 内自然退出与 SIGKILL Task 均完成并全量清理 | `9c679855`、`cf07e446`、`781cd8f8`、`32a49105`、`d47af8c2`；Shim 115 项、Agent/workspace 203 项通过；真实终验 `inv-9837xq0wnq`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s1.2/README.md)；最终 subagent `APPROVE` | S1.3 CRI 基础交互 |
-| S1.3 CRI 基础交互 | `IN_PROGRESS` | Codex | S1.2 已证明 Task stdout、自然/信号退出码和 Kill/Wait 基础语义；尚未接通 kubelet/CRI 的 logs、非 TTY exec 和 termination grace period | 前置真实 Task 终验 `inv-9837xq0wnq` | 冻结 CRI 调用路径，依次实现 logs、非 TTY exec、graceful signal/exit 事件 |
-| S1.4 清理与共存 | `NOT_STARTED` | 待指定 | — | — | 验证资源清理、runc 和 legacy 回归 |
+| S1.3 CRI 基础交互 | `DONE` | Codex | Kubernetes OCI host bind mount 已经由 Pod 固定 virtio-fs shared root 导入 Guest；标准 PATH shim 选择已加制品一致性门禁；真实 `RuntimeClass/cube` Pod 的 logs、非 TTY/非 stdin exec、stdout/stderr、进程/客户端退出码 19、3 秒 grace 后 137 和删除全量基线均通过；unmount 失败时保留 export，避免目录 bind 下误删宿主数据 | `14354f09`；最终严格构建 `inv-683bb60cjf`；最终部署 `inv-883besgxts`；真实终验 `inv-383bfj082n`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s1.3/README.md)；最终同一 subagent `APPROVE` | S1.4 清理与共存 |
+| S1.4 清理与共存 | `IN_PROGRESS` | Codex | S1.3 已证明单个 RuntimeClass Pod 的正常删除零残留，runc 仍为默认 runtime | 前置真实终验 `inv-383bfj082n` | 冻结正常删除、强制删除、创建中取消、100 次循环、runc 默认路径、Job/Deployment 和 legacy Cubebox 回归矩阵 |
 
 
 ### 目标
