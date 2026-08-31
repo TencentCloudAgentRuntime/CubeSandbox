@@ -19,27 +19,73 @@ ctr() {
   "$CTR" --address "$ADDRESS" --namespace "$NAMESPACE" "$@"
 }
 
+mount_targets_under() {
+  local root=$1
+  findmnt -rn -o TARGET | awk -v root="$root" '$0 == root || index($0, root "/") == 1'
+}
+
+detach_mounts_under() {
+  local root=$1
+  local attempt target
+  local -a targets
+  for attempt in $(seq 1 8); do
+    mapfile -t targets < <(mount_targets_under "$root" | sort -r)
+    if [[ ${#targets[@]} -eq 0 ]]; then
+      return 0
+    fi
+    for target in "${targets[@]}"; do
+      if ! umount "$target" 2>/dev/null && ! umount -l "$target" 2>/dev/null; then
+        printf 'CLEANUP_UNMOUNT_FAILED target=%s\n' "$target" >&2
+        return 1
+      fi
+    done
+  done
+  if [[ -n "$(mount_targets_under "$root")" ]]; then
+    printf 'CLEANUP_MOUNT_REMAINS root=%s\n' "$root" >&2
+    return 1
+  fi
+}
+
+safe_remove_tree() {
+  local root=$1
+  if [[ -n "$(mount_targets_under "$root")" ]]; then
+    printf 'CLEANUP_REMOVE_REFUSED root=%s\n' "$root" >&2
+    return 1
+  fi
+  rm -rf -- "$root"
+}
+
 cleanup_id() {
   local id=$1
   local share="$SHARE_BASE/$id"
-  (
-    set +e
-    umount "$share/dynamic/bind" 2>/dev/null
-    ctr tasks kill --signal SIGKILL "$id" 2>/dev/null
-    ctr tasks delete "$id" 2>/dev/null
-    ctr containers delete "$id" 2>/dev/null
-    findmnt -rn -o TARGET |
-      grep "^$share/" |
-      sort -r |
-      xargs -r -n1 umount -l
-    rm -rf "$share" "$SOURCE_BASE-$id"
-  )
+  local source="$SOURCE_BASE-$id"
+  case "$id" in
+    s02-*) ;;
+    *)
+      printf 'CLEANUP_ID_REFUSED id=%s\n' "$id" >&2
+      return 1
+      ;;
+  esac
+  ctr tasks kill --signal SIGKILL "$id" 2>/dev/null || true
+  ctr tasks delete "$id" 2>/dev/null || true
+  ctr containers delete "$id" 2>/dev/null || true
+  detach_mounts_under "$share" || return 1
+  safe_remove_tree "$share" || return 1
+  detach_mounts_under "$source" || return 1
+  safe_remove_tree "$source"
 }
 
 cleanup() {
+  local rc=$?
+  local cleanup_rc=0
+  trap - EXIT
   if [[ -n "$current_id" ]]; then
-    cleanup_id "$current_id"
+    cleanup_id "$current_id" || cleanup_rc=$?
   fi
+  if [[ $rc -ne 0 ]]; then
+    exit "$rc"
+  fi
+  exit "$cleanup_rc"
 }
 trap cleanup EXIT
 
@@ -67,8 +113,8 @@ wait_for_zero() {
   for attempt in $(seq 1 100); do
     if [[ $(ctr tasks list -q | wc -l) -eq 0 ]] &&
       [[ $(ctr containers list -q | wc -l) -eq 0 ]] &&
-      [[ $(findmnt -rn -o TARGET | grep -c "^$SHARE_BASE/" || true) -eq 0 ]] &&
-      [[ $(find "$SHARE_BASE" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l) -eq 0 ]] &&
+      [[ $(findmnt -rn -o TARGET | grep -Ec "^$SHARE_BASE/s02-" || true) -eq 0 ]] &&
+      [[ $(find "$SHARE_BASE" -mindepth 1 -maxdepth 1 -name 's02-*' 2>/dev/null | wc -l) -eq 0 ]] &&
       [[ $(ps -eo args | grep -c "[c]ontainerd-shim-cube-rs -namespace $NAMESPACE " || true) -eq 0 ]]; then
       return 0
     fi
@@ -79,8 +125,8 @@ wait_for_zero() {
 
 assert_zero() {
   local mounts shares tasks containers shims
-  mounts=$(findmnt -rn -o TARGET | grep -c "^$SHARE_BASE/" || true)
-  shares=$(find "$SHARE_BASE" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
+  mounts=$(findmnt -rn -o TARGET | grep -Ec "^$SHARE_BASE/s02-" || true)
+  shares=$(find "$SHARE_BASE" -mindepth 1 -maxdepth 1 -name 's02-*' 2>/dev/null | wc -l)
   tasks=$(ctr tasks list -q | wc -l)
   containers=$(ctr containers list -q | wc -l)
   shims=$(ps -eo args | grep -c "[c]ontainerd-shim-cube-rs -namespace $NAMESPACE " || true)
@@ -129,6 +175,20 @@ raise SystemExit(int(match.group(1)))
 PY
 }
 
+guest_exec_eventually() {
+  local id=$1
+  local command=$2
+  local attempt
+  for attempt in $(seq 1 50); do
+    if guest_exec "$id" "$command"; then
+      printf 'GUEST_VISIBILITY_OK attempt=%s\n' "$attempt"
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 standard_rootfs_case() {
   local output rc
   current_id=s02-standard
@@ -165,12 +225,12 @@ dynamic_mount_case() {
   mkdir -p "$source_dir" "$share/dynamic/bind"
   printf dynamic-bind-visible >"$source_dir/value"
   mount --bind "$source_dir" "$share/dynamic/bind"
-  guest_exec "$id" \
+  guest_exec_eventually "$id" \
     "test \"\$(cat $guest_share/dynamic/bind/value)\" = dynamic-bind-visible && echo DYNAMIC_BIND_VISIBLE"
 
   printf rename-visible >"$share/dynamic/name-old"
   mv "$share/dynamic/name-old" "$share/dynamic/name-new"
-  guest_exec "$id" \
+  guest_exec_eventually "$id" \
     "test -f $guest_share/dynamic/name-new && test ! -e $guest_share/dynamic/name-old && echo DYNAMIC_RENAME_VISIBLE"
 
   mount -o remount,bind,ro "$share/dynamic/bind"
@@ -195,7 +255,7 @@ dynamic_mount_case() {
 
   rm -f "$share/dynamic/name-new"
   rmdir "$share/dynamic/bind" "$share/dynamic"
-  rm -rf "$source_dir"
+  safe_remove_tree "$source_dir"
 
   ctr tasks kill --signal SIGKILL "$id"
   ctr tasks delete "$id"
@@ -218,7 +278,7 @@ cycle_case() {
     grep -q CUBE_S0_CYCLE_OK <<<"$output"
     current_id=
     wait_for_zero
-    [[ $(findmnt -rn -o TARGET | grep -c "^$SHARE_BASE/" || true) -eq 0 ]]
+    [[ $(findmnt -rn -o TARGET | grep -Ec "^$SHARE_BASE/s02-" || true) -eq 0 ]]
     printf 'CYCLE_OK %s\n' "$index"
   done
   assert_zero

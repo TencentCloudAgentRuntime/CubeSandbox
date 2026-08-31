@@ -3,7 +3,10 @@
 
 use async_trait::async_trait;
 use containerd_shim::asynchronous::ExitSignal;
-use containerd_shim::protos::protobuf::{well_known_types::timestamp::Timestamp, MessageField};
+use containerd_shim::protos::protobuf::{
+    well_known_types::{any::Any, timestamp::Timestamp},
+    MessageField,
+};
 use containerd_shim::protos::ttrpc::{r#async::TtrpcContext, Code, Error as TtrpcError};
 use containerd_shim::protos::types::platform::Platform;
 use containerd_shim::protos::{sandbox_api as api, sandbox_async::Sandbox};
@@ -26,6 +29,7 @@ use crate::service::task_srv::TaskService;
 const READY: &str = "SANDBOX_READY";
 const NOT_READY: &str = "SANDBOX_NOTREADY";
 const REQUIRED_SANDBOX_CAPABILITY: &str = "io.cubesandbox.agent.sandbox.lifecycle";
+const OCI_SPEC_TYPE_URL: &str = "types.containerd.io/opencontainers/runtime-spec/1/Spec";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Phase {
@@ -45,6 +49,7 @@ enum Phase {
 struct LifecycleState {
     phase: Phase,
     create_request: Option<Vec<u8>>,
+    sandbox_spec: Option<Any>,
     runtime: Option<RuntimeLease>,
     created_at: Option<Timestamp>,
     exited_at: Option<Timestamp>,
@@ -57,6 +62,7 @@ impl Default for LifecycleState {
         Self {
             phase: Phase::Unmanaged,
             create_request: None,
+            sandbox_spec: None,
             runtime: None,
             created_at: None,
             exited_at: None,
@@ -398,6 +404,7 @@ impl SandboxService {
                     return Ok(api::StartSandboxResponse {
                         pid: std::process::id(),
                         created_at: state.created_at.clone().into(),
+                        spec: state.sandbox_spec.clone().into(),
                         ..Default::default()
                     })
                 }
@@ -647,6 +654,16 @@ fn create_request_fingerprint(
     hasher.finalize().to_vec()
 }
 
+fn encode_sandbox_spec(spec: &Spec) -> Result<Any, String> {
+    let value = serde_json::to_vec(spec)
+        .map_err(|error| format!("serialize OCI sandbox spec failed: {error}"))?;
+    Ok(Any {
+        type_url: OCI_SPEC_TYPE_URL.to_string(),
+        value,
+        ..Default::default()
+    })
+}
+
 #[async_trait]
 impl Sandbox for SandboxService {
     async fn create_sandbox(
@@ -690,12 +707,15 @@ impl Sandbox for SandboxService {
         };
         runtime_resource::merge_cri_annotations(&mut spec, &config, &req.annotations)
             .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
+        let sandbox_spec =
+            encode_sandbox_spec(&spec).map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
         let should_create = {
             let mut state = self.lifecycle.state.lock().await;
             match state.phase {
                 Phase::Unmanaged => {
                     state.phase = Phase::Creating;
                     state.create_request = Some(fingerprint.clone());
+                    state.sandbox_spec = Some(sandbox_spec);
                     true
                 }
                 _ if state.create_request.as_deref() == Some(fingerprint.as_slice()) => false,
@@ -1083,6 +1103,19 @@ mod tests {
             create_request_fingerprint(&first, "cri-fingerprint"),
             create_request_fingerprint(&second, "cri-fingerprint")
         );
+    }
+
+    #[test]
+    fn sandbox_spec_uses_containerd_oci_type_url_and_json_encoding() {
+        let mut spec = Spec::default();
+        spec.set_hostname(Some("cube-sandbox".to_string()));
+
+        let encoded = encode_sandbox_spec(&spec).unwrap();
+
+        assert_eq!(encoded.type_url, OCI_SPEC_TYPE_URL);
+        let decoded: serde_json::Value = serde_json::from_slice(&encoded.value).unwrap();
+        assert_eq!(decoded["hostname"], "cube-sandbox");
+        assert!(decoded.get("ociVersion").is_some());
     }
 
     #[test]

@@ -99,6 +99,52 @@ bind 到 Pod 已有的只读 virtio-fs shared root，并把 OCI source 改写为
 可见路径；`/dev/shm` 继续由现有 Guest shared-shm 逻辑处理。Task 清理时先解除
 这些 volume export，再解除 rootfs layer export。
 
+## S1.4 清理与共存验收
+
+`scripts/verify-s14-kubernetes-smoke-cloud.sh` 在主 containerd 上验证默认 runc Pod
+不经过 CubeShim，并验证 RuntimeClass/cube 的 Job、Deployment、正常删除、强制删除
+和创建中取消。创建中取消用 `SIGSTOP/SIGCONT` 暂停本 PoC 的 RuntimeResource
+service，确保测试确实命中 CreateSandbox 尚未完成的窗口。每个用例均以
+container、Task、Sandbox、snapshot、netns、mount、shim/reaper 和 active lease 的
+前后基线一致作为通过条件。
+
+`scripts/verify-s14-kubernetes-100-cloud.sh` 每批并发创建 10 个短任务 Pod，共运行
+100 个。每批删除后都检查同一组资源恢复基线，并断言 100 个 Sandbox ID 唯一。
+RuntimeResource 的释放记录是故障 fencing tombstone，不属于 active lease；脚本要求
+每个已释放 Sandbox 恰好新增一条 tombstone，并单独报告数量。
+
+`scripts/verify-s14-legacy-shim-cloud.sh` 使用节点上隔离的 legacy containerd endpoint，
+直接重放 unmanaged CubeShim 的标准 OCI rootfs、动态 bind/rename/只读/unmount 和
+20 次创建删除矩阵，同时确认主 CRI 在执行前后均为 `RuntimeReady`。它不调用
+Sandbox API，也不会接管 Kubernetes 主 containerd。
+
+`scripts/verify-s14-legacy-cubebox-tests-cloud.sh` 在独立构建节点从固定 source tree
+构建 cubecow、用 vendored `bpf2go` 生成 CubeNet BPF，再执行
+`go test -race -count=1 ./services/cubebox`。脚本完全离线消费以下已校验依赖：
+
+- `/opt/s14-cubecow-vendor.tar.gz`，SHA-256
+  `9469425277208579f969da435dac33e9a1dcf04add893c4b3abc97e704cc63ab`；
+- `/opt/s14-cubelet-go-vendor-v2.tar.gz`，SHA-256
+  `1bd2bfdec14081e273a3ae8ee65623397771807b92cfced037b82dfd0b4b7c25`。
+
+动态 virtio-fs bind 的 Guest 目录项允许在 5 秒内最终可见；probe 会记录成功的
+尝试次数。残留检查只匹配本探针拥有的 `s02-*` 资源，不会把同一固定 share 下
+其他探针的 baseline 资产当作本次残留或清理目标。清理前必须确认每个 owned share、
+source 的精确挂载点及子挂载都已脱离；无法脱离时保留目录并让验收失败，禁止在仍挂载
+时递归删除。Kubernetes smoke 和 100 Pod 循环还会逐项比较 `/run/vc/vm` 前后集合，
+legacy 回归要求 `/run/vc/vm/s02-*` 为零，且不会删除共用的 share 根。Cubebox 包级
+回归直接从已验证的 Git tree object 用 `git archive` 构造工作目录，不复制工作树，
+避免 tracked 修改、untracked 或 ignored 生成物绕过固定源码结论。
+
+执行顺序：
+
+```bash
+sudo scripts/verify-s14-kubernetes-smoke-cloud.sh
+sudo scripts/verify-s14-kubernetes-100-cloud.sh
+sudo scripts/verify-s14-legacy-cubebox-tests-cloud.sh
+sudo scripts/verify-s14-legacy-shim-cloud.sh
+```
+
 shim 默认写 `/run/cube-s0/trace.jsonl`，CNI wrapper 写
 `/run/cube-s0/cni.jsonl`；可用 `CUBE_S0_TRACE_PATH` 改写 shim trace 位置。
 
