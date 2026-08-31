@@ -269,7 +269,7 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
 | S1.1 Sandbox VM 生命周期 | `DONE` | Codex | 生命周期、持久 lease、FD handoff、失败回滚、dead-shim recovery 和 durable fence 已实现；真实 Cilium TAP/PVM Cube VM 的 Create→Created Status→Platform→Start→Ready Status→Stop→Stopped Status→Wait→Shutdown、异常回滚及宿主零残留终验通过 | `47522929`～`22716267`；云端严格构建 `inv-b831vp0wan`；终验 `inv-38324c05ra`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s1.1/README.md)；最终 subagent `APPROVE` | S1.2 OCI Task |
-| S1.2 OCI Task | `IN_PROGRESS` | Codex | 已进入现有 Task Service、standard rootfs adapter 与 Guest Agent 契约梳理 | — | 冻结最小改动和验收矩阵，打通单容器 Create/Start/Wait/Kill/Delete |
+| S1.2 OCI Task | `BLOCKED` | Codex | managed Sandbox Task 已无条件桥接标准 `CreateTaskRequest.rootfs`，共享 root、并发 Create/Shutdown fence、跨 generation 清理已实现；新增真实 OCI Task probe，覆盖自然退出和 SIGKILL 的 Create/Start/Wait/Kill/Delete、stdout、mount 与异常清理；实现及 probe 均经多轮 subagent review `APPROVE` | 实现 `9c679855`，probe `cf07e446`；本地 `cargo check --tests`、目标 Go test/vet/build 通过；云端源码基线核对 `inv-6833mh023e`、`inv-0833mh0qv8` 通过 | 获得两个新私有 COS 对象的明确上传授权后，同步到两台自建 CVM，完成严格云端构建与真实 Cube VM 验收 |
 | S1.3 CRI 基础交互 | `NOT_STARTED` | 待指定 | — | — | 实现 logs、非 TTY exec、信号和退出码 |
 | S1.4 清理与共存 | `NOT_STARTED` | 待指定 | — | — | 验证资源清理、runc 和 legacy 回归 |
 

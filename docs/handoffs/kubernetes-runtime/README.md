@@ -2,32 +2,32 @@
 
 ## 当前 Stage
 
-S1.2 `IN_PROGRESS`：S1.1 真实 Cube VM 生命周期已收口，开始打通标准 OCI 单容器 Task 生命周期。
+S1.2 `BLOCKED`：标准 OCI 单容器 Task 实现和 probe 已完成并通过 reviewer；等待新源码/vendor 对象的私有 COS 上传授权后执行云端构建与真实 Cube VM 验收。
 
 ## 基线
 
-S1.1 最后验证实现 `22716267`（本地完整 tree `6e94b184ac065d43d2405b50e35598a146c9ea31`）；两台自建 CVM 的云测源码投影 tree 均为 `6e3b76eb94f378d5a8c2b02368c2dd28f6f2d90b`；S0 收口 `8db49456`。S1.2 尚无实现提交。
+S1.2 最后实现 `cf07e446`（完整 tree `c49c87d2afaea4ae90517a223c349bffdb86f246`），rootfs bridge 实现 `9c679855`；两台自建 CVM 的云测源码投影仍为 S1.1 tree `6e3b76eb94f378d5a8c2b02368c2dd28f6f2d90b`；S1.1 最后验证实现 `22716267`，S0 收口 `8db49456`。
 
 ## 已完成
 
-S1.1 `DONE`：Sandbox 生命周期、RuntimeResource lease/FD handoff、Cilium attachment、失败回滚和 dead-shim 恢复已经实现。containerd 2.3.4 的 public Platform wrapper 缺失时仅对 `Unimplemented` 使用 bootstrap v3 直连 ttrpc fallback；Cilium 网关邻居/直连路由和 Stop 后 Shutdown 重入问题已经实机修复；最终 reviewer `APPROVE`。
+S1.1 `DONE`。S1.2 已实现 managed Sandbox Task 的标准 OCI rootfs bridge、共享 root 严格校验、并发 Create/Shutdown fence 和跨 generation 安全清理；已新增真实 OCI Task probe，覆盖自然退出 23、SIGKILL 137、stdout、mount 生命周期及异常清理。实现和 probe 分别经过多轮同一 subagent review，最终均为 `APPROVE`。
 
 ## 未完成
 
-S1.2 尚未完成标准 OCI rootfs 到 Guest 单容器 Create/Start/Wait/Kill/Delete 的纵向链路和云端验收。
+S1.2 尚未完成严格云端构建和标准 OCI rootfs 到真实 Guest 的 Create/Start/Wait/Kill/Delete 验收，因此不能标记 `DONE`。
 
 ## 验证
 
-源码同步验证 `inv-8831v50a2j`、`inv-9831v30ak5` 均成功。严格 CubeShim 构建 `inv-b831vp0wan` 成功，二进制 SHA-256 `805658814730f6440b1ee8d281c8e84ef7f07f5543378d844feb78df984812ff`。真实生命周期及回滚终验 `inv-38324c05ra` 成功：Create→Created Status→Platform→Start→Ready Status→Stop→Stopped Status→Wait→Shutdown；预期失败回滚后 TAP/tc/shared mount/adapter/reaper/shim 和 active lease 均为零，保留 2 条 durable tombstone lease record，anchor 已删除。
+S1.2 本地 `cargo check --tests` 通过；目标 `s12-oci-task-probe` 的 Go test、vet、build 通过。云端只读基线核对 `inv-6833mh023e`、`inv-0833mh0qv8` 均成功：只操作自建 `ins-pl7mznaa` 与 `ins-4dyul5ag`，两端 tree 均为 `6e3b76eb94f378d5a8c2b02368c2dd28f6f2d90b`、无 unstaged/untracked 内容。S1.1 严格构建 `inv-b831vp0wan` 和真实终验 `inv-38324c05ra` 仍是最后一项云端闭环证据。
 
 ## 阻塞
 
-无外部阻塞。S1.1 Agent 资产以 `seccomp=no` 构建，只用于生命周期验证；不构成 S3 seccomp 支持结论。
+平台审批拒绝上传两个新的私有 COS 对象，因为此前用户授权仅覆盖另一个特定补丁包；审批明确禁止改用 TAT 内嵌等方式绕过。待授权对象为源码归档 29,458,366 bytes、SHA-256 `c6509cf895b8fbdf7fc3ba922c1435df78c0b801ec7b18dad6a8c2fd0cfdcdaf`，以及 sandbox-probe vendor 归档 4,464,250 bytes、SHA-256 `e69a4484cf4544dc83300a21dc450e356853adfc2a577b939c318b5ee1665168`；目标为既有私有 bucket 的 `s12/source/` 与 `s12/vendor/`。未上传任何新对象。S1.1 Agent 资产仍以 `seccomp=no` 构建，只用于生命周期验证。
 
 ## 受保护路径
 
-`CubeShim/`、`Cubelet/`、`agent/`、相关文档；仅操作本 PoC 自建云资源。
+`CubeShim/`、`Cubelet/`、`agent/`、相关文档；仅操作本 PoC 自建云资源 `ins-pl7mznaa`、`ins-4dyul5ag` 及既有私有 COS，不修改其他账号内资源。
 
 ## 下一步
 
-梳理现有 Task Service、standard rootfs adapter 和 Guest Agent 进程契约；冻结 S1.2 最小改动与验收矩阵，再实现并用隔离 containerd + 真实 Cube VM 验证 Create/Start/Wait/Kill/Delete。
+取得上述两个精确对象的上传授权；上传后在两台自建 CVM 的新 S1.2 目录物化 tree `c49c87d2afaea4ae90517a223c349bffdb86f246`，不覆盖 S1.1 目录。先在 build CVM 完成 Rust lib test/check/release build 与 Go race test/vet/build并交 reviewer，随后仅在 runtime CVM 以隔离 containerd + 真实 Cube VM 验证自然退出 23、SIGKILL 137、stdout、mount/Task/Sandbox 全量清理，再交 reviewer。
