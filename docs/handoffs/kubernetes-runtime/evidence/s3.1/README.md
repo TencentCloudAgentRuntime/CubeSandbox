@@ -1,0 +1,49 @@
+# S3.1 基础 Volume 验收证据
+
+## S3.1a 输入与现状诊断
+
+### 范围
+
+在同一 Kubernetes 节点上以默认 runc 为语义对照，诊断 Cube 的磁盘与内存
+`emptyDir`、同卷跨容器、同卷不同目标与只读属性、ConfigMap、Secret、
+projected、downwardAPI、ConfigMap `subPath`、动态更新以及删除清理行为。该子阶段
+只冻结输入和缺口，不修改运行时代码。
+
+### 资产与执行
+
+- 诊断脚本 commit：`e0c85aab`。
+- 脚本 SHA-256：`837a15dec76ed973875dd0fe260344fb3ca523220f6018d881d3c0e1c87d675f`。
+- 私有 COS 对象：`kubernetes-runtime/s3.1a/diagnose-s31a-volumes-cloud-837a15dec76ed973.sh`。
+- CVM：`ins-pl7mznaa`；执行：`inv-a83peh0hec`，状态 `SUCCESS`。
+- 云端证据目录：`/data/cubelet/s3.1-evidence/s3.1a-diagnostic-20260831T173842Z`。
+- 同一 reviewer 在脚本静态门禁和云上证据终验中均给出 `APPROVE`。
+
+### 诊断矩阵
+
+| 能力 | runc 对照 | Cube 当前行为 | 结论 |
+|---|---|---|---|
+| 磁盘 `emptyDir` 跨容器读写 | 通过 | 写入返回 `EROFS` | kubelet 输入正确，Guest 导出错误 |
+| 内存 `emptyDir` 跨容器读写 | 通过 | 写入返回 `EROFS` | 与介质无关，受共享通道只读属性限制 |
+| 同卷 `rw` 与 `ro` 两个目标 | `rw` 写入后可从 `ro` 别名读回，`ro` 写入失败 | 两个目标均只读 | OCI 的逐 mount `ro/rw` 被底层只读 share 覆盖 |
+| ConfigMap/Secret/projected/downwardAPI 启动注入 | 通过 | 通过 | 首版启动注入路径可沿用 |
+| 投射卷动态更新 | 194 秒内全部更新至 `v2` | 194 秒内全部保持 `v1` | 记入 `K8S-OQ-007`，不能声称动态更新 |
+| ConfigMap `subPath` | 主卷更新后仍保持 `v1` | 保持 `v1` | 对照语义正确；Cube 尚未经历主卷更新 |
+
+CRI inspect 与 containerd OCI spec 的标准输入逐项一致：writer 有 8 个、peer
+有 3 个预期 `bind` mount。Cube 的 `/vol/work` 与 `/vol/work-ro` 使用同一 kubelet
+source，options 分别为 `rbind,rprivate,rw` 和 `rbind,rprivate,ro`；`subPath` source
+由 kubelet 展开为 `volume-subpaths/config/writer/7`。因此 CRI 和 kubelet 无需新增
+私有 Volume API。
+
+Guest mountinfo 直接显示 `/vol/work`、`/vol/ram` 即使 OCI 请求 `rw`，最终仍落在
+`virtiofs cubeShared ro`。S3.1b 的最小实现边界由此冻结为：保留只读 rootfs
+share，另设 Pod 级 Volume share；Host 端允许 kubelet 更新，Guest 端继续按每个 OCI
+mount 的 `ro/rw` 约束，不能把整个 rootfs share 改为可写。
+
+### 清理
+
+活动期按两个 Pod UID 和 Cube shared target 采集到 29 条 host mount 记录、19 个
+Cube shared target。删除后相关 mountinfo/findmnt 均为 0 行，19 个 target 逐个确认
+不再挂载，两个 kubelet Pod 目录均删除。adapter、shared、reaper、cleanup、mount 和
+active lease 前后均为 0；durable tombstone 精确增加 1；全量资源基线在第 62 次
+100ms 轮询恢复。
