@@ -333,7 +333,7 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
 | S3.1 基础 Volume | `DONE` | Codex | 输入、独立 Pod Volume share、可写卷/失败回滚、四类投射卷动态更新、subPath 固定语义和最终支持矩阵均已关闭 | 实现 `5b504b58`；S3.1d 回归 `aafdef40` / `inv-a83u0wgvxv`；审计 `inv-v83u490xa8`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.1/README.md)；同一 reviewer 确认 S3.1 `DONE` | S3.2 filesystem PVC |
-| S3.2 PVC | `IN_PROGRESS` | Codex | 已冻结为 4 个小阶段 | — | S3.2a 诊断 StorageClass/CSI 与标准 bind 输入 |
+| S3.2 PVC | `IN_PROGRESS` | Codex | S3.2a 已冻结标准 filesystem PVC 输入和 static local RWO 基线 | `11ada44e`；`inv-983uns0e3g`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.2/README.md) | S3.2b 跨容器、跨 Pod 重建持久化 |
 | S3.3 SecurityContext | `NOT_STARTED` | 待指定 | — | — | 映射并验证常用安全字段 |
 | S3.4 资源控制 | `NOT_STARTED` | 待指定 | — | — | 实现 Host/Guest 双层 cgroup |
 
@@ -350,8 +350,8 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 
 | 子阶段 | 状态 | 目标 | 验收标准 | 当前结果/下一步 |
 |---|---|---|---|---|
-| S3.2a PVC/CSI 输入诊断 | `IN_PROGRESS` | 选择 PoC filesystem PVC 后端，冻结 kubelet/CRI/OCI 输入与回收边界 | 只读盘点 StorageClass/CSIDriver/CSINode/PV/PVC；runc 对照能绑定、挂载、读写、删除；Cube 标准 bind 输入完整；同一 reviewer `APPROVE` | 先诊断自建 Kubernetes；不修改非本 PoC 创建的 TKE 集群 |
-| S3.2b RWO 持久化 | `NOT_STARTED` | 让 filesystem RWO PVC 在 Cube Pod 内跨容器、跨 Pod 重建持久化 | writer/peer 读写一致；Pod UID/Sandbox/VM 更换后数据保持；PVC/PV 仍绑定；删除 Pod 零 runtime 残留 | 等待 S3.2a |
+| S3.2a PVC/CSI 输入诊断 | `DONE` | 选择 PoC filesystem PVC 后端，冻结 kubelet/CRI/OCI 输入与回收边界 | 只读盘点 StorageClass/CSIDriver/CSINode/PV/PVC；runc 对照能绑定、挂载、读写、删除；Cube 标准 bind 输入完整；同一 reviewer `APPROVE` | `11ada44e` / `inv-983uns0e3g` / `inv-v83uqvgu6g`：集群没有 CSI；static local Filesystem/RWO/WFFC/Retain 基线绑定、CRI/OCI 等价、runc→Cube 数据保持、Guest 可写和全量清理通过；不外推为 CSI/动态制备/生产后端支持 |
+| S3.2b RWO 持久化 | `IN_PROGRESS` | 让 filesystem RWO PVC 在 Cube Pod 内跨容器、跨 Pod 重建持久化 | writer/peer 读写一致；Pod UID/Sandbox/VM 更换后数据保持；PVC/PV 仍绑定；删除 Pod 零 runtime 残留 | 基于 S3.2a 的 static local runtime 语义基线设计并验收 |
 | S3.2c 回收与故障 | `NOT_STARTED` | 验证失败启动、卸载、重绑和 reclaim 语义 | 失败 Task generation/mount 清零；PVC 可重绑；Retain/Delete 行为与后端一致；无 active lease | 等待 S3.2b |
 | S3.2d 回归与支持矩阵 | `NOT_STARTED` | 组合回归并冻结 filesystem PVC 支持范围 | 自动化回归通过；资源基线恢复；RWO/RWX、CSI/非 CSI、扩容等未覆盖项明确记录；handoff 可复现 | 等待 S3.2b、S3.2c |
 
