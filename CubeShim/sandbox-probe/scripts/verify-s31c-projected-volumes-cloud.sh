@@ -372,6 +372,10 @@ write_pod_manifest "$pod_cube" "  runtimeClassName: cube" "$evidence/pod-cube.ya
 "${kube[@]}" get pod "$pod_cube" -o json >"$evidence/pod-cube-initial.json"
 runc_uid=$(jq -r '.metadata.uid' "$evidence/pod-runc-initial.json")
 cube_uid=$(jq -r '.metadata.uid' "$evidence/pod-cube-initial.json")
+runc_pod_ip=$(jq -r '.status.podIP' "$evidence/pod-runc-initial.json")
+cube_pod_ip=$(jq -r '.status.podIP' "$evidence/pod-cube-initial.json")
+test -n "$runc_pod_ip" && test "$runc_pod_ip" != null
+test -n "$cube_pod_ip" && test "$cube_pod_ip" != null
 cube_sandbox=$(sandbox_for_uid "$cube_uid")
 cube_shim=$(shim_pid_for_sandbox "$cube_sandbox")
 cube_shim_start=$(awk '{print $22}' "/proc/$cube_shim/stat")
@@ -574,11 +578,17 @@ test "$(stat -Lc '%d:%i' "$vm_runtime/$cube_sandbox")" = "$cube_vm_inode"
 test "$(stat -Lc '%d:%i' "$shared_root/volumes")" = "$volume_inode"
 test "$(container_id "$pod_cube" writer)" = "$cube_writer_id"
 test "$(container_id "$pod_cube" peer)" = "$cube_peer_id"
+"${kube[@]}" get pod "$pod_runc" -o json >"$evidence/pod-runc-after-update.json"
+"${kube[@]}" get pod "$pod_cube" -o json >"$evidence/pod-cube-after-update.json"
+test "$(jq -r '.metadata.uid' "$evidence/pod-runc-after-update.json")" = "$runc_uid"
+test "$(jq -r '.status.podIP' "$evidence/pod-runc-after-update.json")" = "$runc_pod_ip"
+test "$(jq -r '.metadata.uid' "$evidence/pod-cube-after-update.json")" = "$cube_uid"
+test "$(jq -r '.status.podIP' "$evidence/pod-cube-after-update.json")" = "$cube_pod_ip"
 find "$shared_root/rootfs" "$shared_root/volumes" -mindepth 1 -maxdepth 1 -type d -printf '%p\n' 2>/dev/null | sort >"$evidence/task-generations-after.txt"
 capture_host_mounts after
 cmp "$evidence/task-generations-before.txt" "$evidence/task-generations-after.txt"
 assert_host_mounts_continuous
-printf 'S31C_PROJECTED_OK cube_sandbox=%s runc_latency=%ss cube_latency=%ss startup_modes=ok atomic_host=changed atomic_guest=changed multi_container_updates=ok subpath_value=v1 subpath_inode=stable host_mount_ids=stable shim=stable vm=stable volume_inode=%s\n' \
+printf 'S31C_PROJECTED_OK cube_sandbox=%s runc_latency=%ss cube_latency=%ss startup_modes=ok atomic_host=changed atomic_guest=changed multi_container_updates=ok subpath_value=v1 subpath_inode=stable pod_uid_ip=stable host_mount_ids=stable shim=stable vm=stable volume_inode=%s\n' \
   "$cube_sandbox" "$runc_latency" "$cube_latency" "$volume_inode" | tee -a "$evidence/summary.txt"
 
 delete_owned_objects
