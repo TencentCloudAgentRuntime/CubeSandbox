@@ -12,8 +12,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 
+	"github.com/moby/sys/mountinfo"
 	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
 	runtimeservice "github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
@@ -49,6 +52,13 @@ type adapter struct {
 	network     NetworkOps
 	persistHook func(prepareStage, *diskRecord) error
 	tapFiles    map[string]*os.File
+	cleanup     sharedRootCleanupOps
+}
+
+type sharedRootCleanupOps struct {
+	mountTargets func(string) ([]string, error)
+	unmount      func(string, int) error
+	removeAll    func(string) error
 }
 
 type diskRecord struct {
@@ -95,7 +105,18 @@ func newAdapter(stateDir string, assets Assets, network NetworkOps) (*adapter, e
 	if err := os.MkdirAll(assets.SharedRootBase, 0o711); err != nil {
 		return nil, err
 	}
-	return &adapter{stateDir: stateDir, assets: assets, network: network, tapFiles: make(map[string]*os.File)}, nil
+	sharedRootBase, err := filepath.EvalSymlinks(assets.SharedRootBase)
+	if err != nil {
+		return nil, fmt.Errorf("resolve runtime resource shared root %q: %w", assets.SharedRootBase, err)
+	}
+	if !filepath.IsAbs(sharedRootBase) {
+		return nil, fmt.Errorf("runtime resource shared root must resolve absolute: %q", sharedRootBase)
+	}
+	assets.SharedRootBase = filepath.Clean(sharedRootBase)
+	return &adapter{
+		stateDir: stateDir, assets: assets, network: network, tapFiles: make(map[string]*os.File),
+		cleanup: defaultSharedRootCleanupOps(),
+	}, nil
 }
 
 func (a *adapter) Prepare(ctx context.Context, request *runtimev1.PrepareSandboxRequest, lease state.Lease) (*runtimev1.PreparedSandbox, error) {
@@ -129,14 +150,25 @@ func (a *adapter) Prepare(ctx context.Context, request *runtimev1.PrepareSandbox
 func (a *adapter) resumePrepare(ctx context.Context, record *diskRecord) (*runtimev1.PreparedSandbox, error) {
 	switch record.Stage {
 	case stageIntent:
-		if err := os.MkdirAll(record.Assets.GetSharedRoot(), 0o711); err != nil {
-			return nil, err
+		root := record.Assets.GetSharedRoot()
+		if err := os.Mkdir(root, 0o711); err != nil && !errors.Is(err, os.ErrExist) {
+			return nil, a.discardIntent(record, fmt.Errorf("create runtime resource shared root %q: %w", root, err))
 		}
+		validated, err := a.validateSharedRoot(root)
+		if err != nil {
+			return nil, a.discardIntent(record, err)
+		}
+		record.Assets.SharedRoot = validated
 		if err := a.persistStage(record, stageSharedRoot); err != nil {
 			return nil, err
 		}
 		fallthrough
 	case stageSharedRoot:
+		validated, err := a.validateSharedRoot(record.Assets.GetSharedRoot())
+		if err != nil {
+			return nil, err
+		}
+		record.Assets.SharedRoot = validated
 		network, err := a.network.Prepare(ctx, record.NetNSPath, record.InterfaceName, record.TapName)
 		if err != nil {
 			if rollbackErr := a.rollbackPreparing(ctx, record); rollbackErr != nil {
@@ -161,10 +193,48 @@ func (a *adapter) resumePrepare(ctx context.Context, record *diskRecord) (*runti
 			return nil, err
 		}
 	case stagePrepared:
+		validated, err := a.validateSharedRoot(record.Assets.GetSharedRoot())
+		if err != nil {
+			return nil, err
+		}
+		record.Assets.SharedRoot = validated
 	default:
 		return nil, fmt.Errorf("unsupported runtime resource prepare stage %q", record.Stage)
 	}
 	return preparedFromRecord(record), nil
+}
+
+func (a *adapter) discardIntent(record *diskRecord, cause error) error {
+	if err := os.Remove(a.path(record.SandboxID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%v; discard runtime resource intent: %w", cause, err)
+	}
+	if err := syncDir(a.stateDir); err != nil {
+		return fmt.Errorf("%v; sync discarded runtime resource intent: %w", cause, err)
+	}
+	return cause
+}
+
+func (a *adapter) validateSharedRoot(root string) (string, error) {
+	root = filepath.Clean(root)
+	if filepath.Dir(root) != a.assets.SharedRootBase || root == a.assets.SharedRootBase {
+		return "", fmt.Errorf("runtime resource shared root %q is not a direct child of %q", root, a.assets.SharedRootBase)
+	}
+	info, err := os.Lstat(root)
+	if err != nil {
+		return "", fmt.Errorf("stat runtime resource shared root %q: %w", root, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", fmt.Errorf("runtime resource shared root %q is not a real directory", root)
+	}
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve runtime resource shared root %q: %w", root, err)
+	}
+	canonical = filepath.Clean(canonical)
+	if canonical != root || filepath.Dir(canonical) != a.assets.SharedRootBase {
+		return "", fmt.Errorf("runtime resource shared root %q escaped canonical base %q", root, a.assets.SharedRootBase)
+	}
+	return canonical, nil
 }
 
 func (a *adapter) rollbackPreparing(ctx context.Context, record *diskRecord) error {
@@ -174,10 +244,10 @@ func (a *adapter) rollbackPreparing(ctx context.Context, record *diskRecord) err
 		}
 		delete(a.tapFiles, record.SandboxID)
 	}
-	if err := a.network.Release(ctx, record.NetNSPath, record.InterfaceName, record.TapName); err != nil {
+	if err := a.cleanupSharedRoot(record.Assets.GetSharedRoot()); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(record.Assets.GetSharedRoot()); err != nil {
+	if err := a.network.Release(ctx, record.NetNSPath, record.InterfaceName, record.TapName); err != nil {
 		return err
 	}
 	if err := os.Remove(a.path(record.SandboxID)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -218,18 +288,130 @@ func (a *adapter) Release(ctx context.Context, request state.ReleaseRequest, net
 		}
 		delete(a.tapFiles, record.SandboxID)
 	}
-	if err := a.network.Release(ctx, record.NetNSPath, record.InterfaceName, record.TapName); err != nil {
-		return err
-	}
 	if record.Assets != nil {
-		if err := os.RemoveAll(record.Assets.GetSharedRoot()); err != nil {
+		if err := a.cleanupSharedRoot(record.Assets.GetSharedRoot()); err != nil {
 			return err
 		}
+	}
+	if err := a.network.Release(ctx, record.NetNSPath, record.InterfaceName, record.TapName); err != nil {
+		return err
 	}
 	if err := os.Remove(a.path(request.SandboxID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return syncDir(a.stateDir)
+}
+
+func defaultSharedRootCleanupOps() sharedRootCleanupOps {
+	return sharedRootCleanupOps{
+		mountTargets: mountedTargetsUnder,
+		unmount:      unix.Unmount,
+		removeAll:    os.RemoveAll,
+	}
+}
+
+func (a *adapter) cleanupSharedRoot(root string) error {
+	if root == "" {
+		return nil
+	}
+	root = filepath.Clean(root)
+	if filepath.Dir(root) != a.assets.SharedRootBase || root == a.assets.SharedRootBase {
+		return fmt.Errorf("runtime resource shared root %q is not a direct child of %q", root, a.assets.SharedRootBase)
+	}
+	_, err := os.Lstat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		// A previous exact-lease Release may have removed the filesystem tree and
+		// then failed while releasing the network. Continue the staged retry.
+		return nil
+	}
+	if err == nil {
+		if _, err := a.validateSharedRoot(root); err != nil {
+			return err
+		}
+	} else {
+		return fmt.Errorf("stat runtime resource shared root %q: %w", root, err)
+	}
+	ops := a.cleanup
+	defaults := defaultSharedRootCleanupOps()
+	if ops.mountTargets == nil {
+		ops.mountTargets = defaults.mountTargets
+	}
+	if ops.unmount == nil {
+		ops.unmount = defaults.unmount
+	}
+	if ops.removeAll == nil {
+		ops.removeAll = defaults.removeAll
+	}
+	targets, err := ops.mountTargets(root)
+	if err != nil {
+		return fmt.Errorf("list mounts under runtime resource shared root %q: %w", root, err)
+	}
+	for _, target := range deepestMountTargets(targets) {
+		if err := ops.unmount(target, 0); err == nil || ignorableUnmountError(err) {
+			continue
+		}
+		if err := ops.unmount(target, unix.MNT_DETACH); err != nil && !ignorableUnmountError(err) {
+			return fmt.Errorf("detach mount %q below runtime resource shared root: %w", target, err)
+		}
+	}
+	remaining, err := ops.mountTargets(root)
+	if err != nil {
+		return fmt.Errorf("verify mounts under runtime resource shared root %q: %w", root, err)
+	}
+	if len(remaining) != 0 {
+		return fmt.Errorf("refuse to remove runtime resource shared root %q with %d active mounts", root, len(remaining))
+	}
+	if err := ops.removeAll(root); err != nil {
+		return fmt.Errorf("remove runtime resource shared root %q: %w", root, err)
+	}
+	return nil
+}
+
+func mountedTargetsUnder(root string) ([]string, error) {
+	mounts, err := mountinfo.GetMounts(nil)
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]string, 0)
+	for _, mount := range mounts {
+		if pathWithin(root, mount.Mountpoint) {
+			targets = append(targets, filepath.Clean(mount.Mountpoint))
+		}
+	}
+	return deepestMountTargets(targets), nil
+}
+
+func pathWithin(root, target string) bool {
+	root = filepath.Clean(root)
+	target = filepath.Clean(target)
+	relative, err := filepath.Rel(root, target)
+	return err == nil && !filepath.IsAbs(relative) && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
+}
+
+func deepestMountTargets(targets []string) []string {
+	unique := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		if target != "" {
+			unique[filepath.Clean(target)] = struct{}{}
+		}
+	}
+	targets = targets[:0]
+	for target := range unique {
+		targets = append(targets, target)
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		leftDepth := strings.Count(targets[i], string(os.PathSeparator))
+		rightDepth := strings.Count(targets[j], string(os.PathSeparator))
+		if leftDepth == rightDepth {
+			return targets[i] > targets[j]
+		}
+		return leftDepth > rightDepth
+	})
+	return targets
+}
+
+func ignorableUnmountError(err error) bool {
+	return errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOENT)
 }
 
 func (a *adapter) Inspect(_ context.Context, sandboxID string, lease state.Lease) (*runtimev1.PreparedSandbox, error) {
@@ -242,6 +424,11 @@ func (a *adapter) Inspect(_ context.Context, sandboxID string, lease state.Lease
 	if record.Generation != lease.Generation || record.LeaseID != lease.LeaseID {
 		return nil, errors.New("runtime resource record does not match durable lease")
 	}
+	validated, err := a.validateSharedRoot(record.Assets.GetSharedRoot())
+	if err != nil {
+		return nil, err
+	}
+	record.Assets.SharedRoot = validated
 	return preparedFromRecord(record), nil
 }
 

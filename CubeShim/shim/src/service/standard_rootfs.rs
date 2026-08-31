@@ -23,7 +23,10 @@ use serde_json::json;
 use crate::common::GUEST_VIRTIOFS_MNT_PATH_DEPRECATED;
 use crate::container::rootfs::{OverlayInfo, RootfsInfo, ANNOTATION_K_ROOTFS_INFO};
 use crate::sandbox::config::ANNO_VMM_FS;
-use crate::service::runtime_resource::canonical_runtime_shared_root;
+use crate::service::runtime_resource::{
+    canonical_runtime_shared_root, managed_volume_export_root, MANAGED_VOLUME_EXPORT_DIR,
+    MANAGED_VOLUME_VIRTIOFS_ID,
+};
 
 pub const ENABLE_ANNOTATION: &str = "io.containerd.cube.s0.standard-rootfs";
 pub const SHARE_BASE: &str = "/data/cubelet/s0.2-share";
@@ -35,6 +38,7 @@ pub struct PreparedRootfs {
     target: PathBuf,
     share_root: PathBuf,
     mounts: Vec<PathBuf>,
+    cleanup_dirs: Vec<PathBuf>,
     remove_share_root: bool,
 }
 
@@ -69,7 +73,9 @@ impl PreparedRootfs {
 
     fn remove_dirs(&self) {
         let rootfs_dir = self.target.parent();
-        let _ = fs::remove_dir_all(&self.target);
+        for path in self.cleanup_dirs.iter().rev() {
+            let _ = fs::remove_dir_all(path);
+        }
         if self.remove_share_root {
             if let Some(rootfs_dir) = rootfs_dir {
                 remove_empty_dir(rootfs_dir);
@@ -118,13 +124,22 @@ pub fn prepare_legacy(
         return Ok(None);
     }
     let share_root = Path::new(SHARE_BASE).join(sandbox_id);
-    let prepared = prepare_at(&share_root, sandbox_id, task_id, mounts, spec, true, true)?;
+    let prepared = prepare_at(
+        &share_root,
+        sandbox_id,
+        task_id,
+        mounts,
+        spec,
+        true,
+        true,
+        None,
+    )?;
     Ok(Some(prepared))
 }
 
-/// Prepare a task rootfs inside the immutable shared root selected by
-/// RuntimeResource before the sandbox VM was started. No per-task virtiofs
-/// configuration is accepted or injected on this path.
+/// Prepare a task rootfs and its bind exports beneath the two fixed directory
+/// inodes selected before the sandbox VM starts. No per-task virtiofs device
+/// is hot-plugged on this path.
 pub fn prepare_managed(
     shared_root: &Path,
     task_id: &str,
@@ -132,6 +147,7 @@ pub fn prepare_managed(
     spec: &mut Spec,
 ) -> Result<PreparedRootfs, String> {
     let shared_root = canonical_runtime_shared_root(shared_root)?;
+    let volume_root = managed_volume_export_root(&shared_root)?;
     let guest_share_name = guest_share_name(&shared_root)?;
     prepare_at(
         &shared_root,
@@ -141,6 +157,7 @@ pub fn prepare_managed(
         spec,
         false,
         false,
+        Some(&volume_root),
     )
 }
 
@@ -152,6 +169,7 @@ fn prepare_at(
     spec: &mut Spec,
     inject_virtiofs: bool,
     remove_share_root: bool,
+    managed_volume_root: Option<&Path>,
 ) -> Result<PreparedRootfs, String> {
     validate_id("guest share", guest_share_name)?;
     validate_id("task", task_id)?;
@@ -175,8 +193,12 @@ fn prepare_at(
         target: target.clone(),
         share_root: share_root.to_path_buf(),
         mounts: Vec::new(),
+        cleanup_dirs: vec![target.clone()],
         remove_share_root,
     };
+    if let Some(volume_root) = managed_volume_root {
+        prepared.cleanup_dirs.push(volume_root.join(&export_id));
+    }
     let guest_lowerdirs = export_rootfs(
         guest_share_name,
         &export_id,
@@ -188,6 +210,7 @@ fn prepare_at(
         guest_share_name,
         &export_id,
         &target,
+        managed_volume_root,
         spec,
         &mut prepared.mounts,
     )?;
@@ -205,6 +228,7 @@ fn export_host_bind_mounts(
     guest_share_name: &str,
     export_id: &str,
     target: &Path,
+    managed_volume_root: Option<&Path>,
     spec: &mut Spec,
     mounted: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
@@ -244,7 +268,7 @@ fn export_host_bind_mounts(
                 mount.destination().display()
             )
         })?;
-        let export_target = target.join("volumes").join(format!("{index:03}"));
+        let export_target = host_bind_export_target(target, managed_volume_root, export_id, index);
         if metadata.is_dir() {
             fs::create_dir_all(&export_target).map_err(|error| {
                 format!(
@@ -276,12 +300,40 @@ fn export_host_bind_mounts(
 
         bind_mount(&source, &export_target, metadata.is_dir())?;
         mounted.push(export_target);
-        mount.set_source(Some(guest_bind_source(guest_share_name, export_id, index)));
+        mount.set_source(Some(guest_bind_source(
+            guest_share_name,
+            export_id,
+            index,
+            managed_volume_root.is_some(),
+        )));
     }
     Ok(())
 }
 
-fn guest_bind_source(guest_share_name: &str, export_id: &str, index: usize) -> PathBuf {
+fn host_bind_export_target(
+    rootfs_target: &Path,
+    managed_volume_root: Option<&Path>,
+    export_id: &str,
+    index: usize,
+) -> PathBuf {
+    managed_volume_root
+        .map(|root| root.join(export_id).join(format!("{index:03}")))
+        .unwrap_or_else(|| rootfs_target.join("volumes").join(format!("{index:03}")))
+}
+
+fn guest_bind_source(
+    guest_share_name: &str,
+    export_id: &str,
+    index: usize,
+    managed: bool,
+) -> PathBuf {
+    if managed {
+        return Path::new(crate::common::GUEST_VIRTIOFS_MNT_PATH)
+            .join(MANAGED_VOLUME_VIRTIOFS_ID)
+            .join(MANAGED_VOLUME_EXPORT_DIR)
+            .join(export_id)
+            .join(format!("{index:03}"));
+    }
     Path::new(GUEST_VIRTIOFS_MNT_PATH_DEPRECATED)
         .join(guest_share_name)
         .join("rootfs")
@@ -670,10 +722,23 @@ mod tests {
     #[test]
     fn managed_bind_mount_uses_existing_guest_share() {
         assert_eq!(
-            guest_bind_source("sb-generation", "task-a-42-7", 3),
+            guest_bind_source("sb-generation", "task-a-42-7", 3, true),
+            PathBuf::from("/run/virtiofs/cubeVolumes/volumes/task-a-42-7/003")
+        );
+        assert_eq!(
+            guest_bind_source("sb-generation", "task-a-42-7", 3, false),
             PathBuf::from(
                 "/run/cube-containers/shared/containers/sb-generation/rootfs/task-a-42-7/volumes/003"
             )
+        );
+        assert_eq!(
+            host_bind_export_target(
+                Path::new("/shared/rootfs/task-a-42-7"),
+                Some(Path::new("/shared/volumes")),
+                "task-a-42-7",
+                3,
+            ),
+            PathBuf::from("/shared/volumes/task-a-42-7/003")
         );
     }
 
@@ -690,6 +755,7 @@ mod tests {
             "sb-generation",
             "task-a-42-7",
             Path::new("/unused"),
+            None,
             &mut spec,
             &mut Vec::new(),
         )
@@ -733,9 +799,10 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
 
         PreparedRootfs {
-            target,
+            target: target.clone(),
             share_root: share_root.clone(),
             mounts: Vec::new(),
+            cleanup_dirs: vec![target],
             remove_share_root: false,
         }
         .cleanup()
@@ -762,9 +829,10 @@ mod tests {
         let rootfs_inode = fs::metadata(&rootfs_dir).unwrap().ino();
 
         PreparedRootfs {
-            target: old_target,
+            target: old_target.clone(),
             share_root: share_root.clone(),
             mounts: Vec::new(),
+            cleanup_dirs: vec![old_target],
             remove_share_root: false,
         }
         .cleanup()
@@ -774,6 +842,41 @@ mod tests {
         fs::create_dir_all(&new_target).unwrap();
         assert_eq!(fs::metadata(&rootfs_dir).unwrap().ino(), rootfs_inode);
 
+        fs::remove_dir_all(&share_root).unwrap();
+    }
+
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn managed_cleanup_removes_only_its_volume_generation() {
+        use std::os::unix::fs::MetadataExt;
+
+        let share_root = std::env::temp_dir().join(format!(
+            "cubesandbox-managed-volume-generation-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let target = share_root.join("rootfs/task-old");
+        let volume_root = share_root.join("volumes");
+        let old_volume = volume_root.join("task-old");
+        let new_volume = volume_root.join("task-new");
+        for path in [&target, &old_volume, &new_volume] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let volume_root_inode = fs::metadata(&volume_root).unwrap().ino();
+
+        PreparedRootfs {
+            target: target.clone(),
+            share_root: share_root.clone(),
+            mounts: Vec::new(),
+            cleanup_dirs: vec![target.clone(), old_volume.clone()],
+            remove_share_root: false,
+        }
+        .cleanup()
+        .unwrap();
+
+        assert!(!target.exists());
+        assert!(!old_volume.exists());
+        assert!(new_volume.is_dir());
+        assert_eq!(fs::metadata(&volume_root).unwrap().ino(), volume_root_inode);
         fs::remove_dir_all(&share_root).unwrap();
     }
 
@@ -799,6 +902,7 @@ mod tests {
             mounts: vec![PathBuf::from(OsString::from_vec(
                 b"invalid\0mount".to_vec(),
             ))],
+            cleanup_dirs: vec![target.clone()],
             remove_share_root: false,
         });
 
@@ -828,6 +932,7 @@ mod tests {
             target: old_target.clone(),
             share_root: share_root.clone(),
             mounts: Vec::new(),
+            cleanup_dirs: vec![old_target.clone()],
             remove_share_root: false,
         }
         .cleanup()
@@ -849,9 +954,10 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
 
         PreparedRootfs {
-            target,
+            target: target.clone(),
             share_root: share_root.clone(),
             mounts: Vec::new(),
+            cleanup_dirs: vec![target],
             remove_share_root: true,
         }
         .cleanup()

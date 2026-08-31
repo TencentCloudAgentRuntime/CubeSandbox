@@ -17,6 +17,7 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fs;
 use std::io::{IoSliceMut, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
@@ -40,6 +41,7 @@ const ANNO_VM_KERNEL: &str = "cube.vm.kernel.path";
 const ANNO_VM_AGENT: &str = "cube.vm.agent.path";
 const ANNO_VM_OS_IMAGE: &str = "cube.vm.os-image.path";
 const ANNO_VMM_FS: &str = "cube.fs";
+const ANNO_VIRTIOFS: &str = "cube.virtiofs";
 const ANNO_NET: &str = "cube.net";
 const ANNO_SNAPSHOT_DISABLE: &str = "cube.snapshot.disable";
 const ANNO_USE_PASSFD_IO: &str = "cube.use_passfd_io";
@@ -54,6 +56,8 @@ const RUNTIME_CLEANUP_RECORD: &str = "cube-runtime-resource.json";
 const RUNTIME_REAPER_ROOT_ENV: &str = "CUBE_RUNTIME_RESOURCE_REAPER_DIR";
 const DEFAULT_RUNTIME_REAPER_ROOT: &str = "/data/cubelet/runtime-resource-reaper";
 pub(crate) const RUNTIME_REAPER_ACTION: &str = "runtime-resource-reaper";
+pub(crate) const MANAGED_VOLUME_EXPORT_DIR: &str = "volumes";
+pub(crate) const MANAGED_VOLUME_VIRTIOFS_ID: &str = "cubeVolumes";
 
 const REQUIRED_CAPABILITIES: [(&str, u32); 3] = [
     ("io.cubesandbox.runtime.assets", 1),
@@ -1021,6 +1025,9 @@ pub(crate) async fn prepare(
     // use the canonical path that was validated as a strict /data/cubelet
     // descendant. Do not retain a server-supplied symlink spelling.
     sandbox.assets.as_mut().unwrap().shared_root = shared_root.display().to_string();
+    if let Err(error) = ensure_managed_volume_export_root(&shared_root) {
+        return Err(release_after_prepare_error(&cleanup_lease, error).await);
+    }
     if let Err(error) = inject_annotations(spec, &resources, &sandbox) {
         return Err(release_after_prepare_error(&cleanup_lease, error).await);
     }
@@ -1212,6 +1219,51 @@ pub(crate) fn canonical_runtime_shared_root(path: &Path) -> Result<PathBuf, Stri
     Ok(canonical)
 }
 
+pub(crate) fn managed_volume_export_root(shared_root: &Path) -> Result<PathBuf, String> {
+    let shared_root = canonical_runtime_shared_root(shared_root)?;
+    let volume_root = shared_root.join(MANAGED_VOLUME_EXPORT_DIR);
+    let metadata = fs::symlink_metadata(&volume_root).map_err(|error| {
+        format!(
+            "stat fixed managed volume export root {}: {error}",
+            volume_root.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "fixed managed volume export root is not a real directory: {}",
+            volume_root.display()
+        ));
+    }
+    let canonical = volume_root.canonicalize().map_err(|error| {
+        format!(
+            "canonicalize fixed managed volume export root {}: {error}",
+            volume_root.display()
+        )
+    })?;
+    if canonical.parent() != Some(shared_root.as_path()) {
+        return Err(format!(
+            "fixed managed volume export root escaped RuntimeResource root: {}",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+fn ensure_managed_volume_export_root(shared_root: &Path) -> Result<PathBuf, String> {
+    let volume_root = shared_root.join(MANAGED_VOLUME_EXPORT_DIR);
+    match fs::create_dir(&volume_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(format!(
+                "create fixed managed volume export root {}: {error}",
+                volume_root.display()
+            ))
+        }
+    }
+    managed_volume_export_root(shared_root)
+}
+
 fn inject_annotations(
     spec: &mut Spec,
     resources: &ResourceRequest,
@@ -1220,6 +1272,12 @@ fn inject_annotations(
     let assets = sandbox.assets.as_ref().unwrap();
     let network = sandbox.network.as_ref().unwrap();
     let mut annotations = spec.annotations().as_ref().cloned().unwrap_or_default();
+    if annotations.contains_key(ANNO_VIRTIOFS) {
+        return Err(format!(
+            "RuntimeResource sandbox cannot be combined with an existing {ANNO_VIRTIOFS} annotation"
+        ));
+    }
+    let volume_root = managed_volume_export_root(Path::new(&assets.shared_root))?;
     annotations.insert(
         ANNO_VM_RES.to_string(),
         serde_json::json!({
@@ -1245,6 +1303,20 @@ fn inject_annotations(
                 "read_only": true,
             }
         })
+        .to_string(),
+    );
+    annotations.insert(
+        ANNO_VIRTIOFS.to_string(),
+        serde_json::json!([{
+            "id": MANAGED_VOLUME_VIRTIOFS_ID,
+            "backendfs_config": {
+                "shared_dir": VIRTIOFS_SHARED_DIR,
+                "allowed_dirs": [volume_root],
+                "announce_submounts": false,
+                "cache": 3,
+                "read_only": false,
+            }
+        }])
         .to_string(),
     );
     annotations.insert(ANNO_NET.to_string(), network_json(network)?);
@@ -1723,6 +1795,89 @@ mod tests {
 
         std::fs::remove_dir_all(&root).unwrap();
         std::fs::remove_dir_all(&outside).unwrap();
+    }
+
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn managed_volume_share_is_writable_cacheless_and_inode_stable() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = PathBuf::from(format!(
+            "/data/cubelet/runtime-volume-root-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let shared = root.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        let volume_root = ensure_managed_volume_export_root(&shared).unwrap();
+        let inode = std::fs::metadata(&volume_root).unwrap().ino();
+        assert_eq!(
+            std::fs::metadata(ensure_managed_volume_export_root(&shared).unwrap())
+                .unwrap()
+                .ino(),
+            inode
+        );
+
+        let sandbox = PreparedSandbox {
+            assets: Some(RuntimeAssets {
+                shared_root: shared.display().to_string(),
+                ..Default::default()
+            }),
+            network: Some(sample_network()),
+            ..Default::default()
+        };
+        let mut spec = Spec::default();
+        inject_annotations(
+            &mut spec,
+            &ResourceRequest {
+                vcpu_count: 1,
+                memory_bytes: 256 * 1024 * 1024,
+            },
+            &sandbox,
+        )
+        .unwrap();
+        let annotations = spec.annotations().as_ref().unwrap();
+        let rootfs: serde_json::Value =
+            serde_json::from_str(annotations.get(ANNO_VMM_FS).unwrap()).unwrap();
+        assert_eq!(
+            rootfs["backendfs_config"]["allowed_dirs"][0],
+            shared.display().to_string()
+        );
+        assert_eq!(rootfs["backendfs_config"]["cache"], 2);
+        assert_eq!(rootfs["backendfs_config"]["read_only"], true);
+        assert_eq!(rootfs["backendfs_config"]["announce_submounts"], false);
+
+        let volume: serde_json::Value =
+            serde_json::from_str(annotations.get(ANNO_VIRTIOFS).unwrap()).unwrap();
+        assert_eq!(volume[0]["id"], MANAGED_VOLUME_VIRTIOFS_ID);
+        assert_eq!(
+            volume[0]["backendfs_config"]["allowed_dirs"][0],
+            volume_root.display().to_string()
+        );
+        assert_eq!(volume[0]["backendfs_config"]["cache"], 3);
+        assert_eq!(volume[0]["backendfs_config"]["read_only"], false);
+        assert_eq!(volume[0]["backendfs_config"]["announce_submounts"], false);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn managed_volume_root_rejects_symlink_replacement() {
+        let root = PathBuf::from(format!(
+            "/data/cubelet/runtime-volume-symlink-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let shared = root.join("shared");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, shared.join(MANAGED_VOLUME_EXPORT_DIR)).unwrap();
+
+        assert!(ensure_managed_volume_export_root(&shared)
+            .unwrap_err()
+            .contains("not a real directory"));
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     fn handoff_sandbox(endpoint: String) -> PreparedSandbox {

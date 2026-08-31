@@ -14,6 +14,7 @@ use containerd_shim::TtrpcResult;
 use oci_spec::runtime::Spec;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -40,6 +41,7 @@ enum Phase {
     Ready,
     Stopping,
     Stopped,
+    ReleasePending,
     Failed,
     ShuttingDown,
     Shutdown,
@@ -141,7 +143,7 @@ impl SandboxLifecycle {
                 }
                 Phase::Shutdown => return ShutdownAction::AlreadyComplete,
                 Phase::ShuttingDown => return ShutdownAction::WaitForExisting,
-                Phase::Stopped => {
+                Phase::Stopped | Phase::ReleasePending => {
                     state.phase = Phase::ShuttingDown;
                     return ShutdownAction::Run { force_abort: false };
                 }
@@ -317,55 +319,58 @@ impl SandboxService {
                         Ok(()) => Ok(()),
                         Err(error) => {
                             let rollback_error = sandbox.abort_sandbox().await.err();
-                            sandbox.clear_runtime_tap();
-                            drop(sandbox);
-                            let release_error = lease.release().await.err();
-                            let released = release_error.is_none();
-                            let error = append_error(error, "rollback VM", rollback_error);
-                            Err((
-                                append_error(error, "release RuntimeResource", release_error),
-                                released,
-                            ))
+                            if let Some(rollback_error) = rollback_error {
+                                drop(sandbox);
+                                Err(StartFailure {
+                                    error: format!(
+                                        "{error}; rollback VM: {rollback_error}; RuntimeResource release skipped until teardown is confirmed"
+                                    ),
+                                    cleanup: StartCleanup::TeardownUnconfirmed,
+                                })
+                            } else {
+                                sandbox.clear_runtime_tap();
+                                drop(sandbox);
+                                match lease.release().await {
+                                    Ok(()) => Err(StartFailure {
+                                        error,
+                                        cleanup: StartCleanup::Released,
+                                    }),
+                                    Err(release_error) => Err(StartFailure {
+                                        error: format!(
+                                            "{error}; release RuntimeResource: {release_error}"
+                                        ),
+                                        cleanup: StartCleanup::ReleasePending,
+                                    }),
+                                }
+                            }
                         }
                     }
                 }
-                Err(error) => {
-                    let release_error = lease.release().await.err();
-                    let released = release_error.is_none();
-                    Err((
-                        append_error(
-                            format!("acquire RuntimeResource TAP: {error}"),
-                            "release RuntimeResource",
-                            release_error,
+                Err(error) => match lease.release().await {
+                    Ok(()) => Err(StartFailure {
+                        error: format!("acquire RuntimeResource TAP: {error}"),
+                        cleanup: StartCleanup::Released,
+                    }),
+                    Err(release_error) => Err(StartFailure {
+                        error: format!(
+                            "acquire RuntimeResource TAP: {error}; release RuntimeResource: {release_error}"
                         ),
-                        released,
-                    ))
-                }
+                        cleanup: StartCleanup::ReleasePending,
+                    }),
+                },
             }
         } else {
-            Err(("sandbox has no RuntimeResource lease".to_string(), true))
+            Err(StartFailure {
+                error: "sandbox has no RuntimeResource lease".to_string(),
+                cleanup: StartCleanup::Released,
+            })
         };
         self.finish_start(result).await;
     }
 
-    async fn finish_start(&self, result: Result<(), (String, bool)>) {
+    async fn finish_start(&self, result: Result<(), StartFailure>) {
         let mut state = self.lifecycle.state.lock().await;
-        match result {
-            Ok(()) => {
-                state.phase = Phase::Ready;
-                state.created_at = Some(now_timestamp());
-                state.last_error = None;
-            }
-            Err((error, released)) => {
-                state.phase = Phase::Failed;
-                if released {
-                    state.runtime = None;
-                }
-                state.exit_status = 1;
-                state.exited_at = Some(now_timestamp());
-                state.last_error = Some(error);
-            }
-        }
+        apply_start_result(&mut state, result);
         let ready = state.phase == Phase::Ready;
         drop(state);
         self.lifecycle.changed.notify_waiters();
@@ -432,74 +437,92 @@ impl SandboxService {
     }
 
     async fn run_stop(self, previous: Phase) {
-        if !self.sandbox.lock().await.is_empty().await {
-            self.finish_stop(
-                previous,
-                Err("sandbox still contains containers".to_string()),
-                false,
-            )
-            .await;
+        if previous != Phase::ReleasePending && !self.sandbox.lock().await.is_empty().await {
+            self.finish_stop_guard(previous, "sandbox still contains containers".to_string())
+                .await;
             return;
         }
-        if let Some(lease) = self.lifecycle.state.lock().await.runtime.clone() {
-            if let Err(error) = lease.release().await {
-                self.finish_stop(
-                    previous,
-                    Err(format!("release RuntimeResource: {error}")),
-                    false,
-                )
-                .await;
-                return;
-            }
-        }
-        let result = {
-            let mut sandbox = self.sandbox.lock().await;
-            let destroyed = if previous == Phase::Failed {
-                sandbox.abort_sandbox().await
-            } else {
-                sandbox.destroy_sandbox().await
-            };
-            match destroyed {
-                Ok(()) => {
-                    sandbox.clear_runtime_tap();
+        let lease = self.lifecycle.state.lock().await.runtime.clone();
+        let result = teardown_then_release(
+            || async {
+                let mut sandbox = self.sandbox.lock().await;
+                match stop_teardown_action(previous) {
+                    StopTeardownAction::ReleaseOnly => Ok(TeardownOutcome::normal()),
+                    StopTeardownAction::Abort => match sandbox.abort_sandbox().await {
+                        Ok(()) => {
+                            sandbox.clear_runtime_tap();
+                            Ok(TeardownOutcome::forced(None))
+                        }
+                        Err(error) => Err(format!("force stop sandbox: {error}")),
+                    },
+                    StopTeardownAction::Destroy => match sandbox.destroy_sandbox().await {
+                        Ok(()) => {
+                            sandbox.clear_runtime_tap();
+                            Ok(TeardownOutcome::normal())
+                        }
+                        Err(error) => match sandbox.abort_sandbox().await {
+                            Ok(()) => {
+                                sandbox.clear_runtime_tap();
+                                Ok(TeardownOutcome::forced(Some(format!(
+                                    "destroy sandbox: {error}; forced rollback"
+                                ))))
+                            }
+                            Err(rollback) => Err(format!(
+                                "destroy sandbox: {error}; forced rollback: {rollback}"
+                            )),
+                        },
+                    },
+                }
+            },
+            || async {
+                if let Some(lease) = lease {
+                    lease.release().await
+                } else {
                     Ok(())
                 }
-                Err(error) => {
-                    let rollback = sandbox.abort_sandbox().await;
-                    sandbox.clear_runtime_tap();
-                    Err(append_error(
-                        format!("destroy sandbox: {error}"),
-                        "forced rollback",
-                        rollback.err(),
-                    ))
-                }
-            }
-        };
-        self.finish_stop(previous, result, true).await;
+            },
+        )
+        .await;
+        self.finish_stop(previous, result).await;
     }
 
-    async fn finish_stop(&self, previous: Phase, result: Result<(), String>, released: bool) {
+    async fn finish_stop_guard(&self, previous: Phase, error: String) {
         let mut state = self.lifecycle.state.lock().await;
-        if released {
-            state.runtime = None;
-        }
+        state.phase = previous;
+        state.last_error = Some(error);
+        drop(state);
+        self.lifecycle.changed.notify_waiters();
+    }
+
+    async fn finish_stop(&self, previous: Phase, result: CleanupOutcome) {
+        let mut state = self.lifecycle.state.lock().await;
         match result {
-            Ok(()) => {
-                state.phase = Phase::Stopped;
-                state.exit_status = 0;
-                state.exited_at = Some(now_timestamp());
-                state.last_error = None;
-            }
-            Err(error) => {
-                if error == "sandbox still contains containers"
-                    || error.starts_with("release RuntimeResource:")
-                {
-                    state.phase = previous;
-                } else {
-                    state.phase = Phase::Failed;
-                    state.exit_status = 1;
-                    state.exited_at = Some(now_timestamp());
+            CleanupOutcome::Released(teardown) => {
+                state.runtime = None;
+                if previous != Phase::ReleasePending {
+                    freeze_exit(&mut state, teardown.forced);
                 }
+                state.phase = Phase::Stopped;
+                if let Some(warning) = teardown.warning {
+                    state.last_error = Some(warning);
+                } else {
+                    state.last_error = None;
+                }
+            }
+            CleanupOutcome::ReleaseFailed(teardown, error) => {
+                if previous != Phase::ReleasePending {
+                    freeze_exit(&mut state, teardown.forced);
+                }
+                state.phase = Phase::ReleasePending;
+                state.last_error = Some(append_error(
+                    format!("release RuntimeResource: {error}"),
+                    "sandbox teardown warning",
+                    teardown.warning,
+                ));
+            }
+            CleanupOutcome::TeardownFailed(error) => {
+                state.phase = Phase::Failed;
+                freeze_exit(&mut state, true);
                 state.last_error = Some(error);
             }
         }
@@ -512,7 +535,22 @@ impl SandboxService {
             let notified = self.lifecycle.changed.notified();
             let state = self.lifecycle.state.lock().await;
             match state.phase {
+                Phase::Stopped if state.last_error.is_some() => {
+                    return Err(rpc_error(
+                        Code::FAILED_PRECONDITION,
+                        state.last_error.clone().unwrap(),
+                    ))
+                }
                 Phase::Stopped | Phase::Shutdown => return Ok(()),
+                Phase::ReleasePending => {
+                    return Err(rpc_error(
+                        Code::FAILED_PRECONDITION,
+                        state
+                            .last_error
+                            .clone()
+                            .unwrap_or_else(|| "RuntimeResource release is pending".to_string()),
+                    ))
+                }
                 Phase::Failed | Phase::Ready | Phase::Created if state.last_error.is_some() => {
                     return Err(rpc_error(
                         Code::FAILED_PRECONDITION,
@@ -534,44 +572,64 @@ impl SandboxService {
     }
 
     async fn run_shutdown(self, force_abort: bool) {
-        let release = if let Some(lease) = self.lifecycle.state.lock().await.runtime.clone() {
-            lease.release().await
-        } else {
-            Ok(())
-        };
-        let abort = if force_abort {
-            let mut sandbox = self.sandbox.lock().await;
-            let result = sandbox.abort_sandbox().await;
-            sandbox.clear_runtime_tap();
-            result
-        } else {
-            Ok(())
-        };
-        let released = release.is_ok();
-        let result = match (release, abort) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) => Err(format!("release RuntimeResource: {error}")),
-            (Ok(()), Err(error)) => Err(format!("force shutdown sandbox: {error}")),
-            (Err(release), Err(abort)) => Err(format!(
-                "release RuntimeResource: {release}; force shutdown sandbox: {abort}"
-            )),
-        };
+        let lease = self.lifecycle.state.lock().await.runtime.clone();
+        let result = teardown_then_release(
+            || async {
+                if !force_abort {
+                    return Ok(TeardownOutcome::normal());
+                }
+                let mut sandbox = self.sandbox.lock().await;
+                match sandbox.abort_sandbox().await {
+                    Ok(()) => {
+                        sandbox.clear_runtime_tap();
+                        Ok(TeardownOutcome::forced(None))
+                    }
+                    Err(error) => Err(format!("force shutdown sandbox: {error}")),
+                }
+            },
+            || async {
+                if let Some(lease) = lease {
+                    lease.release().await
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .await;
         let mut state = self.lifecycle.state.lock().await;
-        if released {
-            state.runtime = None;
-        }
         match result {
-            Ok(()) => {
-                state.phase = Phase::Shutdown;
-                state.last_error = None;
-                if state.exited_at.is_none() {
-                    state.exited_at = Some(now_timestamp());
+            CleanupOutcome::Released(teardown) => {
+                state.runtime = None;
+                if force_abort {
+                    freeze_exit(&mut state, teardown.forced);
+                } else if state.exited_at.is_none() {
+                    freeze_exit(&mut state, false);
+                }
+                state.phase = Phase::Stopped;
+                if let Some(warning) = teardown.warning {
+                    state.phase = Phase::Failed;
+                    state.last_error = Some(warning);
+                } else {
+                    state.phase = Phase::Shutdown;
+                    state.last_error = None;
                 }
             }
-            Err(error) => {
+            CleanupOutcome::ReleaseFailed(teardown, error) => {
+                if force_abort {
+                    freeze_exit(&mut state, teardown.forced);
+                } else if state.exited_at.is_none() {
+                    freeze_exit(&mut state, false);
+                }
+                state.phase = Phase::ReleasePending;
+                state.last_error = Some(append_error(
+                    format!("release RuntimeResource: {error}"),
+                    "sandbox teardown warning",
+                    teardown.warning,
+                ));
+            }
+            CleanupOutcome::TeardownFailed(error) => {
                 state.phase = Phase::Failed;
-                state.exit_status = 1;
-                state.exited_at = Some(now_timestamp());
+                freeze_exit(&mut state, true);
                 state.last_error = Some(error);
             }
         }
@@ -589,7 +647,7 @@ impl SandboxService {
             let state = self.lifecycle.state.lock().await;
             match state.phase {
                 Phase::Shutdown => return Ok(api::ShutdownSandboxResponse::new()),
-                Phase::Failed => {
+                Phase::Failed | Phase::ReleasePending => {
                     return Err(rpc_error(
                         Code::INTERNAL,
                         state
@@ -611,6 +669,124 @@ impl SandboxService {
             }
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartCleanup {
+    Released,
+    ReleasePending,
+    TeardownUnconfirmed,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct StartFailure {
+    error: String,
+    cleanup: StartCleanup,
+}
+
+fn apply_start_result(state: &mut LifecycleState, result: Result<(), StartFailure>) {
+    match result {
+        Ok(()) => {
+            state.phase = Phase::Ready;
+            state.created_at = Some(now_timestamp());
+            state.last_error = None;
+        }
+        Err(failure) => {
+            state.phase = if failure.cleanup == StartCleanup::ReleasePending {
+                Phase::ReleasePending
+            } else {
+                Phase::Failed
+            };
+            if failure.cleanup == StartCleanup::Released {
+                state.runtime = None;
+            }
+            freeze_exit(state, true);
+            state.last_error = Some(failure.error);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StopTeardownAction {
+    ReleaseOnly,
+    Abort,
+    Destroy,
+}
+
+fn stop_teardown_action(previous: Phase) -> StopTeardownAction {
+    match previous {
+        Phase::ReleasePending => StopTeardownAction::ReleaseOnly,
+        Phase::Failed => StopTeardownAction::Abort,
+        _ => StopTeardownAction::Destroy,
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct TeardownOutcome {
+    forced: bool,
+    warning: Option<String>,
+}
+
+impl TeardownOutcome {
+    fn normal() -> Self {
+        Self {
+            forced: false,
+            warning: None,
+        }
+    }
+
+    fn forced(warning: Option<String>) -> Self {
+        Self {
+            forced: true,
+            warning,
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CleanupOutcome {
+    Released(TeardownOutcome),
+    ReleaseFailed(TeardownOutcome, String),
+    TeardownFailed(String),
+}
+
+async fn teardown_then_release<T, TeardownFuture, R, ReleaseFuture>(
+    teardown: T,
+    release: R,
+) -> CleanupOutcome
+where
+    T: FnOnce() -> TeardownFuture,
+    TeardownFuture: Future<Output = Result<TeardownOutcome, String>>,
+    R: FnOnce() -> ReleaseFuture,
+    ReleaseFuture: Future<Output = Result<(), String>>,
+{
+    let teardown = match teardown().await {
+        Ok(teardown) => teardown,
+        Err(error) => return CleanupOutcome::TeardownFailed(error),
+    };
+    match release().await {
+        Ok(()) => CleanupOutcome::Released(teardown),
+        Err(error) => CleanupOutcome::ReleaseFailed(teardown, error),
+    }
+}
+
+fn freeze_exit(state: &mut LifecycleState, forced: bool) {
+    if state.exited_at.is_none() {
+        state.exit_status = u32::from(forced);
+        state.exited_at = Some(now_timestamp());
+    }
+}
+
+fn terminal_wait_response(state: &LifecycleState) -> Option<api::WaitSandboxResponse> {
+    matches!(
+        state.phase,
+        Phase::Stopped | Phase::ReleasePending | Phase::Failed | Phase::Shutdown
+    )
+    .then(|| api::WaitSandboxResponse {
+        exit_status: state.exit_status,
+        exited_at: state.exited_at.clone().into(),
+        ..Default::default()
+    })
 }
 
 fn hash_create_part(hasher: &mut Sha256, value: &[u8]) {
@@ -800,7 +976,7 @@ impl Sandbox for SandboxService {
                     drop(state);
                     notified.await;
                 }
-                Phase::Created | Phase::Ready | Phase::Failed => {
+                Phase::Created | Phase::Ready | Phase::Failed | Phase::ReleasePending => {
                     let previous = state.phase;
                     state.phase = Phase::Stopping;
                     break (true, previous);
@@ -831,19 +1007,11 @@ impl Sandbox for SandboxService {
         loop {
             let notified = self.lifecycle.changed.notified();
             let state = self.lifecycle.state.lock().await;
-            match state.phase {
-                Phase::Stopped | Phase::Failed | Phase::Shutdown => {
-                    return Ok(api::WaitSandboxResponse {
-                        exit_status: state.exit_status,
-                        exited_at: state.exited_at.clone().into(),
-                        ..Default::default()
-                    })
-                }
-                _ => {
-                    drop(state);
-                    notified.await;
-                }
+            if let Some(response) = terminal_wait_response(&state) {
+                return Ok(response);
             }
+            drop(state);
+            notified.await;
         }
     }
 
@@ -1110,6 +1278,133 @@ mod tests {
             ShutdownAction::Run { force_abort: false }
         );
         assert_eq!(lifecycle.state.lock().await.phase, Phase::ShuttingDown);
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_pending_release_retries_only_release() {
+        let lifecycle = SandboxLifecycle::default();
+        lifecycle.state.lock().await.phase = Phase::ReleasePending;
+        assert_eq!(
+            lifecycle.begin_shutdown().await,
+            ShutdownAction::Run { force_abort: false }
+        );
+        assert_eq!(lifecycle.state.lock().await.phase, Phase::ShuttingDown);
+    }
+
+    #[test]
+    fn start_rollback_release_failure_enters_retry_only_phase() {
+        let mut state = LifecycleState {
+            phase: Phase::Starting,
+            runtime: Some(RuntimeLease::test_with_shared_root(
+                "/data/cubelet/start-release-pending-test",
+            )),
+            ..Default::default()
+        };
+        apply_start_result(
+            &mut state,
+            Err(StartFailure {
+                error: "start failed; release RuntimeResource: unavailable".to_string(),
+                cleanup: StartCleanup::ReleasePending,
+            }),
+        );
+
+        assert_eq!(state.phase, Phase::ReleasePending);
+        assert!(state.runtime.is_some());
+        assert_eq!(state.exit_status, 1);
+        assert!(state.exited_at.is_some());
+        assert_eq!(
+            stop_teardown_action(state.phase),
+            StopTeardownAction::ReleaseOnly
+        );
+    }
+
+    #[test]
+    fn start_rollback_failure_retains_lease_and_requires_abort() {
+        let mut state = LifecycleState {
+            phase: Phase::Starting,
+            runtime: Some(RuntimeLease::test_with_shared_root(
+                "/data/cubelet/start-teardown-failed-test",
+            )),
+            ..Default::default()
+        };
+        apply_start_result(
+            &mut state,
+            Err(StartFailure {
+                error: "start failed; rollback VM failed".to_string(),
+                cleanup: StartCleanup::TeardownUnconfirmed,
+            }),
+        );
+
+        assert_eq!(state.phase, Phase::Failed);
+        assert!(state.runtime.is_some());
+        assert_eq!(stop_teardown_action(state.phase), StopTeardownAction::Abort);
+    }
+
+    #[tokio::test]
+    async fn teardown_is_confirmed_before_release_and_failure_retains_lease() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let teardown_events = events.clone();
+        let release_events = events.clone();
+        let result = teardown_then_release(
+            move || async move {
+                teardown_events.lock().unwrap().push("teardown");
+                Ok(TeardownOutcome::normal())
+            },
+            move || async move {
+                release_events.lock().unwrap().push("release");
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(result, CleanupOutcome::Released(TeardownOutcome::normal()));
+        assert_eq!(*events.lock().unwrap(), vec!["teardown", "release"]);
+
+        events.lock().unwrap().clear();
+        let teardown_events = events.clone();
+        let release_events = events.clone();
+        let result = teardown_then_release(
+            move || async move {
+                teardown_events.lock().unwrap().push("teardown");
+                Err("VM still active".to_string())
+            },
+            move || async move {
+                release_events.lock().unwrap().push("release");
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(
+            result,
+            CleanupOutcome::TeardownFailed("VM still active".to_string())
+        );
+        assert_eq!(*events.lock().unwrap(), vec!["teardown"]);
+    }
+
+    #[test]
+    fn pending_release_is_terminal_and_retry_does_not_change_wait_result() {
+        let exited_at = Timestamp {
+            seconds: 1_725_000_000,
+            nanos: 123_456_789,
+            ..Default::default()
+        };
+        let mut state = LifecycleState {
+            phase: Phase::ReleasePending,
+            exited_at: Some(exited_at.clone()),
+            exit_status: 0,
+            last_error: Some("release RuntimeResource: unavailable".to_string()),
+            ..Default::default()
+        };
+        let before = terminal_wait_response(&state).unwrap();
+
+        freeze_exit(&mut state, true);
+        state.phase = Phase::Stopped;
+        state.last_error = None;
+        let after = terminal_wait_response(&state).unwrap();
+
+        assert_eq!(before.exit_status, after.exit_status);
+        assert_eq!(before.exited_at, after.exited_at);
+        assert_eq!(after.exit_status, 0);
+        assert_eq!(after.exited_at.as_ref(), Some(&exited_at));
     }
 
     #[test]
