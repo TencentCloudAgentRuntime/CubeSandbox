@@ -107,3 +107,48 @@ PID 文件确实不存在（`NotFound`）表示 VM 创建未开始，允许 hand
 SHA 和资源集合断言；节点最终 `Ready=True`、`DiskPressure=False`、根盘使用率 56%。
 同一 reviewer 对实现迭代、脚本修正和最终云证据均给出 `APPROVE`。S3.1b 因此为
 `DONE`；投射卷动态更新与 subPath 进入 S3.1c。
+
+## S3.1c 投射卷与 subPath
+
+### 资产与执行
+
+- 验收脚本 commit：`20881f71dd21c48d83f32adf1d01a2257472a8ec`。
+- 脚本 SHA-256：
+  `2bcda47e00617640956ab4e3e9bfc63b02f9b6d23057a56cb6d529ffa30e4aaa`。
+- 私有 COS 对象：`s3.1c/verify-s31c-projected-volumes-cloud-2bcda47e.sh`。
+- CVM：`ins-pl7mznaa`；最终执行：`inv-a83th50gfh`，状态 `SUCCESS`。
+- 云端证据目录：
+  `/data/cubelet/s3.1-evidence/s3.1c-projected-20260831T195803Z`。
+- 同一 reviewer 对脚本各次修订和最终云证据均给出 `APPROVE`。
+
+### Kubernetes 语义矩阵
+
+默认 runc Pod 与 `RuntimeClass=Cube` Pod 均含 writer、peer 两个容器。ConfigMap、
+Secret、projected 和 downwardAPI 的默认 mode、逐 item mode、启动值均与预期一致；
+五个只读目标全部拒绝写入。更新 ConfigMap、Secret 和 Pod label 后，writer、peer
+在 runc 侧 1 秒、Cube 侧 0 秒读到完整 `v2` 集合，300 秒硬超时未触发。
+
+Host 与 Cube Guest 中四类 atomic-writer `..data` target 和 inode 均发生变化；
+ConfigMap `subPath` 在两种 runtime 中仍保持 `v1`，inode 也保持不变。Cube 的固定
+Volume share inode、Task generation 精确集合、writer/peer container ID、Sandbox、
+shim PID/starttime、VM runtime inode，以及 Host mount 的
+`ID,TARGET,FSTYPE,OPTIONS` 均未变化。旧 subPath generation 被 kubelet 删除后，
+`findmnt` 只允许 Cube Pod 对应的唯一 source 出现 `//deleted` 后缀；规范化该后缀后
+source 集合精确相等。
+
+因此 `cubeVolumes cache=none` 可以保持 Kubernetes atomic-writer 动态投射语义，
+`K8S-OQ-007` 转为 `DECIDED`。首版支持 ConfigMap、Secret、projected、downwardAPI
+启动注入和动态更新；subPath 遵循 Kubernetes 的固定快照语义，不随主卷更新。
+
+### 清理
+
+删除两个 Pod 和测试对象后，第 46 次 100ms 轮询恢复完整 baseline；两个 kubelet
+Pod 目录均删除，active lease 为 0，durable tombstone 精确增加 1。最终摘要为：
+
+```text
+S31C_PROJECTED_OK runc_latency=1s cube_latency=0s startup_modes=ok atomic_host=changed atomic_guest=changed multi_container_updates=ok subpath_value=v1 subpath_inode=stable host_mount_ids=stable shim=stable vm=stable
+S31C_BASELINE_CLEAN tag=after wait_attempt=46 lease_records=394
+S31C_DONE active_leases=0 durable_tombstone_delta=1 kubelet_pod_dirs=removed
+```
+
+S3.1c 因此为 `DONE`；S3.1d 继续执行全量回归并冻结支持矩阵。
