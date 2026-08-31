@@ -19,6 +19,7 @@ use tokio::process::Command;
 
 use crate::common::utils::ADDRESS_FILE;
 use crate::service::bootstrap::{BootstrapParams, BootstrapResult};
+use crate::service::runtime_resource;
 use crate::service::sandbox_srv::SandboxService;
 use crate::service::srv::Service;
 
@@ -29,6 +30,9 @@ pub async fn run(runtime_id: &str, flags: Flags) -> Result<(), Error> {
     match flags.action.as_str() {
         "start" => start(flags).await,
         "delete" => delete(runtime_id, flags).await,
+        runtime_resource::RUNTIME_REAPER_ACTION => runtime_resource::run_persisted_reaper()
+            .await
+            .map_err(Error::Other),
         _ => serve(runtime_id, flags).await,
     }
 }

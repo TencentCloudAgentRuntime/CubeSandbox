@@ -60,11 +60,19 @@ func main() {
 	bundle := filepath.Join(stateDir, "io.containerd.sandbox.controller.v1.shim", "s11-crash", sandboxID)
 	record := filepath.Join(bundle, "cube-runtime-resource.json")
 	must(waitFor(5*time.Second, func() bool { return regularFile(record) }))
+	readyFile, continueFile := os.Getenv("S11_CRASH_READY_FILE"), os.Getenv("S11_CRASH_CONTINUE_FILE")
+	if (readyFile == "") != (continueFile == "") {
+		panic("S11_CRASH_READY_FILE and S11_CRASH_CONTINUE_FILE must be set together")
+	}
+	if readyFile != "" {
+		must(os.WriteFile(readyFile, []byte(record+"\n"), 0o600))
+		must(waitFor(60*time.Second, func() bool { return regularFile(continueFile) }))
+	}
 	pid, err := findShimPID(sandboxID)
 	must(err)
 	must(syscall.Kill(pid, syscall.SIGKILL))
-	must(waitFor(15*time.Second, func() bool { return regularFile(marker) }))
-	must(waitFor(15*time.Second, func() bool {
+	must(waitFor(60*time.Second, func() bool { return regularFile(marker) }))
+	must(waitFor(60*time.Second, func() bool {
 		_, err := os.Stat(bundle)
 		return errors.Is(err, os.ErrNotExist)
 	}))
@@ -76,7 +84,11 @@ func main() {
 	if regularFile(record) {
 		panic("RuntimeResource cleanup record survived dead-shim delete action")
 	}
-	fmt.Printf("S11_SHIM_KILL_RELEASE_OK pid=%d marker=%s", pid, data)
+	result := "S11_SHIM_KILL_RELEASE_OK"
+	if readyFile != "" {
+		result = "S11_SHIM_KILL_RETRY_RELEASE_OK"
+	}
+	fmt.Printf("%s pid=%d marker=%s", result, pid, data)
 }
 
 func criPodSandboxConfig() []byte {

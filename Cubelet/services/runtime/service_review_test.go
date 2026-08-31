@@ -17,16 +17,25 @@ import (
 )
 
 type controlledServiceAdapter struct {
-	base            *serviceFakeAdapter
-	invalidPrepared bool
-	releaseErr      error
-	releaseStarted  chan struct{}
-	releaseContinue chan struct{}
-	startedOnce     sync.Once
+	base              *serviceFakeAdapter
+	invalidPrepared   bool
+	prepareErr        error
+	cancelPrepare     context.CancelFunc
+	releaseErr        error
+	releaseContextErr error
+	releaseStarted    chan struct{}
+	releaseContinue   chan struct{}
+	startedOnce       sync.Once
 }
 
 func (a *controlledServiceAdapter) Prepare(ctx context.Context, request *runtimev1.PrepareSandboxRequest, lease state.Lease) (*runtimev1.PreparedSandbox, error) {
 	prepared, err := a.base.Prepare(ctx, request, lease)
+	if a.cancelPrepare != nil {
+		a.cancelPrepare()
+	}
+	if err == nil && a.prepareErr != nil {
+		return nil, a.prepareErr
+	}
 	if err == nil && a.invalidPrepared {
 		prepared.Network.Ips = nil
 	}
@@ -34,6 +43,7 @@ func (a *controlledServiceAdapter) Prepare(ctx context.Context, request *runtime
 }
 
 func (a *controlledServiceAdapter) Release(ctx context.Context, request state.ReleaseRequest, networkHandle string) error {
+	a.releaseContextErr = ctx.Err()
 	if a.releaseStarted != nil {
 		a.startedOnce.Do(func() { close(a.releaseStarted) })
 		<-a.releaseContinue
@@ -52,7 +62,7 @@ func (a *controlledServiceAdapter) OpenTap(binding handoff.Binding) (*os.File, e
 	return a.base.OpenTap(binding)
 }
 
-func TestValidatePreparedRollbackFailurePreservesPreparingLease(t *testing.T) {
+func TestValidatePreparedRollbackFailurePreservesReleasingLease(t *testing.T) {
 	ctx := context.Background()
 	store, err := state.Open(t.TempDir(), serviceGenerator())
 	if err != nil {
@@ -64,11 +74,11 @@ func TestValidatePreparedRollbackFailurePreservesPreparingLease(t *testing.T) {
 	}
 	service, _ := newTestService(t, store, adapter)
 	_, err = service.PrepareSandbox(ctx, serviceRequest("sandbox-rollback", 1, "prepare-rollback"))
-	if err == nil || !strings.Contains(err.Error(), "rollback: injected cleanup failure") {
+	if err == nil || !strings.Contains(err.Error(), "rollback:") || !strings.Contains(err.Error(), "injected cleanup failure") {
 		t.Fatalf("prepare error=%v", err)
 	}
 	record, err := store.Inspect("sandbox-rollback")
-	if err != nil || record.Active == nil || record.Active.Phase != state.PhasePreparing {
+	if err != nil || record.Active == nil || record.Active.Phase != state.PhaseReleasing {
 		t.Fatalf("record=%+v err=%v", record, err)
 	}
 

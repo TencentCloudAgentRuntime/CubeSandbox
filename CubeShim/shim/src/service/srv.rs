@@ -71,9 +71,7 @@ impl Shim for Service {
             }
         }
 
-        runtime_resource::release_persisted()
-            .await
-            .map_err(|error| Error::Other(format!("release persisted RuntimeResource: {error}")))?;
+        runtime_resource::handoff_persisted_to_reaper().map_err(Error::Other)?;
 
         if let Ok(sk_file) = tools::read_address(ADDRESS_FILE) {
             let _ = fs::remove_file(sk_file.as_str());

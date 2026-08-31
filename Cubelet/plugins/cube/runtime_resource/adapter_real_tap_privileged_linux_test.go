@@ -19,7 +19,7 @@ const privilegedRuntimeResourceTest = "CUBE_RUNTIME_RESOURCE_PRIVILEGED_TEST"
 type realTapNetwork struct{}
 
 func (realTapNetwork) Prepare(ctx context.Context, netnsPath, _, tapName string) (*runtimev1.NetworkAttachment, error) {
-	if output, err := exec.CommandContext(ctx, "nsenter", "--net="+netnsPath, "--", "ip", "tuntap", "add", "dev", tapName, "mode", "tap", "vnet_hdr").CombinedOutput(); err != nil {
+	if output, err := exec.CommandContext(ctx, "nsenter", "--net="+netnsPath, "--", "ip", "tuntap", "add", "dev", tapName, "mode", "tap", "multi_queue", "vnet_hdr").CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("create integration TAP: %w: %s", err, output)
 	}
 	return &runtimev1.NetworkAttachment{

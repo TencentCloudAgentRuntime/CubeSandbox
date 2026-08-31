@@ -80,6 +80,9 @@ func TestLinuxNetworkPrepareBuildsTcRedirectAndGuestConfig(t *testing.T) {
 			filters++
 		}
 	}
+	if !strings.Contains(strings.Join(runner.commands, "\n"), "ip tuntap add dev cb123 mode tap multi_queue vnet_hdr") {
+		t.Fatalf("multi-queue TAP create missing: %v", runner.commands)
+	}
 	if filters != 2 {
 		t.Fatalf("tc redirect filters=%d commands=%v", filters, runner.commands)
 	}

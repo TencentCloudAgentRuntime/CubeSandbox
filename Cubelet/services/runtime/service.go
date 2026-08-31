@@ -12,6 +12,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/kmutex"
@@ -23,6 +24,8 @@ import (
 )
 
 const (
+	cleanupTimeout = 30 * time.Second
+
 	APIVersion          uint32 = 1
 	ServiceMode                = "node-resources-only"
 	CapabilityAssets           = "io.cubesandbox.runtime.assets"
@@ -98,33 +101,23 @@ func (s *Service) Recover(ctx context.Context) error {
 				return fmt.Errorf("republish READY sandbox %s: %w", sandboxID, err)
 			}
 		case state.PhasePreparing:
-			prepared, inspectErr := s.adapter.Inspect(ctx, sandboxID, lease)
-			if inspectErr != nil && !errors.Is(inspectErr, os.ErrNotExist) {
-				return fmt.Errorf("inspect PREPARING resources for %s: %w", sandboxID, inspectErr)
+			release := state.ReleaseRequest{
+				SandboxID: sandboxID, Generation: lease.Generation, LeaseID: lease.LeaseID,
+				IdempotencyKey: releaseKey(sandboxID, lease.Generation, lease.LeaseID),
 			}
-			if inspectErr == nil {
-				if err := s.adapter.Release(ctx, state.ReleaseRequest{
-					SandboxID: sandboxID, Generation: lease.Generation, LeaseID: lease.LeaseID,
-				}, networkHandle(prepared)); err != nil {
-					return fmt.Errorf("rollback PREPARING resources for %s: %w", sandboxID, err)
-				}
-			}
-			if err := s.coordinator.AbandonPrepare(sandboxID, lease.Generation, lease.LeaseID); err != nil {
-				return fmt.Errorf("tombstone PREPARING sandbox %s: %w", sandboxID, err)
+			if err := s.releaseLocked(ctx, release); err != nil {
+				return fmt.Errorf("rollback PREPARING resources for %s: %w", sandboxID, err)
 			}
 		case state.PhaseReleasing:
+			if err := s.coordinator.RecoverSandbox(sandboxID); err != nil {
+				return fmt.Errorf("recover RELEASING fence for %s: %w", sandboxID, err)
+			}
 			release := state.ReleaseRequest{
 				SandboxID: sandboxID, Generation: lease.Generation, LeaseID: lease.LeaseID,
 				IdempotencyKey: lease.ReleaseKey,
 			}
-			if err := s.coordinator.RecoverSandbox(sandboxID); err != nil {
-				return fmt.Errorf("recover RELEASING fence for %s: %w", sandboxID, err)
-			}
-			if err := s.adapter.Release(ctx, release, lease.NetworkHandle); err != nil {
+			if err := s.releaseLocked(ctx, release); err != nil {
 				return fmt.Errorf("finish RELEASING resources for %s: %w", sandboxID, err)
-			}
-			if err := s.coordinator.CompleteRelease(release); err != nil {
-				return fmt.Errorf("tombstone RELEASING sandbox %s: %w", sandboxID, err)
 			}
 		default:
 			return fmt.Errorf("sandbox %s has unsupported phase %q", sandboxID, lease.Phase)
@@ -174,39 +167,67 @@ func (s *Service) PrepareSandbox(ctx context.Context, request *runtimev1.Prepare
 
 	prepared, err := s.adapter.Prepare(ctx, request, result.Lease)
 	if err != nil {
-		if result.Lease.Phase == state.PhasePreparing {
-			rollbackErr := s.adapter.Release(ctx, state.ReleaseRequest{
-				SandboxID: request.GetSandboxId(), Generation: request.GetGeneration(), LeaseID: result.Lease.LeaseID,
-			}, result.Lease.NetworkHandle)
-			if rollbackErr == nil {
-				rollbackErr = s.coordinator.AbandonPrepare(request.GetSandboxId(), request.GetGeneration(), result.Lease.LeaseID)
-			}
-			if rollbackErr != nil {
-				return nil, status.Errorf(codes.Internal, "prepare resources: %v; rollback: %v", err, rollbackErr)
-			}
+		if rollbackErr := s.cleanupFailedPrepare(request, result.Lease); rollbackErr != nil {
+			return nil, status.Errorf(codes.Internal, "prepare resources: %v; rollback: %v", err, rollbackErr)
 		}
 		return nil, status.Errorf(codes.Internal, "prepare resources: %v", err)
 	}
 	if err := validatePrepared(request, prepared); err != nil {
-		if result.Lease.Phase == state.PhasePreparing {
-			rollbackErr := s.adapter.Release(ctx, state.ReleaseRequest{
-				SandboxID: request.GetSandboxId(), Generation: request.GetGeneration(), LeaseID: result.Lease.LeaseID,
-			}, networkHandle(prepared))
-			if rollbackErr == nil {
-				rollbackErr = s.coordinator.AbandonPrepare(request.GetSandboxId(), request.GetGeneration(), result.Lease.LeaseID)
-			}
-			if rollbackErr != nil {
-				return nil, status.Errorf(codes.Internal, "validate prepared resources: %v; rollback: %v", err, rollbackErr)
-			}
+		if rollbackErr := s.cleanupFailedPrepare(request, result.Lease); rollbackErr != nil {
+			return nil, status.Errorf(codes.Internal, "validate prepared resources: %v; rollback: %v", err, rollbackErr)
 		}
 		return nil, status.Errorf(codes.Internal, "validate prepared resources: %v", err)
 	}
 	lease, err := s.coordinator.MarkReadyAndPublish(request.GetSandboxId(), request.GetGeneration(), result.Lease.LeaseID, prepared.GetNetwork().GetNetworkHandle())
 	if err != nil {
-		return nil, err
+		if rollbackErr := s.cleanupFailedPrepare(request, result.Lease); rollbackErr != nil {
+			return nil, status.Errorf(codes.Internal, "mark RuntimeResource ready: %v; rollback: %v", err, rollbackErr)
+		}
+		return nil, status.Errorf(codes.Internal, "mark RuntimeResource ready: %v", err)
 	}
 	bindPrepared(prepared, request.GetSandboxId(), request.GetGeneration(), lease, s.fdEndpoint)
 	return &runtimev1.PrepareSandboxResponse{Sandbox: prepared, Reused: result.Reused}, nil
+}
+
+func (s *Service) cleanupFailedPrepare(request *runtimev1.PrepareSandboxRequest, lease state.Lease) error {
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	if err := s.coordinator.RecoverSandbox(request.GetSandboxId()); err != nil {
+		return fmt.Errorf("resynchronize failed Prepare: %w", err)
+	}
+	return s.releaseLocked(ctx, state.ReleaseRequest{
+		SandboxID: request.GetSandboxId(), Generation: request.GetGeneration(), LeaseID: lease.LeaseID,
+		IdempotencyKey: releaseKey(request.GetSandboxId(), request.GetGeneration(), lease.LeaseID),
+	})
+}
+
+func (s *Service) releaseLocked(ctx context.Context, release state.ReleaseRequest) error {
+	before, err := s.store.Inspect(release.SandboxID)
+	if status.Code(err) == codes.NotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	result, err := s.coordinator.BeginReleaseAndFence(release)
+	if err != nil {
+		return err
+	}
+	if before.Active == nil {
+		return nil
+	}
+	if err := s.adapter.Release(ctx, release, result.Lease.NetworkHandle); err != nil {
+		return status.Errorf(codes.Internal, "release node resources: %v", err)
+	}
+	if err := s.coordinator.CompleteRelease(release); err != nil {
+		return err
+	}
+	return nil
+}
+
+func releaseKey(sandboxID string, generation uint64, leaseID string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("cube-runtime-release-v1:%s:%d:%s", sandboxID, generation, leaseID)))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Service) ReleaseSandbox(ctx context.Context, request *runtimev1.ReleaseSandboxRequest) (*runtimev1.ReleaseSandboxResponse, error) {
@@ -218,18 +239,7 @@ func (s *Service) ReleaseSandbox(ctx context.Context, request *runtimev1.Release
 	}
 	defer s.operations.Unlock(request.GetSandboxId())
 	release := state.ReleaseRequest{SandboxID: request.GetSandboxId(), Generation: request.GetGeneration(), LeaseID: request.GetLeaseId(), IdempotencyKey: request.GetIdempotencyKey()}
-	before, inspectErr := s.store.Inspect(request.GetSandboxId())
-	result, err := s.coordinator.BeginReleaseAndFence(release)
-	if err != nil {
-		return nil, err
-	}
-	if inspectErr == nil && before.Active == nil {
-		return &runtimev1.ReleaseSandboxResponse{Released: true}, nil
-	}
-	if err := s.adapter.Release(ctx, release, result.Lease.NetworkHandle); err != nil {
-		return nil, status.Errorf(codes.Internal, "release node resources: %v", err)
-	}
-	if err := s.coordinator.CompleteRelease(release); err != nil {
+	if err := s.releaseLocked(ctx, release); err != nil {
 		return nil, err
 	}
 	return &runtimev1.ReleaseSandboxResponse{Released: true}, nil

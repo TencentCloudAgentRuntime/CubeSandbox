@@ -88,7 +88,7 @@ func (n *linuxNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, ta
 	}
 
 	if _, err := n.runner.Run(ctx, netnsPath, "ip", "link", "show", "dev", tapName); err != nil {
-		if _, createErr := n.runner.Run(ctx, netnsPath, "ip", "tuntap", "add", "dev", tapName, "mode", "tap", "vnet_hdr"); createErr != nil {
+		if _, createErr := n.runner.Run(ctx, netnsPath, "ip", "tuntap", "add", "dev", tapName, "mode", "tap", "multi_queue", "vnet_hdr"); createErr != nil {
 			return nil, createErr
 		}
 	}
@@ -355,7 +355,7 @@ func openTap(tapName string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	request.SetUint16(uint16(unix.IFF_TAP | unix.IFF_NO_PI | unix.IFF_VNET_HDR | unix.IFF_ONE_QUEUE))
+	request.SetUint16(uint16(unix.IFF_TAP | unix.IFF_NO_PI | unix.IFF_VNET_HDR | unix.IFF_MULTI_QUEUE))
 	fd, err := unix.Open("/dev/net/tun", os.O_RDWR|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err

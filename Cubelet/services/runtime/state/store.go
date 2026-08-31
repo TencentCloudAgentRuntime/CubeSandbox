@@ -7,6 +7,7 @@ package state
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -167,6 +168,17 @@ func Open(dir string, generator ValueGenerator, options ...OpenOption) (*Store, 
 	return store, nil
 }
 
+func leaseIDForPrepare(request PrepareRequest) string {
+	hasher := sha256.New()
+	for _, part := range [][]byte{[]byte("cube-runtime-resource-lease-v1"), []byte(request.SandboxID), []byte(strconv.FormatUint(request.Generation, 10)), []byte(request.IdempotencyKey)} {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(part)))
+		_, _ = hasher.Write(size[:])
+		_, _ = hasher.Write(part)
+	}
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
 func randomValue() (string, error) {
 	var value [32]byte
 	if _, err := rand.Read(value[:]); err != nil {
@@ -217,10 +229,7 @@ func (s *Store) Prepare(request PrepareRequest) (*PrepareResult, error) {
 		return nil, status.Error(codes.FailedPrecondition, "prepare generation is at or below the durable high-watermark")
 	}
 
-	leaseID, err := s.generate()
-	if err != nil {
-		return nil, status.Error(codes.Unavailable, err.Error())
-	}
+	leaseID := leaseIDForPrepare(request)
 	token, err := s.generate()
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())

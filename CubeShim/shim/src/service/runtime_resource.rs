@@ -5,7 +5,7 @@
 
 use hyper_util::rt::TokioIo;
 use nix::cmsg_space;
-use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
+use nix::sys::socket::{recvmsg, MsgFlags};
 use oci_spec::runtime::Spec;
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use std::io::{IoSliceMut, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 use tokio::net::UnixStream;
 use tonic::codegen::http::uri::PathAndQuery;
@@ -41,6 +43,9 @@ const ANNO_SANDBOX_NAME: &str = "io.kubernetes.cri.sandbox-name";
 const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const CRI_V1_POD_SANDBOX_CONFIG: &str = "runtime.v1.PodSandboxConfig";
 const RUNTIME_CLEANUP_RECORD: &str = "cube-runtime-resource.json";
+const RUNTIME_REAPER_ROOT_ENV: &str = "CUBE_RUNTIME_RESOURCE_REAPER_DIR";
+const DEFAULT_RUNTIME_REAPER_ROOT: &str = "/run/cubesandbox/runtime-resource-reaper";
+pub(crate) const RUNTIME_REAPER_ACTION: &str = "runtime-resource-reaper";
 
 const REQUIRED_CAPABILITIES: [(&str, u32); 3] = [
     ("io.cubesandbox.runtime.assets", 1),
@@ -352,12 +357,30 @@ impl RuntimeLease {
         let parent = path
             .parent()
             .ok_or_else(|| format!("cleanup record has no parent: {}", path.display()))?;
+        if let Some(existing) = load_cleanup_record_at(path)? {
+            if existing == self.cleanup_record() {
+                return Ok(());
+            }
+            return Err(format!(
+                "refuse to replace mismatched RuntimeResource cleanup record {}",
+                path.display()
+            ));
+        }
         let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+        match std::fs::remove_file(&temp) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "remove stale RuntimeResource cleanup temp {}: {error}",
+                    temp.display()
+                ))
+            }
+        }
         let data = serde_json::to_vec(&self.cleanup_record())
             .map_err(|error| format!("encode RuntimeResource cleanup record: {error}"))?;
         let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .open(&temp)
             .map_err(|error| {
@@ -366,20 +389,20 @@ impl RuntimeLease {
                     temp.display()
                 )
             })?;
-        file.write_all(&data)
-            .and_then(|_| file.sync_all())
-            .map_err(|error| {
-                format!(
-                    "persist RuntimeResource cleanup record {}: {error}",
-                    temp.display()
-                )
-            })?;
-        std::fs::rename(&temp, path).map_err(|error| {
-            format!(
+        if let Err(error) = file.write_all(&data).and_then(|_| file.sync_all()) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(format!(
+                "persist RuntimeResource cleanup record {}: {error}",
+                temp.display()
+            ));
+        }
+        if let Err(error) = std::fs::rename(&temp, path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(format!(
                 "commit RuntimeResource cleanup record {}: {error}",
                 path.display()
-            )
-        })?;
+            ));
+        }
         std::fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|error| {
@@ -502,6 +525,128 @@ pub(crate) async fn release_persisted() -> Result<(), String> {
     }
     .release()
     .await
+}
+
+pub(crate) async fn release_persisted_until_done() {
+    retry_until_success(
+        release_persisted,
+        Duration::from_millis(100),
+        Duration::from_secs(5),
+    )
+    .await;
+}
+
+fn reaper_root() -> Result<PathBuf, String> {
+    let root = std::env::var_os(RUNTIME_REAPER_ROOT_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_RUNTIME_REAPER_ROOT));
+    if !root.is_absolute() {
+        return Err(format!(
+            "{RUNTIME_REAPER_ROOT_ENV} must be an absolute path: {}",
+            root.display()
+        ));
+    }
+    Ok(root)
+}
+
+fn reaper_job_id(record: &RuntimeCleanupRecord) -> Result<String, String> {
+    let data = serde_json::to_vec(record)
+        .map_err(|error| format!("encode RuntimeResource reaper identity: {error}"))?;
+    Ok(format!("{:x}", Sha256::digest(data)))
+}
+
+/// Move dead-shim cleanup ownership out of the containerd bundle before the
+/// delete action returns. containerd kills delete helpers after a short fixed
+/// timeout, so the exact lease is retried by a session-detached reaper whose
+/// durable record is not removed with the bundle.
+pub(crate) fn handoff_persisted_to_reaper() -> Result<(), String> {
+    let source = runtime_cleanup_record_path()?;
+    let Some(record) = load_cleanup_record_at(&source)? else {
+        return Ok(());
+    };
+    let root = reaper_root()?;
+    let job = root.join(reaper_job_id(&record)?);
+    std::fs::create_dir_all(&job).map_err(|error| {
+        format!(
+            "create RuntimeResource reaper job {}: {error}",
+            job.display()
+        )
+    })?;
+    let lease = RuntimeLease {
+        endpoint: record.endpoint.clone(),
+        sandbox: PreparedSandbox {
+            sandbox_id: record.sandbox_id.clone(),
+            lease_id: record.lease_id.clone(),
+            generation: record.generation,
+            ..Default::default()
+        },
+    };
+    lease.persist_cleanup_record_at(&job.join(RUNTIME_CLEANUP_RECORD))?;
+
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("resolve RuntimeResource reaper executable: {error}"))?;
+    let mut command = Command::new(executable);
+    command
+        .current_dir(&job)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .args([
+            "-namespace",
+            "cube-runtime-reaper",
+            "-id",
+            record.sandbox_id.as_str(),
+            RUNTIME_REAPER_ACTION,
+        ]);
+    // SAFETY: setsid is async-signal-safe and the closure performs no
+    // allocation or other work between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn().map_err(|error| {
+        format!(
+            "spawn RuntimeResource reaper for {}: {error}",
+            record.sandbox_id
+        )
+    })?;
+    Ok(())
+}
+
+pub(crate) async fn run_persisted_reaper() -> Result<(), String> {
+    release_persisted_until_done().await;
+    let job = std::env::current_dir()
+        .map_err(|error| format!("resolve RuntimeResource reaper job: {error}"))?;
+    match std::fs::remove_dir(&job) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "remove RuntimeResource reaper job {}: {error}",
+            job.display()
+        )),
+    }
+}
+
+async fn retry_until_success<F, Fut>(mut operation: F, initial_delay: Duration, max_delay: Duration)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let mut delay = initial_delay;
+    loop {
+        match operation().await {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!("retry persisted RuntimeResource release after error: {error}");
+                tokio::time::sleep(delay).await;
+                delay = std::cmp::min(delay.saturating_mul(2), max_delay);
+            }
+        }
+    }
 }
 
 struct RuntimeResourceClient {
@@ -705,9 +850,24 @@ pub(crate) async fn prepare(
     let annotations = spec.annotations().as_ref().cloned().unwrap_or_default();
     let resources = resources_from_config(&annotations, config)?;
     let generation = u64::from(metadata.attempt) + 1;
+    let dns = cri_dns_entries(config.dns_config.as_ref())?;
+    let idempotency_key = prepare_key(sandbox_id, generation);
+    let expected_lease_id = lease_id_for_prepare(sandbox_id, generation, &idempotency_key);
+    let cleanup_lease = RuntimeLease {
+        endpoint: endpoint.clone(),
+        sandbox: PreparedSandbox {
+            sandbox_id: sandbox_id.to_string(),
+            lease_id: expected_lease_id.clone(),
+            generation,
+            ..Default::default()
+        },
+    };
+    cleanup_lease.persist_cleanup_record().map_err(|error| {
+        format!("persist RuntimeResource cleanup identity before Prepare: {error}")
+    })?;
     let request = PrepareSandboxRequest {
         sandbox_id: sandbox_id.to_string(),
-        idempotency_key: prepare_key(sandbox_id, generation),
+        idempotency_key,
         generation,
         pod: Some(PodIdentity {
             uid: metadata.uid.clone(),
@@ -720,31 +880,45 @@ pub(crate) async fn prepare(
             netns_path: netns_path.to_string(),
             interface_name: "eth0".to_string(),
             pod_ip: String::new(),
-            dns: cri_dns_entries(config.dns_config.as_ref())?,
+            dns,
         }),
     };
-    let response: PrepareSandboxResponse = client
+    let response: PrepareSandboxResponse = match client
         .unary(
             request,
             "/cubelet.services.runtime.v1.RuntimeResource/PrepareSandbox",
         )
-        .await?;
-    let sandbox = response
-        .sandbox
-        .ok_or_else(|| "Cubelet returned no prepared sandbox".to_string())?;
-    validate_prepared(sandbox_id, generation, &sandbox)?;
-    inject_annotations(spec, &resources, &sandbox)?;
-    let lease = RuntimeLease { endpoint, sandbox };
-    if let Err(error) = lease.persist_cleanup_record() {
-        let release_error = lease.release().await.err();
-        return Err(match release_error {
-            Some(release_error) => format!(
-                "persist RuntimeResource cleanup identity: {error}; release RuntimeResource: {release_error}"
-            ),
-            None => format!("persist RuntimeResource cleanup identity: {error}"),
-        });
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => return Err(release_after_prepare_error(&cleanup_lease, error).await),
+    };
+    let sandbox = match response.sandbox {
+        Some(sandbox) => sandbox,
+        None => {
+            return Err(release_after_prepare_error(
+                &cleanup_lease,
+                "Cubelet returned no prepared sandbox".to_string(),
+            )
+            .await)
+        }
+    };
+    if let Err(error) = validate_prepared(sandbox_id, generation, &expected_lease_id, &sandbox) {
+        return Err(release_after_prepare_error(&cleanup_lease, error).await);
     }
-    Ok(lease)
+    if let Err(error) = inject_annotations(spec, &resources, &sandbox) {
+        return Err(release_after_prepare_error(&cleanup_lease, error).await);
+    }
+    Ok(RuntimeLease { endpoint, sandbox })
+}
+
+async fn release_after_prepare_error(lease: &RuntimeLease, error: String) -> String {
+    match lease.release().await {
+        Ok(()) => error,
+        Err(release_error) => {
+            format!("{error}; release RuntimeResource: {release_error}")
+        }
+    }
 }
 
 fn preflight_runtime_environment_at(
@@ -838,11 +1012,12 @@ fn validate_capabilities(response: &GetCapabilitiesResponse) -> Result<(), Strin
 fn validate_prepared(
     sandbox_id: &str,
     generation: u64,
+    expected_lease_id: &str,
     sandbox: &PreparedSandbox,
 ) -> Result<(), String> {
     if sandbox.sandbox_id != sandbox_id
         || sandbox.generation != generation
-        || sandbox.lease_id.is_empty()
+        || sandbox.lease_id != expected_lease_id
     {
         return Err("Cubelet returned mismatched prepared sandbox identity".to_string());
     }
@@ -1048,6 +1223,46 @@ fn network_json(network: &NetworkAttachment) -> Result<String, String> {
     serde_json::to_string(&config).map_err(|error| format!("serialize Cube network: {error}"))
 }
 
+fn cmsg_align(length: usize) -> usize {
+    let alignment = std::mem::size_of::<usize>();
+    (length + alignment - 1) & !(alignment - 1)
+}
+
+fn visible_scm_rights(control: &[u8]) -> Vec<RawFd> {
+    let header_size = std::mem::size_of::<libc::cmsghdr>();
+    let data_offset = cmsg_align(header_size);
+    let mut descriptors = Vec::new();
+    let mut offset = 0;
+    while control.len().saturating_sub(offset) >= header_size {
+        // recvmsg initialized this aligned control buffer. read_unaligned also
+        // keeps this parser correct if a future allocator changes alignment.
+        let header = unsafe {
+            std::ptr::read_unaligned(control.as_ptr().add(offset).cast::<libc::cmsghdr>())
+        };
+        let message_len = header.cmsg_len as usize;
+        if message_len < data_offset {
+            break;
+        }
+        let available_end = std::cmp::min(offset.saturating_add(message_len), control.len());
+        let data_start = offset + data_offset;
+        if header.cmsg_level == libc::SOL_SOCKET && header.cmsg_type == libc::SCM_RIGHTS {
+            for chunk in
+                control[data_start..available_end].chunks_exact(std::mem::size_of::<RawFd>())
+            {
+                let descriptor = i32::from_ne_bytes(chunk.try_into().unwrap());
+                if descriptor >= 0 {
+                    descriptors.push(descriptor);
+                }
+            }
+        }
+        if offset.saturating_add(message_len) > control.len() {
+            break;
+        }
+        offset = offset.saturating_add(cmsg_align(message_len));
+    }
+    descriptors
+}
+
 fn acquire_tap_blocking(sandbox: &PreparedSandbox) -> Result<std::fs::File, String> {
     let network = sandbox.network.as_ref().unwrap();
     let descriptor = network.fd_handoff.as_ref().unwrap();
@@ -1076,29 +1291,18 @@ fn acquire_tap_blocking(sandbox: &PreparedSandbox) -> Result<std::fs::File, Stri
     let mut header = [0_u8; 4];
     let mut iov = [IoSliceMut::new(&mut header)];
     let mut control = cmsg_space!([RawFd; 1]);
-    let (received, truncated, descriptors) = {
+    control.resize(control.capacity(), 0);
+    let (received, truncated) = {
         let message = recvmsg::<()>(
             stream.as_raw_fd(),
             &mut iov,
             Some(&mut control),
-            MsgFlags::empty(),
+            MsgFlags::MSG_CMSG_CLOEXEC,
         )
         .map_err(|error| format!("receive FD handoff response: {error}"))?;
-        let received = message.bytes;
-        let truncated = message.flags.contains(MsgFlags::MSG_CTRUNC);
-        let mut descriptors = Vec::new();
-        if !truncated {
-            for control_message in message
-                .cmsgs()
-                .map_err(|error| format!("decode FD handoff control message: {error}"))?
-            {
-                if let ControlMessageOwned::ScmRights(rights) = control_message {
-                    descriptors.extend(rights);
-                }
-            }
-        }
-        (received, truncated, descriptors)
+        (message.bytes, message.flags.contains(MsgFlags::MSG_CTRUNC))
     };
+    let descriptors = visible_scm_rights(&control);
     drop(iov);
     if truncated {
         close_raw_fds(&descriptors);
@@ -1208,6 +1412,20 @@ fn resources_from_config(
         vcpu_count: cpu,
         memory_bytes,
     })
+}
+
+fn lease_id_for_prepare(sandbox_id: &str, generation: u64, idempotency_key: &str) -> String {
+    let generation = generation.to_string();
+    let mut hasher = Sha256::new();
+    for value in [
+        "cube-runtime-resource-lease-v1".as_bytes(),
+        sandbox_id.as_bytes(),
+        generation.as_bytes(),
+        idempotency_key.as_bytes(),
+    ] {
+        hash_fingerprint_part(&mut hasher, value);
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 fn prepare_key(sandbox_id: &str, generation: u64) -> String {
@@ -1341,6 +1559,7 @@ mod tests {
         listener: std::os::unix::net::UnixListener,
         fragment_header: bool,
         descriptor_count: usize,
+        descriptor_root: Option<PathBuf>,
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1359,7 +1578,14 @@ mod tests {
             .encode_to_vec();
             let header = (response.len() as u32).to_be_bytes();
             let files: Vec<_> = (0..descriptor_count)
-                .map(|_| std::fs::File::open("/dev/null").unwrap())
+                .map(|index| match &descriptor_root {
+                    Some(root) => {
+                        let path = root.join(format!("sent-fd-{index}"));
+                        std::fs::write(&path, b"fd").unwrap();
+                        std::fs::File::open(path).unwrap()
+                    }
+                    None => std::fs::File::open("/dev/null").unwrap(),
+                })
                 .collect();
             let rights: Vec<_> = files.iter().map(|file| file.as_raw_fd()).collect();
             let header_bytes = if fragment_header {
@@ -1389,7 +1615,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let socket = root.join("handoff.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        let server = spawn_handoff_server(listener, true, 1);
+        let server = spawn_handoff_server(listener, true, 1, None);
         let file = acquire_tap_blocking(&handoff_sandbox(socket.display().to_string())).unwrap();
         assert!(file.metadata().is_ok());
         drop(file);
@@ -1404,7 +1630,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let socket = root.join("handoff.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        let server = spawn_handoff_server(listener, false, 8);
+        let descriptor_root = root.join("descriptors");
+        std::fs::create_dir_all(&descriptor_root).unwrap();
+        let server = spawn_handoff_server(listener, false, 8, Some(descriptor_root.clone()));
         let error =
             acquire_tap_blocking(&handoff_sandbox(socket.display().to_string())).unwrap_err();
         assert!(
@@ -1412,7 +1640,36 @@ mod tests {
             "{error}"
         );
         server.join().unwrap();
+        let leaked = std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+            .filter(|target| target.starts_with(&descriptor_root))
+            .collect::<Vec<_>>();
+        assert!(leaked.is_empty(), "truncated SCM_RIGHTS leaked {leaked:?}");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn persisted_release_retries_until_cubelet_recovers() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = attempts.clone();
+        retry_until_success(
+            move || {
+                let attempts = attempts.clone();
+                async move {
+                    if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+                        Err("Cubelet unavailable".to_string())
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+            Duration::from_millis(1),
+            Duration::from_millis(2),
+        )
+        .await;
+        assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[test]
@@ -1440,6 +1697,15 @@ mod tests {
 
         let mut stale = lease.clone();
         stale.sandbox.lease_id = "stale".to_string();
+        lease.persist_cleanup_record_at(&path).unwrap();
+        assert!(stale
+            .persist_cleanup_record_at(&path)
+            .unwrap_err()
+            .contains("refuse to replace mismatched"));
+        assert_eq!(
+            reaper_job_id(&lease.cleanup_record()).unwrap(),
+            "6360089b3563afc1bf4bfc9295655f16b89c3219fed1fd26fec9c1755e1b0f1a"
+        );
         assert!(stale
             .remove_cleanup_record_at(&path)
             .unwrap_err()
@@ -1447,6 +1713,14 @@ mod tests {
         assert!(path.is_file());
         lease.remove_cleanup_record_at(&path).unwrap();
         assert_eq!(load_cleanup_record_at(&path).unwrap(), None);
+        let retry_path = root.join("retry.json");
+        let retry_temp = retry_path.with_extension(format!("tmp-{}", std::process::id()));
+        std::fs::write(&retry_temp, b"incomplete").unwrap();
+        lease.persist_cleanup_record_at(&retry_path).unwrap();
+        assert_eq!(
+            load_cleanup_record_at(&retry_path).unwrap(),
+            Some(lease.cleanup_record())
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1459,6 +1733,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(prepare_key("sandbox-a", 1), prepare_key("sandbox-a", 1));
+        assert_eq!(
+            lease_id_for_prepare("sandbox-a", 1, &prepare_key("sandbox-a", 1)),
+            "98f6f3bda4b778a3c2667ad283522c898878638fee09660857c500ff1b3060b8"
+        );
         assert_eq!(release_key(&sandbox), release_key(&sandbox));
         assert_ne!(prepare_key("sandbox-a", 1), release_key(&sandbox));
     }

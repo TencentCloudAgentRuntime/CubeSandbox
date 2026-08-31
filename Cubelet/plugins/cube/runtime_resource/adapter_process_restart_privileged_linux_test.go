@@ -11,11 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -23,6 +25,7 @@ const (
 	privilegedStateDir    = "CUBE_RUNTIME_RESOURCE_PRIVILEGED_STATE_DIR"
 	privilegedAssetsDir   = "CUBE_RUNTIME_RESOURCE_PRIVILEGED_ASSETS_DIR"
 	privilegedNetNSPath   = "CUBE_RUNTIME_RESOURCE_PRIVILEGED_NETNS"
+	privilegedVMMSocketFD = "CUBE_RUNTIME_RESOURCE_PRIVILEGED_VMM_SOCKET_FD"
 )
 
 func privilegedAssets(root string) Assets {
@@ -66,11 +69,18 @@ func TestPrivilegedAdapterRealTapProcessHelper(t *testing.T) {
 		if one.Fd() == two.Fd() {
 			t.Fatalf("retry returned the same descriptor %d", one.Fd())
 		}
+		socketFD, err := strconv.Atoi(os.Getenv(privilegedVMMSocketFD))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Sendmsg(socketFD, []byte{1}, unix.UnixRights(int(one.Fd())), nil, 0); err != nil {
+			t.Fatalf("transfer TAP queue to simulated VMM: %v", err)
+		}
 		one.Close()
 		two.Close()
-		// The canonical descriptor intentionally remains open. Helper exit closes
-		// it exactly as the kernel would close it on a real Cubelet process exit.
-	case "restart-and-release":
+		// The canonical descriptor closes when this simulated Cubelet exits;
+		// the parent retains the transferred VMM duplicate.
+	case "restart-with-live-vmm":
 		prepared, err := current.Inspect(ctx, request.SandboxId, lease)
 		if err != nil {
 			t.Fatal(err)
@@ -81,6 +91,11 @@ func TestPrivilegedAdapterRealTapProcessHelper(t *testing.T) {
 			t.Fatalf("TAP handoff after Cubelet process restart: %v", err)
 		}
 		afterRestart.Close()
+	case "release":
+		prepared, err := current.Inspect(ctx, request.SandboxId, lease)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if err := current.Release(ctx, state.ReleaseRequest{
 			SandboxID: request.SandboxId, Generation: request.Generation, LeaseID: lease.LeaseID,
 		}, prepared.GetNetwork().GetNetworkHandle()); err != nil {
@@ -92,8 +107,8 @@ func TestPrivilegedAdapterRealTapProcessHelper(t *testing.T) {
 }
 
 // This test must run on an isolated privileged Linux host. Separate helper
-// processes prove both real IFF_ONE_QUEUE retry semantics and reopening the
-// persistent TAP from a fresh Cubelet process over the durable adapter WAL.
+// processes prove same-process duplicate retry plus multi-queue reopening from
+// a fresh Cubelet while a simulated VMM still owns the original transferred queue.
 func TestPrivilegedAdapterRealTapAcrossProcessRestart(t *testing.T) {
 	if os.Getenv(privilegedRuntimeResourceTest) != "1" {
 		t.Skip("set " + privilegedRuntimeResourceTest + "=1 on an isolated privileged Linux host")
@@ -125,11 +140,59 @@ func TestPrivilegedAdapterRealTapAcrossProcessRestart(t *testing.T) {
 		privilegedAssetsDir+"="+assetsRoot,
 		privilegedNetNSPath+"="+filepath.Join("/run/netns", name),
 	)
-	for _, stage := range []string{"prepare-and-retry", "restart-and-release"} {
+	runHelper := func(stage string, extra *os.File) {
 		command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPrivilegedAdapterRealTapProcessHelper$")
 		command.Env = append(helperEnv, privilegedHelperStage+"="+stage)
+		if extra != nil {
+			command.ExtraFiles = []*os.File{extra}
+			command.Env = append(command.Env, privilegedVMMSocketFD+"=3")
+		}
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("privileged TAP helper %s: %v:\n%s", stage, err, output)
 		}
 	}
+
+	sockets, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiver := os.NewFile(uintptr(sockets[0]), "simulated-vmm-receiver")
+	sender := os.NewFile(uintptr(sockets[1]), "cubelet-helper-sender")
+	defer receiver.Close()
+
+	runHelper("prepare-and-retry", sender)
+	sender.Close()
+	data := make([]byte, 1)
+	oob := make([]byte, unix.CmsgSpace(4))
+	_, oobn, flags, _, err := unix.Recvmsg(int(receiver.Fd()), data, oob, 0)
+	if err != nil {
+		t.Fatalf("receive simulated VMM TAP queue: %v", err)
+	}
+	if flags&unix.MSG_CTRUNC != 0 {
+		t.Fatal("simulated VMM TAP queue control message was truncated")
+	}
+	messages, err := unix.ParseSocketControlMessage(oob[:oobn])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rights []int
+	for _, message := range messages {
+		descriptors, parseErr := unix.ParseUnixRights(&message)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		rights = append(rights, descriptors...)
+	}
+	if len(rights) != 1 {
+		for _, descriptor := range rights {
+			_ = unix.Close(descriptor)
+		}
+		t.Fatalf("simulated VMM received %d TAP descriptors, want 1", len(rights))
+	}
+	vmmQueue := os.NewFile(uintptr(rights[0]), "simulated-vmm-tap-queue")
+	runHelper("restart-with-live-vmm", nil)
+	if err := vmmQueue.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runHelper("release", nil)
 }
