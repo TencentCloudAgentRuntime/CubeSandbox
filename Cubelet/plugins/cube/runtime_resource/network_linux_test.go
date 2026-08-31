@@ -86,6 +86,12 @@ func TestLinuxNetworkPrepareBuildsTcRedirectAndGuestConfig(t *testing.T) {
 	if filters != 2 {
 		t.Fatalf("tc redirect filters=%d commands=%v", filters, runner.commands)
 	}
+	joined := strings.Join(runner.commands, "\n")
+	neighbor := strings.Index(joined, "ip -j neigh show dev eth0")
+	redirect := strings.Index(joined, "tc filter replace dev eth0")
+	if neighbor < 0 || redirect < 0 || neighbor > redirect {
+		t.Fatalf("gateway neighbors must be resolved before ingress redirect: %v", runner.commands)
+	}
 }
 
 func TestLinuxNetworkMalformedLinkHasActionableError(t *testing.T) {
@@ -106,7 +112,7 @@ func TestLinuxNetworkReleaseDeletesOnlyReservedPreferenceAndTap(t *testing.T) {
 	for _, expected := range []string{
 		"tc filter del dev eth0 parent ffff: pref " + tcPreference,
 		"tc filter del dev cb123 parent ffff: pref " + tcPreference,
-		"ip tuntap del dev cb123 mode tap",
+		"ip tuntap del dev cb123 mode tap multi_queue",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("missing %q in commands:\n%s", expected, joined)

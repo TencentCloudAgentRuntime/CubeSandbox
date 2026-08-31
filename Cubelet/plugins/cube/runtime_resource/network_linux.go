@@ -95,17 +95,6 @@ func (n *linuxNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, ta
 	if _, err := n.runner.Run(ctx, netnsPath, "ip", "link", "set", "dev", tapName, "mtu", strconv.FormatUint(uint64(links[0].MTU), 10), "up"); err != nil {
 		return nil, err
 	}
-	if err := n.ensureIngress(ctx, netnsPath, interfaceName); err != nil {
-		return nil, err
-	}
-	if err := n.ensureIngress(ctx, netnsPath, tapName); err != nil {
-		return nil, err
-	}
-	for _, pair := range [][2]string{{interfaceName, tapName}, {tapName, interfaceName}} {
-		if _, err := n.runner.Run(ctx, netnsPath, "tc", "filter", "replace", "dev", pair[0], "parent", "ffff:", "protocol", "all", "pref", tcPreference, "u32", "match", "u8", "0", "0", "action", "mirred", "egress", "redirect", "dev", pair[1]); err != nil {
-			return nil, err
-		}
-	}
 
 	ips, err := n.addresses(ctx, netnsPath, interfaceName)
 	if err != nil {
@@ -118,6 +107,21 @@ func (n *linuxNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, ta
 	neighbors, err := n.neighbors(ctx, netnsPath, interfaceName, gateways)
 	if err != nil {
 		return nil, err
+	}
+	// Resolve gateway neighbors before redirecting ingress traffic to the TAP.
+	// Once the catch-all tc filter is installed, ARP/NDP replies are delivered
+	// to the guest instead of the host network stack and cannot populate the
+	// namespace neighbor table used to construct the guest attachment.
+	if err := n.ensureIngress(ctx, netnsPath, interfaceName); err != nil {
+		return nil, err
+	}
+	if err := n.ensureIngress(ctx, netnsPath, tapName); err != nil {
+		return nil, err
+	}
+	for _, pair := range [][2]string{{interfaceName, tapName}, {tapName, interfaceName}} {
+		if _, err := n.runner.Run(ctx, netnsPath, "tc", "filter", "replace", "dev", pair[0], "parent", "ffff:", "protocol", "all", "pref", tcPreference, "u32", "match", "u8", "0", "0", "action", "mirred", "egress", "redirect", "dev", pair[1]); err != nil {
+			return nil, err
+		}
 	}
 	return &runtimev1.NetworkAttachment{TapName: tapName, GuestInterfaceName: "eth0", Mac: links[0].Address, Mtu: links[0].MTU, Ips: ips, Routes: routes, Neighbors: neighbors}, nil
 }
@@ -293,7 +297,7 @@ func (n *linuxNetwork) Release(ctx context.Context, netnsPath, interfaceName, ta
 	}
 	_, _ = n.runner.Run(ctx, netnsPath, "tc", "filter", "del", "dev", interfaceName, "parent", "ffff:", "pref", tcPreference)
 	_, _ = n.runner.Run(ctx, netnsPath, "tc", "filter", "del", "dev", tapName, "parent", "ffff:", "pref", tcPreference)
-	_, err := n.runner.Run(ctx, netnsPath, "ip", "tuntap", "del", "dev", tapName, "mode", "tap")
+	_, err := n.runner.Run(ctx, netnsPath, "ip", "tuntap", "del", "dev", tapName, "mode", "tap", "multi_queue")
 	if err != nil && !strings.Contains(err.Error(), "Cannot find device") {
 		return err
 	}
