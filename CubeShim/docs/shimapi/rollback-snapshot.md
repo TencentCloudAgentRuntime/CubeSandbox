@@ -133,7 +133,7 @@ caller  ──UpdateTaskRequest { id, annotations }──▶  CubeShim (ttrpc)
 | `posix_acl` | `bool` | `false` | Enable POSIX ACLs |
 | `xattrmap` | `string \| null` | `null` | xattr mapping rules |
 | `announce_submounts` | `bool` | `false` | Announce submount info to guest |
-| `cache` | `uint` | system default | Cache policy (0=none, 1=auto, 2=always) |
+| `cache` | `uint` | system default | Cache policy (0=auto, 1=always, 2=never, 3=none) |
 | `no_readdirplus` | `bool` | `false` | Disable READDIRPLUS |
 | `writeback` | `bool` | `false` | Enable writeback cache |
 | `allow_direct_io` | `bool` | `false` | Allow guest to use direct I/O |

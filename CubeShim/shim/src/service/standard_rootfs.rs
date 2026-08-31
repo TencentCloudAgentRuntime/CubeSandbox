@@ -69,10 +69,10 @@ impl PreparedRootfs {
     fn remove_dirs(&self) {
         let rootfs_dir = self.target.parent();
         let _ = fs::remove_dir_all(&self.target);
-        if let Some(rootfs_dir) = rootfs_dir {
-            remove_empty_dir(rootfs_dir);
-        }
         if self.remove_share_root {
+            if let Some(rootfs_dir) = rootfs_dir {
+                remove_empty_dir(rootfs_dir);
+            }
             remove_empty_dir(&self.share_root);
         }
     }
@@ -597,7 +597,39 @@ mod tests {
         .unwrap();
 
         assert!(share_root.is_dir());
+        assert!(share_root.join("rootfs").is_dir());
+        fs::remove_dir(share_root.join("rootfs")).unwrap();
         fs::remove_dir(&share_root).unwrap();
+    }
+
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn managed_cleanup_keeps_rootfs_parent_inode_stable_across_tasks() {
+        use std::os::unix::fs::MetadataExt;
+
+        let share_root = std::env::temp_dir().join(format!(
+            "cubesandbox-managed-rootfs-generation-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let rootfs_dir = share_root.join("rootfs");
+        let old_target = rootfs_dir.join("task-old");
+        fs::create_dir_all(&old_target).unwrap();
+        let rootfs_inode = fs::metadata(&rootfs_dir).unwrap().ino();
+
+        PreparedRootfs {
+            target: old_target,
+            share_root: share_root.clone(),
+            mounts: Vec::new(),
+            remove_share_root: false,
+        }
+        .cleanup()
+        .unwrap();
+
+        let new_target = rootfs_dir.join("task-new");
+        fs::create_dir_all(&new_target).unwrap();
+        assert_eq!(fs::metadata(&rootfs_dir).unwrap().ino(), rootfs_inode);
+
+        fs::remove_dir_all(&share_root).unwrap();
     }
 
     #[test]
