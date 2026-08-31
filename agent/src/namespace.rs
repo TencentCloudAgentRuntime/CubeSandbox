@@ -10,6 +10,7 @@ use nix::unistd::{getpid, gettid};
 use std::fmt;
 use std::fs;
 use std::fs::File;
+use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use tracing::instrument;
 
@@ -17,6 +18,11 @@ use crate::mount::{baremount, FLAGS};
 use slog::Logger;
 
 const PERSISTENT_NS_DIR: &str = "/var/run/sandbox-ns";
+const PIDNS_HOLDER_PATH: &[u8] = b"/run/support/cube-pidns-holder\0";
+const PIDNS_HOLDER_READY_FD: RawFd = 3;
+const PIDNS_HOLDER_READY: u8 = 0;
+const PIDNS_HOLDER_EXEC_FAILED: u8 = 1;
+const PIDNS_HOLDER_READY_TIMEOUT_MS: libc::c_int = 5_000;
 pub const NSTYPEIPC: &str = "ipc";
 pub const NSTYPEUTS: &str = "uts";
 pub const NSTYPEPID: &str = "pid";
@@ -153,44 +159,162 @@ impl Namespace {
     ///
     /// PID namespaces cannot be kept usable by a bind mount alone: once their
     /// init process exits, the kernel prevents creation of new processes in
-    /// that namespace. The holder therefore remains alive for the lifetime of
-    /// the single-sandbox Guest VM. It executes no Guest or container code and
-    /// is removed automatically when the VM exits.
+    /// that namespace. A dedicated helper therefore remains alive for the
+    /// lifetime of the single-sandbox Guest VM. The clone child closes Agent
+    /// descriptors and execs the helper so it cannot expose Agent memory. The
+    /// helper reports readiness only after installing its empty root and
+    /// dropping credentials and capabilities.
     #[instrument]
     pub fn setup_pid(mut self) -> Result<(Self, libc::pid_t)> {
         self.ns_type = NamespaceType::Pid;
+        let mut ready_pipe = [-1; 2];
+        if unsafe { libc::pipe2(ready_pipe.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("Failed to create shared PID namespace holder readiness pipe");
+        }
+
+        let ready_read = ready_pipe[0];
+        let ready_write = ready_pipe[1];
         let mut stack = vec![0_u8; 64 * 1024];
-        let holder = clone(
-            Box::new(|| -> isize {
-                loop {
-                    unsafe {
-                        // Containers that orphan descendants in a shared PID
-                        // namespace reparent them to this PID 1. Reap those
-                        // descendants so the namespace holder does not turn
-                        // into a zombie accumulator. A short nanosleep avoids
-                        // depending on the agent's inherited signal handlers.
-                        while libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) > 0 {}
-                        let interval = libc::timespec {
-                            tv_sec: 0,
-                            tv_nsec: 100_000_000,
-                        };
-                        libc::nanosleep(&interval, std::ptr::null_mut());
-                    }
-                }
-            }),
+        let holder_result = clone(
+            Box::new(move || -> isize { exec_pidns_holder(ready_read, ready_write) }),
             &mut stack,
-            CloneFlags::CLONE_NEWPID,
+            CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNS,
             Some(libc::SIGCHLD),
-        )
-        .context("Failed to clone shared PID namespace holder")?;
+        );
+        unsafe {
+            libc::close(ready_write);
+        }
+        let holder = match holder_result {
+            Ok(holder) => holder,
+            Err(err) => {
+                unsafe {
+                    libc::close(ready_read);
+                }
+                return Err(err).context("Failed to clone shared PID namespace holder");
+            }
+        };
+
+        let status = wait_pidns_holder_ready(ready_read, holder.as_raw())?;
+        if status != PIDNS_HOLDER_READY {
+            terminate_pidns_holder(holder.as_raw());
+            return Err(anyhow!(
+                "Shared PID namespace holder initialization failed at step {}",
+                status
+            ));
+        }
+
         self.path = format!("/proc/{}/ns/pid", holder.as_raw());
-        File::open(&self.path).with_context(|| {
+        if let Err(err) = File::open(&self.path).with_context(|| {
             format!(
                 "Failed to open shared PID namespace holder path {}",
                 self.path
             )
-        })?;
+        }) {
+            terminate_pidns_holder(holder.as_raw());
+            return Err(err);
+        }
         Ok((self, holder.as_raw()))
+    }
+}
+
+fn write_pidns_holder_status(fd: RawFd, status: u8) {
+    unsafe {
+        libc::write(fd, &status as *const u8 as *const libc::c_void, 1);
+    }
+}
+
+fn exec_pidns_holder(ready_read: RawFd, ready_write: RawFd) -> isize {
+    unsafe {
+        libc::close(ready_read);
+
+        if ready_write != PIDNS_HOLDER_READY_FD {
+            if libc::dup2(ready_write, PIDNS_HOLDER_READY_FD) < 0 {
+                write_pidns_holder_status(ready_write, PIDNS_HOLDER_EXEC_FAILED);
+                return 127;
+            }
+            libc::close(ready_write);
+        }
+
+        let null_fd = libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDWR);
+        if null_fd < 0 {
+            write_pidns_holder_status(PIDNS_HOLDER_READY_FD, PIDNS_HOLDER_EXEC_FAILED);
+            return 127;
+        }
+        for fd in 0..=2 {
+            if libc::dup2(null_fd, fd) < 0 {
+                write_pidns_holder_status(PIDNS_HOLDER_READY_FD, PIDNS_HOLDER_EXEC_FAILED);
+                return 127;
+            }
+        }
+        if null_fd > PIDNS_HOLDER_READY_FD {
+            libc::close(null_fd);
+        }
+
+        // fd 3 is the readiness channel. No Agent control, log, vsock or
+        // event-loop descriptor may survive the exec boundary.
+        if libc::syscall(
+            libc::SYS_close_range,
+            (PIDNS_HOLDER_READY_FD + 1) as libc::c_uint,
+            libc::c_uint::MAX,
+            0 as libc::c_uint,
+        ) < 0
+        {
+            write_pidns_holder_status(PIDNS_HOLDER_READY_FD, PIDNS_HOLDER_EXEC_FAILED);
+            return 127;
+        }
+
+        let argv = [
+            PIDNS_HOLDER_PATH.as_ptr() as *const libc::c_char,
+            std::ptr::null(),
+        ];
+        libc::execv(
+            PIDNS_HOLDER_PATH.as_ptr() as *const libc::c_char,
+            argv.as_ptr(),
+        );
+        write_pidns_holder_status(PIDNS_HOLDER_READY_FD, PIDNS_HOLDER_EXEC_FAILED);
+        127
+    }
+}
+
+fn wait_pidns_holder_ready(ready_read: RawFd, holder: libc::pid_t) -> Result<u8> {
+    let mut pollfd = libc::pollfd {
+        fd: ready_read,
+        events: libc::POLLIN | libc::POLLHUP,
+        revents: 0,
+    };
+    let poll_result = unsafe { libc::poll(&mut pollfd, 1, PIDNS_HOLDER_READY_TIMEOUT_MS) };
+    if poll_result <= 0 {
+        unsafe {
+            libc::close(ready_read);
+        }
+        terminate_pidns_holder(holder);
+        if poll_result == 0 {
+            return Err(anyhow!("Timed out waiting for shared PID namespace holder"));
+        }
+        return Err(std::io::Error::last_os_error())
+            .context("Failed waiting for shared PID namespace holder");
+    }
+
+    let mut status = PIDNS_HOLDER_EXEC_FAILED;
+    let read_result = unsafe {
+        let result = libc::read(ready_read, &mut status as *mut u8 as *mut libc::c_void, 1);
+        libc::close(ready_read);
+        result
+    };
+    if read_result != 1 {
+        terminate_pidns_holder(holder);
+        return Err(anyhow!(
+            "Shared PID namespace holder exited before reporting readiness"
+        ));
+    }
+    Ok(status)
+}
+
+fn terminate_pidns_holder(holder: libc::pid_t) {
+    unsafe {
+        libc::kill(holder, libc::SIGKILL);
+        libc::waitpid(holder, std::ptr::null_mut(), 0);
     }
 }
 

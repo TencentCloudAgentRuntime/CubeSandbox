@@ -2,7 +2,8 @@
 # Build independent cube-agent.ext4 (+ version) for virtio-pmem1 injection.
 #
 # Layout inside the ext4 image (open-source):
-#   /cube-agent   # musl static binary only (no e2fsprogs)
+#   /cube-agent          # musl static Agent binary
+#   /cube-pidns-holder   # minimal shared Pod PID namespace init
 #
 # Usage:
 #   OUTPUT_DIR=/path/to/cube-agent [ONE_CLICK_CUBE_AGENT_BIN=/path/to/cube-agent] \
@@ -29,6 +30,7 @@ export CUBE_VERSION CUBE_COMMIT CUBE_BUILD_TIME
 GUEST_IMAGE_WORK_DIR="${WORK_ROOT}/agent-ext4-build"
 CUBE_AGENT_BUILD_MODE="${ONE_CLICK_CUBE_AGENT_BUILD_MODE:-local}"
 CUBE_AGENT_BIN_OVERRIDE="${ONE_CLICK_CUBE_AGENT_BIN:-}"
+CUBE_PIDNS_HOLDER_BIN_OVERRIDE="${ONE_CLICK_CUBE_PIDNS_HOLDER_BIN:-}"
 
 # shellcheck source=./lib/guest-image.sh
 source "${SCRIPT_DIR}/lib/guest-image.sh"
@@ -44,6 +46,7 @@ require_cmd dumpe2fs
 ensure_mkfs_ext4_supports_populate_dir
 
 AGENT_BIN="$(build_cube_agent)"
+PIDNS_HOLDER_BIN="${CUBE_PIDNS_HOLDER_BIN_OVERRIDE:-$(dirname "${AGENT_BIN}")/cube-pidns-holder}"
 
 remove_path_with_optional_sudo "${GUEST_IMAGE_WORK_DIR}"
 mkdir -p "${OUTPUT_DIR}" "${GUEST_IMAGE_WORK_DIR}"
@@ -51,6 +54,7 @@ mkdir -p "${OUTPUT_DIR}" "${GUEST_IMAGE_WORK_DIR}"
 log "building cube-agent.ext4 into ${OUTPUT_DIR}"
 build_agent_ext4_artifacts \
   "${AGENT_BIN}" \
+  "${PIDNS_HOLDER_BIN}" \
   "${OUTPUT_DIR}/cube-agent.ext4" \
   "${OUTPUT_DIR}/version"
 

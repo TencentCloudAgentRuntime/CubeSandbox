@@ -372,16 +372,15 @@ build_cube_init() {
   find_built_binary "${ROOT_DIR}/guest-init/target" "cube-init"
 }
 
-# Build an independent cube-agent.ext4 containing only /cube-agent (2 MiB aligned).
-# Does NOT package e2fsprogs tools. Agent binary must be a static ELF.
+# Install a binary into cube-agent.ext4. It must be a static ELF so the
+# independent plane never depends on Guest OS libraries.
 install_static_agent_binary() {
   local src_bin="$1"
-  local dst_root="$2"
-  local dst="${dst_root}/cube-agent"
+  local dst="$2"
   local ldd_out=""
 
   ensure_file "${src_bin}"
-  mkdir -p "${dst_root}"
+  mkdir -p "$(dirname "${dst}")"
 
   # Refuse dynamic binaries so host ABI/libs never leak into the plane file.
   if command -v ldd >/dev/null 2>&1; then
@@ -407,8 +406,9 @@ install_static_agent_binary() {
 
 build_agent_ext4_artifacts() {
   local agent_bin="$1"
-  local output_img="$2"
-  local output_version="$3"
+  local pidns_holder_bin="$2"
+  local output_img="$3"
+  local output_version="$4"
   local work_dir="${GUEST_IMAGE_WORK_DIR:-${ONE_CLICK_WORK_ROOT:-.}/agent-ext4-build}/agent-rootfs"
   local rootfs_size_bytes
   local image_size_bytes
@@ -417,11 +417,13 @@ build_agent_ext4_artifacts() {
   local stage_version
 
   ensure_file "${agent_bin}"
+  ensure_file "${pidns_holder_bin}"
   mkdir -p "$(dirname "${output_img}")" "$(dirname "${output_version}")"
   remove_path_with_optional_sudo "${work_dir}"
   mkdir -p "${work_dir}"
 
-  install_static_agent_binary "${agent_bin}" "${work_dir}"
+  install_static_agent_binary "${agent_bin}" "${work_dir}/cube-agent"
+  install_static_agent_binary "${pidns_holder_bin}" "${work_dir}/cube-pidns-holder"
 
   rootfs_size_bytes="$(directory_size_bytes "${work_dir}")"
   # Agent ext4 is tiny; start from at least 16 MiB then shrink+align.
@@ -499,4 +501,3 @@ build_guest_image_artifacts() {
   remove_path_with_optional_sudo "${GUEST_ROOTFS_DIR}" "${GUEST_ROOTFS_TAR}"
   trap - RETURN
 }
-

@@ -42,7 +42,8 @@ Host
 ```
 
 cube-agent is packaged as an independent **`cube-agent.ext4`** plane file
-(containing only `/cube-agent`). CubeShim injects it as virtio-pmem1. Guest
+(containing `/cube-agent` and the minimal `/cube-pidns-holder` helper).
+CubeShim injects it as virtio-pmem1. Guest
 Image contains lightweight `cube-init` as `/sbin/init`, which mounts pmem1 and
 execs the agent with `wrapper_mode=on` so the agent skips duplicate
 `general_mount`.
@@ -83,8 +84,9 @@ See also `../guest-init/` for the lightweight Guest PID 1 (`cube-init`).
 
 ## Build
 
-cube-agent is built as a **statically linked musl binary**, then packaged into
-`cube-agent.ext4` by `deploy/one-click/build-agent-ext4.sh`.
+cube-agent and its PID namespace holder are built as **statically linked musl
+binaries**, then packaged into `cube-agent.ext4` by
+`deploy/one-click/build-agent-ext4.sh`.
 
 ### Prerequisites
 

@@ -98,3 +98,6 @@ standard-oci-runtime = ["rustjail/standard-oci-runtime"]
 name = "cube-agent"
 path = "src/main.rs"
 
+[[bin]]
+name = "cube-pidns-holder"
+path = "src/bin/cube-pidns-holder.rs"
