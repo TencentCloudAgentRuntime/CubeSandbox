@@ -332,7 +332,7 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
-| S3.1 基础 Volume | `IN_PROGRESS` | Codex | S3.1a 已冻结 11 个 OCI bind 输入与现状矩阵：启动投射正常，runc 磁盘/内存 emptyDir 跨容器读写正常，Cube 两者均为 EROFS；动态投射 194 秒内不更新；删除恢复全量基线 | 诊断脚本 `e0c85aab`；云验收 `inv-a83peh0hec`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.1/README.md)；最终同一 reviewer `APPROVE` | S3.1b 实现独立 Pod Volume share，保留 rootfs share 只读并按 OCI mount 保持逐项 `ro/rw` |
+| S3.1 基础 Volume | `IN_PROGRESS` | Codex | S3.1a 已冻结 11 个 OCI bind 输入与现状矩阵；S3.1b 已实现独立 Pod Volume share，disk/memory emptyDir 跨 init/app/sidecar 读写、同卷 `rw/ro`、只读 rootfs、Task generation 回收和失败回滚均通过 | 诊断 `e0c85aab` / `inv-a83peh0hec`；实现 `5b504b58`；构建 `inv-a83rxbgg0g`；终验 `inv-a83sdvgumu`；独立审计 `inv-883sh80mpp`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.1/README.md)；同一 reviewer `APPROVE` | S3.1c 复测 ConfigMap、Secret、projected、downwardAPI、subPath 与动态更新 |
 | S3.2 PVC | `NOT_STARTED` | 待指定 | — | — | 实现文件系统 PVC 挂载和清理 |
 | S3.3 SecurityContext | `NOT_STARTED` | 待指定 | — | — | 映射并验证常用安全字段 |
 | S3.4 资源控制 | `NOT_STARTED` | 待指定 | — | — | 实现 Host/Guest 双层 cgroup |
@@ -342,8 +342,8 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 | 子阶段 | 状态 | 目标 | 验收标准 | 当前结果/下一步 |
 |---|---|---|---|---|
 | S3.1a 输入与现状诊断 | `DONE` | 冻结 kubelet/CRI/OCI Volume 输入和 Cube 当前语义 | runc 对照、Cube 读写/投射/更新/subPath 矩阵完整；活动与删除 mount 证据完整；同一 reviewer `APPROVE` | `inv-a83peh0hec` 通过；证实固定只读 share 同时导致可写卷 EROFS 和动态投射不可见 |
-| S3.1b 可写 Volume 通道 | `IN_PROGRESS` | 为 Pod 增加独立 Volume share，并把标准 OCI bind 重写到该通道 | disk/memory emptyDir 跨 init/app/sidecar 双向读写；同卷不同路径与 `ro/rw` 正确；rootfs share 仍只读；失败创建和删除零残留 | 先冻结 RuntimeResource、Shim、VMM 与 Guest 的最小协议改动和生命周期所有权 |
-| S3.1c 投射卷与 subPath | `NOT_STARTED` | 验证启动注入、更新策略和 kubelet 已展开的 subPath | ConfigMap/Secret/projected/downwardAPI 启动值与 mode 正确；subPath 对照一致；动态更新支持状态明确写入 `K8S-OQ-007` | 等待 S3.1b |
+| S3.1b 可写 Volume 通道 | `DONE` | 为 Pod 增加独立 Volume share，并把标准 OCI bind 重写到该通道 | disk/memory emptyDir 跨 init/app/sidecar 双向读写；同卷不同路径与 `ro/rw` 正确；rootfs share 仍只读；失败创建和删除零残留 | `5b504b58` 实现 `cubeVolumes` 与 mount-aware 生命周期；`inv-a83rxbgg0g` 通过 Rust 137 项、Go race/vet 和真实特权 bind cleanup；`inv-a83sdvgumu` 与 `inv-883sh80mpp` 终验通过；同一 reviewer `APPROVE` |
+| S3.1c 投射卷与 subPath | `IN_PROGRESS` | 验证启动注入、更新策略和 kubelet 已展开的 subPath | ConfigMap/Secret/projected/downwardAPI 启动值与 mode 正确；subPath 对照一致；动态更新支持状态明确写入 `K8S-OQ-007` | 在 S3.1b 的 `cache=none` 独立 Volume share 上设计投射卷、atomic writer、mode、symlink swap、subPath 与更新延迟矩阵 |
 | S3.1d 回归与支持矩阵 | `NOT_STARTED` | 完成多容器、更新、失败清理和兼容性回归 | 自动化矩阵通过；Pod UID/IP、Sandbox、shim、VM 稳定；删除恢复全量基线；文档和 handoff 可复现 | 等待 S3.1b、S3.1c |
 
 
