@@ -80,7 +80,7 @@ pub(crate) enum TaskMode {
 enum ShutdownAction {
     AlreadyComplete,
     WaitForExisting,
-    Run,
+    Run { force_abort: bool },
 }
 
 impl SandboxLifecycle {
@@ -95,9 +95,13 @@ impl SandboxLifecycle {
                 }
                 Phase::Shutdown => return ShutdownAction::AlreadyComplete,
                 Phase::ShuttingDown => return ShutdownAction::WaitForExisting,
+                Phase::Stopped => {
+                    state.phase = Phase::ShuttingDown;
+                    return ShutdownAction::Run { force_abort: false };
+                }
                 _ => {
                     state.phase = Phase::ShuttingDown;
-                    return ShutdownAction::Run;
+                    return ShutdownAction::Run { force_abort: true };
                 }
             }
         }
@@ -449,17 +453,19 @@ impl SandboxService {
         }
     }
 
-    async fn run_shutdown(self) {
+    async fn run_shutdown(self, force_abort: bool) {
         let release = if let Some(lease) = self.lifecycle.state.lock().await.runtime.clone() {
             lease.release().await
         } else {
             Ok(())
         };
-        let abort = {
+        let abort = if force_abort {
             let mut sandbox = self.sandbox.lock().await;
             let result = sandbox.abort_sandbox().await;
             sandbox.clear_runtime_tap();
             result
+        } else {
+            Ok(())
         };
         let released = release.is_ok();
         let result = match (release, abort) {
@@ -798,13 +804,13 @@ impl Sandbox for SandboxService {
         req: api::ShutdownSandboxRequest,
     ) -> TtrpcResult<api::ShutdownSandboxResponse> {
         self.validate_id(&req.sandbox_id)?;
-        let should_shutdown = match self.lifecycle.begin_shutdown().await {
+        let force_abort = match self.lifecycle.begin_shutdown().await {
             ShutdownAction::AlreadyComplete => return Ok(api::ShutdownSandboxResponse::new()),
-            ShutdownAction::WaitForExisting => false,
-            ShutdownAction::Run => true,
+            ShutdownAction::WaitForExisting => None,
+            ShutdownAction::Run { force_abort } => Some(force_abort),
         };
-        if should_shutdown {
-            tokio::spawn(self.clone().run_shutdown());
+        if let Some(force_abort) = force_abort {
+            tokio::spawn(self.clone().run_shutdown(force_abort));
         }
         self.wait_for_shutdown().await
     }
@@ -881,12 +887,26 @@ mod tests {
 
         lifecycle.state.lock().await.phase = Phase::Created;
         lifecycle.changed.notify_waiters();
-        assert_eq!(waiter.await.unwrap(), ShutdownAction::Run);
+        assert_eq!(
+            waiter.await.unwrap(),
+            ShutdownAction::Run { force_abort: true }
+        );
         assert_eq!(lifecycle.state.lock().await.phase, Phase::ShuttingDown);
         assert_eq!(
             lifecycle.begin_shutdown().await,
             ShutdownAction::WaitForExisting
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_after_stop_skips_redundant_force_abort() {
+        let lifecycle = SandboxLifecycle::default();
+        lifecycle.state.lock().await.phase = Phase::Stopped;
+        assert_eq!(
+            lifecycle.begin_shutdown().await,
+            ShutdownAction::Run { force_abort: false }
+        );
+        assert_eq!(lifecycle.state.lock().await.phase, Phase::ShuttingDown);
     }
 
     #[test]
