@@ -20,6 +20,17 @@ use unistd::Pid;
 
 use crate::sandbox::Sandbox;
 
+fn wait_status_exit_code(wait_status: WaitStatus) -> Option<i32> {
+    match wait_status {
+        WaitStatus::Exited(_, code) => Some(code),
+        // Match the OCI/containerd convention used by runc and shells: a
+        // process terminated by signal N reports 128 + N. Returning the raw
+        // signal number makes SIGKILL indistinguishable from a normal exit 9.
+        WaitStatus::Signaled(_, signal, _) => Some(128 + signal as i32),
+        _ => None,
+    }
+}
+
 async fn handle_sigchild(logger: Logger, sandbox: Arc<Mutex<Sandbox>>) -> Result<()> {
     loop {
         // Avoid reaping the undesirable child's signal, e.g., execute_hook's
@@ -61,10 +72,9 @@ async fn handle_sigchild(logger: Logger, sandbox: Arc<Mutex<Sandbox>>) -> Result
 
             let p = process.unwrap();
 
-            let ret: i32 = match wait_status {
-                WaitStatus::Exited(_, c) => c,
-                WaitStatus::Signaled(_, sig, _) => sig as i32,
-                _ => {
+            let ret = match wait_status_exit_code(wait_status) {
+                Some(code) => code,
+                None => {
                     info!(logger, "got wrong status for process";
                                   "child-status" => format!("{:?}", wait_status));
                     continue;
@@ -132,6 +142,51 @@ async fn handle_sigchild(logger: Logger, sandbox: Arc<Mutex<Sandbox>>) -> Result
             // in case this process's terminal has been inherited by its children.
             p.notify_term_close();
         }
+    }
+}
+
+#[cfg(test)]
+mod wait_status_tests {
+    use nix::sys::signal::Signal;
+    use nix::sys::wait::WaitStatus;
+    use nix::unistd::Pid;
+
+    use super::wait_status_exit_code;
+
+    #[test]
+    fn preserves_normal_exit_code() {
+        assert_eq!(
+            wait_status_exit_code(WaitStatus::Exited(Pid::from_raw(42), 9)),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn converts_signal_to_container_exit_code() {
+        assert_eq!(
+            wait_status_exit_code(WaitStatus::Signaled(
+                Pid::from_raw(42),
+                Signal::SIGKILL,
+                false
+            )),
+            Some(137)
+        );
+        assert_eq!(
+            wait_status_exit_code(WaitStatus::Signaled(
+                Pid::from_raw(42),
+                Signal::SIGTERM,
+                false
+            )),
+            Some(143)
+        );
+    }
+
+    #[test]
+    fn ignores_non_terminal_wait_status() {
+        assert_eq!(
+            wait_status_exit_code(WaitStatus::Stopped(Pid::from_raw(42), Signal::SIGSTOP)),
+            None
+        );
     }
 }
 
