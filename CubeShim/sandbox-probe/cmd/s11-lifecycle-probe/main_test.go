@@ -5,6 +5,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -31,6 +32,63 @@ func TestCreateCollision(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := createCollision(test.err, bundle); got != test.want {
 				t.Fatalf("createCollision() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestParseShimBootstrap(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		want    string
+		wantErr string
+	}{
+		{
+			name: "containerd shim v3 ttrpc",
+			data: `{"version":3,"address":"unix:///run/containerd/s/cube.sock","protocol":"ttrpc"}`,
+			want: "/run/containerd/s/cube.sock",
+		},
+		{
+			name:    "invalid JSON",
+			data:    `{`,
+			wantErr: "decode bootstrap.json",
+		},
+		{
+			name:    "unsupported version",
+			data:    `{"version":2,"address":"unix:///run/containerd/s/cube.sock","protocol":"ttrpc"}`,
+			wantErr: "version = 2, want 3",
+		},
+		{
+			name:    "unsupported protocol",
+			data:    `{"version":3,"address":"unix:///run/containerd/s/cube.sock","protocol":"grpc"}`,
+			wantErr: `protocol = "grpc", want ttrpc`,
+		},
+		{
+			name:    "non-unix address",
+			data:    `{"version":3,"address":"vsock://3:1024","protocol":"ttrpc"}`,
+			wantErr: "want unix:// absolute path",
+		},
+		{
+			name:    "relative unix path",
+			data:    `{"version":3,"address":"unix://run/cube.sock","protocol":"ttrpc"}`,
+			wantErr: "want absolute path",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseShimBootstrap([]byte(test.data))
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("parseShimBootstrap() error = %v, want substring %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseShimBootstrap() error = %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("parseShimBootstrap() = %q, want %q", got, test.want)
 			}
 		})
 	}

@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -15,8 +16,11 @@ import (
 	"strings"
 	"time"
 
+	bootapi "github.com/containerd/containerd/api/runtime/bootstrap/v1"
+	runtimeapi "github.com/containerd/containerd/api/runtime/sandbox/v1"
 	controllerapi "github.com/containerd/containerd/api/services/sandbox/v1"
 	typesapi "github.com/containerd/containerd/api/types"
+	"github.com/containerd/ttrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -120,12 +124,10 @@ func main() {
 		panic(fmt.Sprintf("invalid RuntimeResource identity lease=%q generation=%q", lease, generation))
 	}
 
-	ctx, cancel = requestContext(2 * time.Minute)
-	platform, err := controller.Platform(ctx, &controllerapi.ControllerPlatformRequest{SandboxID: sandboxID, Sandboxer: sandboxer})
-	cancel()
+	platform, err := sandboxPlatform(controller, bundle, sandboxID)
 	must(err)
-	if platform.GetPlatform().GetOS() != "linux" || platform.GetPlatform().GetArchitecture() != "amd64" {
-		panic(fmt.Sprintf("unexpected platform: %v", platform.GetPlatform()))
+	if platform.GetOS() != "linux" || platform.GetArchitecture() != "amd64" {
+		panic(fmt.Sprintf("unexpected platform: %v", platform))
 	}
 
 	ctx, cancel = requestContext(3 * time.Minute)
@@ -180,6 +182,78 @@ func main() {
 
 func requestContext(timeout time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(metadata.NewOutgoingContext(context.Background(), metadata.Pairs("containerd-namespace", "s11-live")), timeout)
+}
+
+func sandboxPlatform(controller controllerapi.ControllerClient, bundle, sandboxID string) (*typesapi.Platform, error) {
+	ctx, cancel := requestContext(2 * time.Minute)
+	response, err := controller.Platform(ctx, &controllerapi.ControllerPlatformRequest{SandboxID: sandboxID, Sandboxer: sandboxer})
+	cancel()
+	if err == nil {
+		if response.GetPlatform() == nil {
+			return nil, errors.New("containerd Controller.Platform returned no platform")
+		}
+		return response.GetPlatform(), nil
+	}
+	if grpcstatus.Code(err) != codes.Unimplemented {
+		return nil, fmt.Errorf("containerd Controller.Platform: %w", err)
+	}
+
+	platform, directErr := shimPlatform(bundle, sandboxID)
+	if directErr != nil {
+		return nil, fmt.Errorf("containerd Controller.Platform is unimplemented; direct shim Platform: %w", directErr)
+	}
+	fmt.Printf("S11_PLATFORM_DIRECT_TTRPC_FALLBACK sandbox=%s\n", sandboxID)
+	return platform, nil
+}
+
+func shimPlatform(bundle, sandboxID string) (*typesapi.Platform, error) {
+	bootstrap, err := os.ReadFile(filepath.Join(bundle, "bootstrap.json"))
+	if err != nil {
+		return nil, fmt.Errorf("read bootstrap.json: %w", err)
+	}
+	socket, err := parseShimBootstrap(bootstrap)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := requestContext(2 * time.Minute)
+	defer cancel()
+	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", socket)
+	if err != nil {
+		return nil, fmt.Errorf("dial CubeShim socket: %w", err)
+	}
+	client := ttrpc.NewClient(connection)
+	defer client.Close()
+	response, err := runtimeapi.NewTTRPCSandboxClient(client).Platform(ctx, &runtimeapi.PlatformRequest{SandboxID: sandboxID})
+	if err != nil {
+		return nil, fmt.Errorf("call CubeShim Platform: %w", err)
+	}
+	if response.GetPlatform() == nil {
+		return nil, errors.New("CubeShim Platform returned no platform")
+	}
+	return response.GetPlatform(), nil
+}
+
+func parseShimBootstrap(data []byte) (string, error) {
+	var result bootapi.BootstrapResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("decode bootstrap.json: %w", err)
+	}
+	if result.GetVersion() != 3 {
+		return "", fmt.Errorf("bootstrap.json version = %d, want 3", result.GetVersion())
+	}
+	if result.GetProtocol() != "ttrpc" {
+		return "", fmt.Errorf("bootstrap.json protocol = %q, want ttrpc", result.GetProtocol())
+	}
+	const unixPrefix = "unix://"
+	if !strings.HasPrefix(result.GetAddress(), unixPrefix) {
+		return "", fmt.Errorf("bootstrap.json address = %q, want unix:// absolute path", result.GetAddress())
+	}
+	socket := strings.TrimPrefix(result.GetAddress(), unixPrefix)
+	if !filepath.IsAbs(socket) {
+		return "", fmt.Errorf("bootstrap.json socket = %q, want absolute path", socket)
+	}
+	return socket, nil
 }
 
 func status(controller controllerapi.ControllerClient, sandboxID string) *controllerapi.ControllerStatusResponse {
