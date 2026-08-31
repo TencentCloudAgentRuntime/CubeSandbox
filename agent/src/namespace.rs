@@ -3,9 +3,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use nix::mount::MsFlags;
-use nix::sched::{unshare, CloneFlags};
+use nix::sched::{clone, unshare, CloneFlags};
 use nix::unistd::{getpid, gettid};
 use std::fmt;
 use std::fs;
@@ -147,6 +147,50 @@ impl Namespace {
             .map_err(|e| anyhow!("Failed to join thread {:?}!", e))??;
 
         Ok(self)
+    }
+
+    /// Create a pause-like PID 1 process and return its namespace path.
+    ///
+    /// PID namespaces cannot be kept usable by a bind mount alone: once their
+    /// init process exits, the kernel prevents creation of new processes in
+    /// that namespace. The holder therefore remains alive for the lifetime of
+    /// the single-sandbox Guest VM. It executes no Guest or container code and
+    /// is removed automatically when the VM exits.
+    #[instrument]
+    pub fn setup_pid(mut self) -> Result<(Self, libc::pid_t)> {
+        self.ns_type = NamespaceType::Pid;
+        let mut stack = vec![0_u8; 64 * 1024];
+        let holder = clone(
+            Box::new(|| -> isize {
+                loop {
+                    unsafe {
+                        // Containers that orphan descendants in a shared PID
+                        // namespace reparent them to this PID 1. Reap those
+                        // descendants so the namespace holder does not turn
+                        // into a zombie accumulator. A short nanosleep avoids
+                        // depending on the agent's inherited signal handlers.
+                        while libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) > 0 {}
+                        let interval = libc::timespec {
+                            tv_sec: 0,
+                            tv_nsec: 100_000_000,
+                        };
+                        libc::nanosleep(&interval, std::ptr::null_mut());
+                    }
+                }
+            }),
+            &mut stack,
+            CloneFlags::CLONE_NEWPID,
+            Some(libc::SIGCHLD),
+        )
+        .context("Failed to clone shared PID namespace holder")?;
+        self.path = format!("/proc/{}/ns/pid", holder.as_raw());
+        File::open(&self.path).with_context(|| {
+            format!(
+                "Failed to open shared PID namespace holder path {}",
+                self.path
+            )
+        })?;
+        Ok((self, holder.as_raw()))
     }
 }
 

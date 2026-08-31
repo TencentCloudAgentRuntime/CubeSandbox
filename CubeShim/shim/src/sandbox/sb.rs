@@ -611,11 +611,14 @@ impl SandBox {
         let dns = self.get_dns()?;
         let mut stat = self.new_create_stat(stat_defer::CALLEE_ACT_CREATE_SANDBOX.to_string());
         let mut req = agent::CreateSandboxRequest {
-            //hostname: self.id.clone(),
-            hostname: self.id.chars().take(8).collect::<String>(),
+            hostname: if self.conf.sandbox_hostname.is_empty() {
+                self.id.chars().take(8).collect::<String>()
+            } else {
+                self.conf.sandbox_hostname.clone()
+            },
             dns: dns.into(),
             storages: storages.into(),
-            sandbox_pidns: false,
+            sandbox_pidns: self.conf.sandbox_pidns,
             sandbox_id: self.id.clone(),
             interfaces: self.conf.net.get_pb_interfaces().into(),
             routes: self.conf.net.get_pb_routes().into(),

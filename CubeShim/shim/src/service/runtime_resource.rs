@@ -47,6 +47,8 @@ const ANNO_SANDBOX_UID: &str = "io.kubernetes.cri.sandbox-uid";
 const ANNO_SANDBOX_NAMESPACE: &str = "io.kubernetes.cri.sandbox-namespace";
 const ANNO_SANDBOX_NAME: &str = "io.kubernetes.cri.sandbox-name";
 const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
+const ANNO_SANDBOX_HOSTNAME: &str = "cube.sandbox.hostname";
+const ANNO_SANDBOX_PIDNS: &str = "cube.sandbox.pidns";
 const CRI_V1_POD_SANDBOX_CONFIG: &str = "runtime.v1.PodSandboxConfig";
 const RUNTIME_CLEANUP_RECORD: &str = "cube-runtime-resource.json";
 const RUNTIME_REAPER_ROOT_ENV: &str = "CUBE_RUNTIME_RESOURCE_REAPER_DIR";
@@ -128,6 +130,8 @@ pub(crate) struct CriPodSandboxConfig {
     annotations: HashMap<String, String>,
     #[prost(message, optional, tag = "8")]
     linux: Option<CriLinuxPodSandboxConfig>,
+    #[prost(string, tag = "2")]
+    hostname: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -154,8 +158,28 @@ struct CriDnsConfig {
 
 #[derive(Clone, PartialEq, Message)]
 struct CriLinuxPodSandboxConfig {
+    #[prost(message, optional, tag = "2")]
+    security_context: Option<CriLinuxSandboxSecurityContext>,
     #[prost(message, optional, tag = "5")]
     resources: Option<CriLinuxContainerResources>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct CriLinuxSandboxSecurityContext {
+    #[prost(message, optional, tag = "1")]
+    namespace_options: Option<CriNamespaceOption>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct CriNamespaceOption {
+    #[prost(int32, tag = "1")]
+    network: i32,
+    #[prost(int32, tag = "2")]
+    pid: i32,
+    #[prost(int32, tag = "3")]
+    ipc: i32,
+    #[prost(string, tag = "4")]
+    target_id: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -735,6 +759,7 @@ fn hash_fingerprint_part(hasher: &mut Sha256, value: &[u8]) {
 
 pub(crate) fn cri_semantic_fingerprint(config: &CriPodSandboxConfig) -> String {
     let mut hasher = Sha256::new();
+    hash_fingerprint_part(&mut hasher, config.hostname.as_bytes());
     if let Some(metadata) = &config.metadata {
         for value in [
             metadata.name.as_bytes(),
@@ -779,7 +804,67 @@ pub(crate) fn cri_semantic_fingerprint(config: &CriPodSandboxConfig) -> String {
     } else {
         hash_fingerprint_part(&mut hasher, b"no-linux-resources");
     }
+    if let Some(options) = namespace_options(config) {
+        for value in [options.network, options.pid, options.ipc] {
+            hash_fingerprint_part(&mut hasher, &value.to_be_bytes());
+        }
+        hash_fingerprint_part(&mut hasher, options.target_id.as_bytes());
+    } else {
+        hash_fingerprint_part(&mut hasher, b"no-namespace-options");
+    }
     format!("{:x}", hasher.finalize())
+}
+
+fn namespace_options(config: &CriPodSandboxConfig) -> Option<&CriNamespaceOption> {
+    config
+        .linux
+        .as_ref()
+        .and_then(|linux| linux.security_context.as_ref())
+        .and_then(|security| security.namespace_options.as_ref())
+}
+
+/// Validate the Linux namespace modes carried by CRI before allocating a VM.
+///
+/// CRI NamespaceMode is POD=0, CONTAINER=1, NODE=2 and TARGET=3. Kubernetes
+/// sends PID=CONTAINER for a normal Pod and PID=POD for
+/// shareProcessNamespace. Network and IPC can only be POD for the Cube
+/// RuntimeClass: NODE would expose host namespace intent which a VM runtime
+/// cannot implement faithfully, while CONTAINER/TARGET are not Pod sandbox
+/// modes accepted from kubelet.
+pub(crate) fn shared_pid_namespace(config: &CriPodSandboxConfig) -> Result<bool, String> {
+    let Some(options) = namespace_options(config) else {
+        // Preserve the existing Kubernetes path for older callers that omit
+        // namespace_options: one network/IPC namespace per Pod and one PID
+        // namespace per container.
+        return Ok(false);
+    };
+
+    match options.network {
+        0 => {}
+        2 => return Err("hostNetwork is not supported by RuntimeClass cube".to_string()),
+        mode => {
+            return Err(format!(
+                "unsupported CRI network namespace mode {mode}; RuntimeClass cube requires POD"
+            ))
+        }
+    }
+    match options.ipc {
+        0 => {}
+        2 => return Err("hostIPC is not supported by RuntimeClass cube".to_string()),
+        mode => {
+            return Err(format!(
+                "unsupported CRI IPC namespace mode {mode}; RuntimeClass cube requires POD"
+            ))
+        }
+    }
+    match options.pid {
+        0 => Ok(true),
+        1 => Ok(false),
+        2 => Err("hostPID is not supported by RuntimeClass cube".to_string()),
+        mode => Err(format!(
+            "unsupported CRI PID namespace mode {mode}; RuntimeClass cube supports POD or CONTAINER"
+        )),
+    }
 }
 
 pub(crate) fn merge_cri_annotations(
@@ -788,6 +873,7 @@ pub(crate) fn merge_cri_annotations(
     request_annotations: &HashMap<String, String>,
 ) -> Result<(), String> {
     let metadata = pod_metadata(config)?;
+    let shared_pidns = shared_pid_namespace(config)?;
     let mut annotations = spec.annotations().as_ref().cloned().unwrap_or_default();
     annotations.extend(config.annotations.clone());
     annotations.extend(request_annotations.clone());
@@ -797,6 +883,15 @@ pub(crate) fn merge_cri_annotations(
         metadata.namespace.clone(),
     );
     annotations.insert(ANNO_SANDBOX_NAME.to_string(), metadata.name.clone());
+    annotations.insert(
+        ANNO_SANDBOX_HOSTNAME.to_string(),
+        if config.hostname.trim().is_empty() {
+            metadata.name.clone()
+        } else {
+            config.hostname.clone()
+        },
+    );
+    annotations.insert(ANNO_SANDBOX_PIDNS.to_string(), shared_pidns.to_string());
     if config.dns_config.is_some() {
         let dns = cri_dns_entries(config.dns_config.as_ref())?;
         annotations.insert(
@@ -1848,7 +1943,16 @@ mod tests {
                 options: vec!["ndots:5".to_string()],
             }),
             annotations: HashMap::from([("pod.example/key".to_string(), "value".to_string())]),
+            hostname: "pod-hostname".to_string(),
             linux: Some(CriLinuxPodSandboxConfig {
+                security_context: Some(CriLinuxSandboxSecurityContext {
+                    namespace_options: Some(CriNamespaceOption {
+                        network: 0,
+                        pid: 1,
+                        ipc: 0,
+                        target_id: String::new(),
+                    }),
+                }),
                 resources: Some(CriLinuxContainerResources {
                     cpu_period: 100_000,
                     cpu_quota: 150_000,
@@ -1873,6 +1977,7 @@ mod tests {
         assert_eq!(metadata.name, "pod-a");
         assert_eq!(metadata.attempt, 2);
         assert_eq!(decoded.dns_config.unwrap().servers, ["10.96.0.10"]);
+        assert_eq!(decoded.hostname, "pod-hostname");
     }
 
     #[test]
@@ -1895,6 +2000,8 @@ mod tests {
         assert_eq!(annotations[ANNO_SANDBOX_UID], "uid-a");
         assert_eq!(annotations[ANNO_SANDBOX_NAMESPACE], "ns-a");
         assert_eq!(annotations[ANNO_SANDBOX_NAME], "pod-a");
+        assert_eq!(annotations[ANNO_SANDBOX_HOSTNAME], "pod-hostname");
+        assert_eq!(annotations[ANNO_SANDBOX_PIDNS], "false");
         assert_eq!(annotations["pod.example/key"], "value");
         assert_eq!(annotations["request.example/key"], "request");
         let dns: Vec<String> = serde_json::from_str(&annotations[ANNO_SANDBOX_DNS]).unwrap();
@@ -1906,6 +2013,65 @@ mod tests {
                 "options ndots:5",
             ]
         );
+    }
+
+    #[test]
+    fn cri_namespace_modes_map_pid_sharing_and_reject_host_namespaces() {
+        let mut config = sample_cri();
+        assert!(!shared_pid_namespace(&config).unwrap());
+
+        config
+            .linux
+            .as_mut()
+            .unwrap()
+            .security_context
+            .as_mut()
+            .unwrap()
+            .namespace_options
+            .as_mut()
+            .unwrap()
+            .pid = 0;
+        assert!(shared_pid_namespace(&config).unwrap());
+
+        for (field, expected) in [
+            ("network", "hostNetwork"),
+            ("pid", "hostPID"),
+            ("ipc", "hostIPC"),
+        ] {
+            let mut host = sample_cri();
+            let options = host
+                .linux
+                .as_mut()
+                .unwrap()
+                .security_context
+                .as_mut()
+                .unwrap()
+                .namespace_options
+                .as_mut()
+                .unwrap();
+            match field {
+                "network" => options.network = 2,
+                "pid" => options.pid = 2,
+                "ipc" => options.ipc = 2,
+                _ => unreachable!(),
+            }
+            assert!(shared_pid_namespace(&host).unwrap_err().contains(expected));
+        }
+    }
+
+    #[test]
+    fn cri_namespace_options_absent_preserves_container_pid_default() {
+        let config = CriPodSandboxConfig {
+            metadata: sample_cri().metadata,
+            hostname: String::new(),
+            ..Default::default()
+        };
+        assert!(!shared_pid_namespace(&config).unwrap());
+        let mut spec = Spec::default();
+        merge_cri_annotations(&mut spec, &config, &HashMap::new()).unwrap();
+        let annotations = spec.annotations().as_ref().unwrap();
+        assert_eq!(annotations[ANNO_SANDBOX_PIDNS], "false");
+        assert_eq!(annotations[ANNO_SANDBOX_HOSTNAME], "pod-a");
     }
 
     #[test]

@@ -1457,12 +1457,14 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
                 s.id = req.sandbox_id.clone();
             }
 
-            s.setup_shared_namespaces().await.map_err(|e| {
-                ttrpc_error!(
-                    ttrpc::Code::INTERNAL,
-                    format!("setup shared namespaces failed:{:?}", e)
-                )
-            })?;
+            s.setup_shared_namespaces(req.sandbox_pidns())
+                .await
+                .map_err(|e| {
+                    ttrpc_error!(
+                        ttrpc::Code::INTERNAL,
+                        format!("setup shared namespaces failed:{:?}", e)
+                    )
+                })?;
         }
         debug!(sl!(), "add storage:{:?}", req.storages.to_vec());
         start = Instant::now();

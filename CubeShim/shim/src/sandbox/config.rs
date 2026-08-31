@@ -39,6 +39,8 @@ pub const ANNO_PAUSE_SNAPSHOT_ID: &str = "cube.master.pause.snapshot.id";
 /// Present on create-from-runtime-snapshot (FromSnap). Same guest-mount
 /// contract as pause resume: reconnect host virtiofs, do not remount in-guest.
 pub const ANNO_RUNTIME_SNAPSHOT_ID: &str = "cube.master.runtime.snapshot.id";
+pub const ANNO_SANDBOX_HOSTNAME: &str = "cube.sandbox.hostname";
+pub const ANNO_SANDBOX_PIDNS: &str = "cube.sandbox.pidns";
 
 pub const SHARE_CACHE_ALWAYS: u8 = 1;
 pub const SHARE_CACHE_NEVER: u8 = 2;
@@ -72,6 +74,10 @@ pub struct Config {
     pub app_snapshot_create: bool,
     pub app_snapshot_restore: bool,
     pub use_passfd_io: bool,
+    /// Kubernetes Pod hostname used for the Guest shared UTS namespace.
+    pub sandbox_hostname: String,
+    /// Whether all containers join one Guest PID namespace.
+    pub sandbox_pidns: bool,
     /// Extra kernel cmdline parameters injected through annotations.
     pub extra_kernel_params: Vec<String>,
 }
@@ -102,6 +108,8 @@ impl Default for Config {
             app_snapshot_create: false,
             app_snapshot_restore: false,
             use_passfd_io: true,
+            sandbox_hostname: String::new(),
+            sandbox_pidns: false,
             extra_kernel_params: Vec::new(),
         }
     }
@@ -186,6 +194,19 @@ impl Config {
             .get("cube.use_passfd_io")
             .map(|v| !v.eq_ignore_ascii_case("false"))
             .unwrap_or(true);
+        let sandbox_hostname = anno
+            .get(ANNO_SANDBOX_HOSTNAME)
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default();
+        let sandbox_pidns = match anno.get(ANNO_SANDBOX_PIDNS).map(|value| value.trim()) {
+            None | Some("") | Some("false") => false,
+            Some("true") => true,
+            Some(value) => {
+                return Err(format!(
+                    "invalid {ANNO_SANDBOX_PIDNS} value {value:?}; expected true or false"
+                ))
+            }
+        };
 
         let mut cube_vips = String::new();
         if let Some(v) = anno.get(ANNO_CUBE_VIPS) {
@@ -272,6 +293,8 @@ impl Config {
             app_snapshot_create,
             app_snapshot_restore,
             use_passfd_io,
+            sandbox_hostname,
+            sandbox_pidns,
             extra_kernel_params,
         };
         Ok(c)
@@ -312,6 +335,8 @@ mod tests {
     use crate::common::utils::Utils;
     use crate::common::PRODUCT_CUBEBOX;
     use crate::sandbox::config::Config;
+    use crate::sandbox::config::ANNO_SANDBOX_HOSTNAME;
+    use crate::sandbox::config::ANNO_SANDBOX_PIDNS;
     use crate::sandbox::config::ANNO_SNAPSHOT_BASE;
     use crate::sandbox::config::ANNO_SNAPSHOT_MEMORY_VOL_URL;
     use crate::sandbox::config::ANNO_VM_AGENT;
@@ -508,5 +533,32 @@ mod tests {
         assert!(ret.is_ok());
         let config = ret.unwrap();
         assert_eq!(config.extra_kernel_params, vec!["single=param".to_string()]);
+    }
+
+    #[test]
+    fn test_kubernetes_sandbox_namespace_config() {
+        let mut annotations = HashMap::<String, String>::from([(
+            ANNO_VM_RES.to_string(),
+            r#"{"cpu": 1, "memory": 256}"#.to_string(),
+        )]);
+
+        let config = Config::new(&Some(annotations.clone())).unwrap();
+        assert_eq!(config.sandbox_hostname, "");
+        assert!(!config.sandbox_pidns);
+
+        annotations.insert(
+            ANNO_SANDBOX_HOSTNAME.to_string(),
+            "pod-hostname".to_string(),
+        );
+        annotations.insert(ANNO_SANDBOX_PIDNS.to_string(), "true".to_string());
+        let config = Config::new(&Some(annotations.clone())).unwrap();
+        assert_eq!(config.sandbox_hostname, "pod-hostname");
+        assert!(config.sandbox_pidns);
+
+        annotations.insert(ANNO_SANDBOX_PIDNS.to_string(), "yes".to_string());
+        assert!(Config::new(&Some(annotations))
+            .err()
+            .unwrap()
+            .contains("expected true or false"));
     }
 }

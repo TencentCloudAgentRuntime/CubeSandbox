@@ -678,12 +678,6 @@ impl Sandbox for SandboxService {
                 "bundle_path must be absolute",
             ));
         }
-        if req.netns_path.is_empty() || !Path::new(&req.netns_path).is_absolute() {
-            return Err(rpc_error(
-                Code::INVALID_ARGUMENT,
-                "netns_path must be absolute; host-network sandboxes are not supported",
-            ));
-        }
         let options = req.options.as_ref().ok_or_else(|| {
             rpc_error(
                 Code::INVALID_ARGUMENT,
@@ -692,6 +686,14 @@ impl Sandbox for SandboxService {
         })?;
         let config = runtime_resource::decode_cri_config(&options.type_url, &options.value)
             .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
+        runtime_resource::shared_pid_namespace(&config)
+            .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
+        if req.netns_path.is_empty() || !Path::new(&req.netns_path).is_absolute() {
+            return Err(rpc_error(
+                Code::INVALID_ARGUMENT,
+                "netns_path must be absolute; host-network sandboxes are not supported",
+            ));
+        }
         let fingerprint =
             create_request_fingerprint(&req, &runtime_resource::cri_semantic_fingerprint(&config));
         let config_path = Path::new(&req.bundle_path).join("config.json");

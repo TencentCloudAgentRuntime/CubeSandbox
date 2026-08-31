@@ -551,6 +551,7 @@ impl Container {
             stdin_port,
             stdout_port,
             stderr_port,
+            sandbox_pidns: self.sb_conf.sandbox_pidns,
             ..Default::default()
         };
 

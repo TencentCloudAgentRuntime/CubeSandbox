@@ -47,6 +47,9 @@ pub struct Sandbox {
     pub shared_utsns: Namespace,
     pub shared_ipcns: Namespace,
     pub sandbox_pidns: Option<Namespace>,
+    /// Guest PID of the pause-like process that remains PID 1 in a shared Pod
+    /// process namespace. Kept for diagnostics; VM teardown owns its lifetime.
+    pub sandbox_pidns_holder: Option<pid_t>,
     pub storages: HashMap<String, u32>,
     pub running: bool,
     pub no_pivot_root: bool,
@@ -77,6 +80,7 @@ impl Sandbox {
             shared_utsns: Namespace::new(&logger),
             shared_ipcns: Namespace::new(&logger),
             sandbox_pidns: None,
+            sandbox_pidns_holder: None,
             storages: HashMap::new(),
             running: false,
             no_pivot_root: fs_type.eq(TYPE_ROOTFS),
@@ -169,7 +173,7 @@ impl Sandbox {
     }
 
     #[instrument]
-    pub async fn setup_shared_namespaces(&mut self) -> Result<bool> {
+    pub async fn setup_shared_namespaces(&mut self, shared_pidns: bool) -> Result<bool> {
         // Set up shared IPC namespace
         self.shared_ipcns = Namespace::new(&self.logger)
             .get_ipc()
@@ -183,6 +187,18 @@ impl Sandbox {
             .setup()
             .await
             .context("Failed to setup persistent UTS namespace")?;
+
+        if shared_pidns {
+            let (namespace, holder) = Namespace::new(&self.logger)
+                .get_pid()
+                .setup_pid()
+                .context("Failed to setup shared PID namespace")?;
+            self.sandbox_pidns = Some(namespace);
+            self.sandbox_pidns_holder = Some(holder);
+        } else {
+            self.sandbox_pidns = None;
+            self.sandbox_pidns_holder = None;
+        }
 
         Ok(true)
     }
