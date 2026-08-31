@@ -12,6 +12,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
@@ -50,6 +51,7 @@ type Service struct {
 	adapter     Adapter
 	fdEndpoint  string
 	operations  kmutex.KeyedLocker
+	reaperMu    sync.Mutex
 }
 
 func NewService(store LifecycleStore, adapter Adapter, fdEndpoint string) (*Service, *handoff.Registry, error) {
@@ -203,17 +205,16 @@ func (s *Service) cleanupFailedPrepare(request *runtimev1.PrepareSandboxRequest,
 
 func (s *Service) releaseLocked(ctx context.Context, release state.ReleaseRequest) error {
 	before, err := s.store.Inspect(release.SandboxID)
-	if status.Code(err) == codes.NotFound {
-		return nil
-	}
-	if err != nil {
+	if err != nil && status.Code(err) != codes.NotFound {
 		return err
 	}
+	ownedActive := before != nil && before.Active != nil &&
+		before.Active.Generation == release.Generation && before.Active.LeaseID == release.LeaseID
 	result, err := s.coordinator.BeginReleaseAndFence(release)
 	if err != nil {
 		return err
 	}
-	if before.Active == nil {
+	if !ownedActive {
 		return nil
 	}
 	if err := s.adapter.Release(ctx, release, result.Lease.NetworkHandle); err != nil {
@@ -226,8 +227,7 @@ func (s *Service) releaseLocked(ctx context.Context, release state.ReleaseReques
 }
 
 func releaseKey(sandboxID string, generation uint64, leaseID string) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("cube-runtime-release-v1:%s:%d:%s", sandboxID, generation, leaseID)))
-	return hex.EncodeToString(sum[:])
+	return state.ExpectedReleaseKey(sandboxID, generation, leaseID)
 }
 
 func (s *Service) ReleaseSandbox(ctx context.Context, request *runtimev1.ReleaseSandboxRequest) (*runtimev1.ReleaseSandboxResponse, error) {

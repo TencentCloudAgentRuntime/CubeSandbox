@@ -89,6 +89,17 @@ func (c *Coordinator) BeginReleaseAndFence(request state.ReleaseRequest) (*state
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	record, err := c.store.Inspect(request.SandboxID)
+	if status.Code(err) == codes.NotFound {
+		result, beginErr := c.store.BeginRelease(request)
+		if state.IsCommitUnknown(beginErr) {
+			c.uncertain[request.SandboxID] = request
+			delete(c.confirmed, request.SandboxID)
+		} else if beginErr == nil {
+			delete(c.uncertain, request.SandboxID)
+			delete(c.confirmed, request.SandboxID)
+		}
+		return result, beginErr
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -130,6 +141,9 @@ func (c *Coordinator) BeginReleaseAndFence(request state.ReleaseRequest) (*state
 		record.Active.LeaseID == request.LeaseID {
 		delete(c.uncertain, request.SandboxID)
 		c.confirmed[request.SandboxID] = request
+	} else {
+		delete(c.uncertain, request.SandboxID)
+		delete(c.confirmed, request.SandboxID)
 	}
 	return result, nil
 }

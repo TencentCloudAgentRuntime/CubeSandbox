@@ -8,6 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
+
+	"github.com/containerd/log"
 
 	"github.com/containerd/containerd/v2/plugins"
 	"github.com/containerd/plugin"
@@ -26,6 +29,7 @@ type Config struct {
 	StateDir       string `toml:"state_dir"`
 	SharedRoot     string `toml:"shared_root"`
 	FDHandoff      string `toml:"fd_handoff"`
+	ReaperDir      string `toml:"reaper_dir"`
 	KernelPath     string `toml:"kernel_path"`
 	AgentPath      string `toml:"agent_path"`
 	GuestImagePath string `toml:"guest_image_path"`
@@ -66,6 +70,9 @@ func initPlugin(ic *plugin.InitContext) (interface{}, error) {
 	if config.FDHandoff == "" {
 		config.FDHandoff = filepath.Join(volatile, pluginID+"-fd.sock")
 	}
+	if config.ReaperDir == "" {
+		config.ReaperDir = runtimeservice.DefaultReaperRoot
+	}
 	if config.SocketMode == 0 {
 		config.SocketMode = 0o660
 	}
@@ -88,12 +95,18 @@ func initPlugin(ic *plugin.InitContext) (interface{}, error) {
 	if err := service.Recover(ic.Context); err != nil {
 		return nil, fmt.Errorf("recover runtime resources before serving: %w", err)
 	}
+	if err := service.RecoverReaperJobs(ic.Context, config.ReaperDir); err != nil {
+		return nil, fmt.Errorf("recover durable RuntimeResource reaper jobs before serving: %w", err)
+	}
 	listener, err := handoff.Listen(config.FDHandoff, os.FileMode(config.SocketMode), handoffRegistry,
 		handoff.AuthorizePeerIDs(syscall.Ucred{Uid: config.PeerUID, Gid: config.PeerGID}))
 	if err != nil {
 		return nil, err
 	}
 	instance := &servicePlugin{service: service, listener: listener}
+	go service.RunReaperSupervisor(ic.Context, config.ReaperDir, time.Second, func(err error) {
+		log.G(ic.Context).WithError(err).Error("retry durable RuntimeResource reaper jobs")
+	})
 	go func() {
 		<-ic.Context.Done()
 		_ = instance.listener.Close()

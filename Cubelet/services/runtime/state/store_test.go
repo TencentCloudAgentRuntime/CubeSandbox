@@ -90,7 +90,7 @@ func TestPrepareIdempotencyAndGenerationRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Reused || first.Lease.LeaseID != leaseIDForPrepare(request) || first.Lease.HandoffToken != "value-1" {
+	if first.Reused || first.Lease.LeaseID != ExpectedLeaseIDForPrepare(request) || first.Lease.HandoffToken != "value-1" {
 		t.Fatalf("first prepare=%+v", first)
 	}
 	retry, err := store.Prepare(request)

@@ -3,6 +3,12 @@
 
 //! Client for Cubelet's node-resources-only RuntimeResource v1 service.
 
+#[cfg(test)]
+mod identity_tests;
+mod reaper_queue;
+#[cfg(test)]
+mod reaper_queue_tests;
+
 use hyper_util::rt::TokioIo;
 use nix::cmsg_space;
 use nix::sys::socket::{recvmsg, MsgFlags};
@@ -44,7 +50,7 @@ const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const CRI_V1_POD_SANDBOX_CONFIG: &str = "runtime.v1.PodSandboxConfig";
 const RUNTIME_CLEANUP_RECORD: &str = "cube-runtime-resource.json";
 const RUNTIME_REAPER_ROOT_ENV: &str = "CUBE_RUNTIME_RESOURCE_REAPER_DIR";
-const DEFAULT_RUNTIME_REAPER_ROOT: &str = "/run/cubesandbox/runtime-resource-reaper";
+const DEFAULT_RUNTIME_REAPER_ROOT: &str = "/data/cubelet/runtime-resource-reaper";
 pub(crate) const RUNTIME_REAPER_ACTION: &str = "runtime-resource-reaper";
 
 const REQUIRED_CAPABILITIES: [(&str, u32); 3] = [
@@ -565,23 +571,7 @@ pub(crate) fn handoff_persisted_to_reaper() -> Result<(), String> {
         return Ok(());
     };
     let root = reaper_root()?;
-    let job = root.join(reaper_job_id(&record)?);
-    std::fs::create_dir_all(&job).map_err(|error| {
-        format!(
-            "create RuntimeResource reaper job {}: {error}",
-            job.display()
-        )
-    })?;
-    let lease = RuntimeLease {
-        endpoint: record.endpoint.clone(),
-        sandbox: PreparedSandbox {
-            sandbox_id: record.sandbox_id.clone(),
-            lease_id: record.lease_id.clone(),
-            generation: record.generation,
-            ..Default::default()
-        },
-    };
-    lease.persist_cleanup_record_at(&job.join(RUNTIME_CLEANUP_RECORD))?;
+    let job = reaper_queue::persist_reaper_job_at(&root, &record)?;
 
     let executable = std::env::current_exe()
         .map_err(|error| format!("resolve RuntimeResource reaper executable: {error}"))?;
@@ -608,27 +598,25 @@ pub(crate) fn handoff_persisted_to_reaper() -> Result<(), String> {
             Ok(())
         });
     }
-    command.spawn().map_err(|error| {
-        format!(
-            "spawn RuntimeResource reaper for {}: {error}",
-            record.sandbox_id
-        )
-    })?;
-    Ok(())
+    match command.spawn() {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            if load_cleanup_record_at(&job.join(RUNTIME_CLEANUP_RECORD))?.is_none() {
+                return Ok(());
+            }
+            Err(format!(
+                "spawn RuntimeResource reaper for {}: {error}",
+                record.sandbox_id
+            ))
+        }
+    }
 }
 
 pub(crate) async fn run_persisted_reaper() -> Result<(), String> {
     release_persisted_until_done().await;
     let job = std::env::current_dir()
         .map_err(|error| format!("resolve RuntimeResource reaper job: {error}"))?;
-    match std::fs::remove_dir(&job) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!(
-            "remove RuntimeResource reaper job {}: {error}",
-            job.display()
-        )),
-    }
+    reaper_queue::remove_reaper_job_directory(&job)
 }
 
 async fn retry_until_success<F, Fut>(mut operation: F, initial_delay: Duration, max_delay: Duration)

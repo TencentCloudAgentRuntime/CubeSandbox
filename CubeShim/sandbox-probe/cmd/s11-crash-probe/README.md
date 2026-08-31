@@ -35,9 +35,11 @@ S11_CRASH_CONTINUE_FILE=/tmp/s11/continue \
 探针写入 `S11_CRASH_READY_FILE` 后暂停。此时停止 RuntimeResource 服务，创建
 `S11_CRASH_CONTINUE_FILE`，等 shim 被终止且 reaper job 已写入后，再用同一状态
 目录重启 RuntimeResource 服务。成功时输出
-`S11_SHIM_KILL_RETRY_RELEASE_OK`。
+`S11_SHIM_KILL_RETRY_RELEASE_OK`。要验证仅剩 durable job 的恢复路径，可在 job 文件出现后、
+重启 RuntimeResource 服务前，只终止本次 `runtime-resource-reaper` 进程；重启后的
+startup scanner 必须独立完成 Release 并清空 job。
 
 隔离 containerd 应设置绝对路径
 `CUBE_RUNTIME_RESOURCE_REAPER_DIR`；未设置时 CubeShim 使用
-`/run/cubesandbox/runtime-resource-reaper`。该探针仅为按需运行的 PoC 工具，
+`/data/cubelet/runtime-resource-reaper`。该探针仅为按需运行的 PoC 工具，
 不会进入 CubeShim 运行时进程。

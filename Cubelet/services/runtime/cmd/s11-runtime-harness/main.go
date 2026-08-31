@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
 	runtimeservice "github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime"
@@ -158,10 +159,14 @@ func syncDir(path string) error {
 }
 
 func main() {
-	if len(os.Args) != 6 {
-		panic("usage: s11-runtime-harness STATE_DIR GRPC_SOCKET FD_SOCKET RELEASE_MARKER ASSET_DIR")
+	if len(os.Args) != 6 && len(os.Args) != 7 {
+		panic("usage: s11-runtime-harness STATE_DIR GRPC_SOCKET FD_SOCKET RELEASE_MARKER ASSET_DIR [REAPER_DIR]")
 	}
 	stateDir, grpcPath, fdPath, marker, assetDir := os.Args[1], os.Args[2], os.Args[3], os.Args[4], os.Args[5]
+	reaperDir := filepath.Join(stateDir, "reaper")
+	if len(os.Args) == 7 {
+		reaperDir = os.Args[6]
+	}
 	for _, directory := range []string{stateDir, filepath.Join(stateDir, "adapter"), filepath.Dir(grpcPath), filepath.Dir(fdPath), filepath.Dir(marker)} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			panic(err)
@@ -179,6 +184,14 @@ func main() {
 	if err := service.Recover(context.Background()); err != nil {
 		panic(err)
 	}
+	if err := service.RecoverReaperJobs(context.Background(), reaperDir); err != nil {
+		panic(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go service.RunReaperSupervisor(ctx, reaperDir, 100*time.Millisecond, func(err error) {
+		fmt.Fprintf(os.Stderr, "RuntimeResource reaper retry: %v\n", err)
+	})
 	fdListener, err := handoff.Listen(fdPath, 0o660, registry, handoff.AuthorizePeerIDs(syscall.Ucred{Uid: uint32(os.Getuid()), Gid: uint32(os.Getgid())}))
 	if err != nil {
 		panic(err)

@@ -95,8 +95,8 @@ type ReleaseResult struct {
 	Reused bool
 }
 
-// ValueGenerator returns a durable opaque value. Production uses crypto/rand;
-// tests inject a deterministic generator.
+// ValueGenerator returns a durable opaque handoff token. Lease IDs are derived
+// deterministically from Prepare identity; tests can inject token values.
 type ValueGenerator func() (string, error)
 
 // PersistenceHooks are deterministic durability fault-injection points. A
@@ -168,7 +168,8 @@ func Open(dir string, generator ValueGenerator, options ...OpenOption) (*Store, 
 	return store, nil
 }
 
-func leaseIDForPrepare(request PrepareRequest) string {
+// ExpectedLeaseIDForPrepare derives the cross-language lease identity before allocation.
+func ExpectedLeaseIDForPrepare(request PrepareRequest) string {
 	hasher := sha256.New()
 	for _, part := range [][]byte{[]byte("cube-runtime-resource-lease-v1"), []byte(request.SandboxID), []byte(strconv.FormatUint(request.Generation, 10)), []byte(request.IdempotencyKey)} {
 		var size [8]byte
@@ -177,6 +178,14 @@ func leaseIDForPrepare(request PrepareRequest) string {
 		_, _ = hasher.Write(part)
 	}
 	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+// ExpectedReleaseKey is shared by the service and future-release fencing. A
+// release for state that has not arrived yet is accepted only when this exact
+// key proves it came from the deterministic CubeShim cleanup identity.
+func ExpectedReleaseKey(sandboxID string, generation uint64, leaseID string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("cube-runtime-release-v1:%s:%d:%s", sandboxID, generation, leaseID)))
+	return hex.EncodeToString(sum[:])
 }
 
 func randomValue() (string, error) {
@@ -229,7 +238,7 @@ func (s *Store) Prepare(request PrepareRequest) (*PrepareResult, error) {
 		return nil, status.Error(codes.FailedPrecondition, "prepare generation is at or below the durable high-watermark")
 	}
 
-	leaseID := leaseIDForPrepare(request)
+	leaseID := ExpectedLeaseIDForPrepare(request)
 	token, err := s.generate()
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
@@ -297,7 +306,7 @@ func (s *Store) BeginRelease(request ReleaseRequest) (*ReleaseResult, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	record, err := s.load(request.SandboxID)
+	record, err := s.loadOrNew(request.SandboxID)
 	if err != nil {
 		return nil, stateLoadError(err)
 	}
@@ -317,7 +326,22 @@ func (s *Store) BeginRelease(request ReleaseRequest) (*ReleaseResult, error) {
 	}
 	if record.Active == nil {
 		if request.Generation > record.HighWatermark {
-			return nil, status.Error(codes.NotFound, "release generation was never prepared")
+			if request.LeaseID != ExpectedLeaseIDForCubeShim(request.SandboxID, request.Generation) ||
+				request.IdempotencyKey != ExpectedReleaseKey(request.SandboxID, request.Generation, request.LeaseID) {
+				return nil, status.Error(codes.NotFound, "release generation was never prepared")
+			}
+			tombstone := Tombstone{
+				Generation: request.Generation, LeaseID: request.LeaseID, ReleaseKey: request.IdempotencyKey,
+			}
+			record.HighWatermark = request.Generation
+			record.Tombstones[generationKey(request.Generation)] = tombstone
+			record.IdempotencyKeys[request.IdempotencyKey] = KeyUse{
+				Operation: OperationRelease, Generation: request.Generation, LeaseID: request.LeaseID,
+			}
+			if err := s.persist(record); err != nil {
+				return nil, err
+			}
+			return &ReleaseResult{Lease: leaseFromTombstone(tombstone)}, nil
 		}
 		return nil, status.Error(codes.FailedPrecondition, "release does not match a durable tombstone")
 	}
