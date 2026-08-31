@@ -1032,6 +1032,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_sandbox_allows_distinct_task_creates_and_waits_for_all() {
+        let lifecycle = Arc::new(SandboxLifecycle::default());
+        let shared_root = PathBuf::from(format!(
+            "/data/cubelet/s11/shared/sb-multitask-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&shared_root).unwrap();
+        {
+            let mut state = lifecycle.state.lock().await;
+            state.phase = Phase::Ready;
+            state.runtime = Some(RuntimeLease::test_with_shared_root(
+                shared_root.to_str().unwrap(),
+            ));
+        }
+
+        let alpha = lifecycle.reserve_task_create("alpha").await.unwrap();
+        let beta = lifecycle.reserve_task_create("beta").await.unwrap();
+        assert_eq!(
+            alpha.mode(),
+            &TaskMode::ManagedReady {
+                shared_root: shared_root.clone()
+            }
+        );
+        assert_eq!(alpha.mode(), beta.mode());
+
+        let shutdown = {
+            let lifecycle = lifecycle.clone();
+            tokio::spawn(async move { lifecycle.begin_shutdown().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!shutdown.is_finished());
+        drop(alpha);
+        tokio::task::yield_now().await;
+        assert!(!shutdown.is_finished());
+        drop(beta);
+        assert_eq!(
+            shutdown.await.unwrap(),
+            ShutdownAction::Run { force_abort: true }
+        );
+
+        std::fs::remove_dir_all(&shared_root).unwrap();
+    }
+
+    #[tokio::test]
     async fn shutdown_waits_for_detached_operation_before_transitioning() {
         let lifecycle = Arc::new(SandboxLifecycle::default());
         lifecycle.state.lock().await.phase = Phase::Creating;

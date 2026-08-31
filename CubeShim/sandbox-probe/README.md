@@ -145,6 +145,20 @@ sudo scripts/verify-s14-legacy-cubebox-tests-cloud.sh
 sudo scripts/verify-s14-legacy-shim-cloud.sh
 ```
 
+## S2.1 动态多容器验收
+
+`scripts/verify-s21-multicontainer-cloud.sh` 在主 containerd 上创建包含 alpha、beta 两个
+普通容器的 `RuntimeClass/cube` Pod，验证两个独立 Task/rootfs 共用一个 Sandbox、Cube
+VM 和 Pod IP，并分别检查 logs 与非 TTY/非 stdin exec。脚本通过 CRI 停止和删除
+alpha，要求旧 Task/rootfs 清理、beta ID 和运行状态不变，同时验证 kubelet 只重建
+alpha；最后删除 Pod 并比较 container、Task、Sandbox、snapshot、netns、shim、reaper、
+VM、mount 和 RuntimeResource active lease 的前后基线，且仅允许新增一条 durable
+tombstone。证据写入 `/data/cubelet/s2.1-evidence/multicontainer-<UTC>`。
+
+```bash
+sudo scripts/verify-s21-multicontainer-cloud.sh
+```
+
 shim 默认写 `/run/cube-s0/trace.jsonl`，CNI wrapper 写
 `/run/cube-s0/cni.jsonl`；可用 `CUBE_S0_TRACE_PATH` 改写 shim trace 位置。
 
