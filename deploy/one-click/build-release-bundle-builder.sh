@@ -76,6 +76,7 @@ rm -f \
   "${PREBUILT_DIR}/cubeopscli" \
   "${PREBUILT_DIR}/cubevsmapdump" \
   "${PREBUILT_DIR}/cube-agent" \
+  "${PREBUILT_DIR}/cube-pidns-holder" \
   "${PREBUILT_DIR}/cube-init" \
   "${PREBUILT_DIR}/containerd-shim-cube-rs" \
   "${PREBUILT_DIR}/cube-runtime"
@@ -473,6 +474,7 @@ for artifact in \
   cubeopscli \
   cubevsmapdump \
   cube-agent \
+  cube-pidns-holder \
   cube-init \
   containerd-shim-cube-rs \
   cube-runtime
@@ -495,6 +497,7 @@ ONE_CLICK_CUBE_OPS_BIN="${PREBUILT_DIR}/cubeops" \
 ONE_CLICK_CUBE_OPS_CLI_BIN="${PREBUILT_DIR}/cubeopscli" \
 ONE_CLICK_CUBEVSMAPDUMP_BIN="${PREBUILT_DIR}/cubevsmapdump" \
 ONE_CLICK_CUBE_AGENT_BIN="${PREBUILT_DIR}/cube-agent" \
+ONE_CLICK_CUBE_PIDNS_HOLDER_BIN="${PREBUILT_DIR}/cube-pidns-holder" \
 ONE_CLICK_CUBE_INIT_BIN="${PREBUILT_DIR}/cube-init" \
 ONE_CLICK_CUBESHIM_BIN="${PREBUILT_DIR}/containerd-shim-cube-rs" \
 ONE_CLICK_CUBE_RUNTIME_BIN="${PREBUILT_DIR}/cube-runtime" \

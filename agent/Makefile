@@ -100,8 +100,10 @@ CWD := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 
 ifeq ($(MUSL),yes)
 TARGET_PATH = target/$(TRIPLE)/$(BUILD_TYPE)/$(TARGET)
+PIDNS_HOLDER_TARGET_PATH = target/$(TRIPLE)/$(BUILD_TYPE)/cube-pidns-holder
 else
 TARGET_PATH = target/$(BUILD_TYPE)/$(TARGET)
+PIDNS_HOLDER_TARGET_PATH = target/$(BUILD_TYPE)/cube-pidns-holder
 endif
 
 ##VAR DESTDIR=<path> is a directory prepended to each installed target file
@@ -148,6 +150,7 @@ optimize: show-summary show-header
 ##TARGET install: install agent
 install:
 	@install -D $(TARGET_PATH) $(DESTDIR)/$(BINDIR)/$(TARGET)
+	@install -D $(PIDNS_HOLDER_TARGET_PATH) $(DESTDIR)/$(BINDIR)/cube-pidns-holder
 
 ##TARGET clean: clean build
 clean:
