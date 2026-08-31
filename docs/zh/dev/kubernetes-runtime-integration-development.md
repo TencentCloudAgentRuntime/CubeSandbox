@@ -268,7 +268,7 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
-| S1.1 Sandbox VM 生命周期 | `VALIDATING` | Codex | Rust Sandbox Service、Cubelet RuntimeResource adapter/recovery、真实 Unix FD handoff 与 VM 失败回滚已实现；官方 containerd 跨语言 Create 成功，缺 KVM Start 精确释放；并发 Shutdown 已串行化并覆盖回归 | `47522929`、`e7881524`、`dfdc0455`、`f61d1317`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s1.1/README.md) | 云端真实 Cube VM 成功链路、清理验收与 subagent 复审 |
+| S1.1 Sandbox VM 生命周期 | `VALIDATING` | Codex | 生命周期、持久 lease、FD handoff、失败回滚、dead-shim durable reaper queue 与 Release-before-Prepare 围栏已实现；隔离 containerd job-only 重启恢复通过；代码 reviewer `APPROVE` | `47522929`～`37e08b32`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s1.1/README.md) | 获得精确源码包传输批准后跑云端真实 TAP/完整 Cube VM 与清理验收，再做 S1.1 最终复审 |
 | S1.2 OCI Task | `NOT_STARTED` | 待指定 | — | — | 打通单容器 Create/Start/Wait/Kill/Delete |
 | S1.3 CRI 基础交互 | `NOT_STARTED` | 待指定 | — | — | 实现 logs、非 TTY exec、信号和退出码 |
 | S1.4 清理与共存 | `NOT_STARTED` | 待指定 | — | — | 验证资源清理、runc 和 legacy 回归 |

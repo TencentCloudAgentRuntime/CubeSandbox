@@ -1,6 +1,6 @@
 # S1.1 Sandbox VM 生命周期验收证据
 
-> 状态：`VALIDATING`。本地协议、状态机、FD handoff 与失败回滚已通过；真实 PVM/KVM Cube VM 的云端成功链路尚待源码同步门禁解除。
+> 状态：`VALIDATING`。本地协议、状态机、FD handoff、乱序 cleanup 和 dead-shim job-only 恢复已通过代码复审；真实 PVM/KVM Cube VM 的云端成功链路尚待精确源码同步门禁解除。
 
 ## 实现范围
 
@@ -17,6 +17,10 @@
 - `e7881524`：修正真实联调发现的 route family、asset/KVM preflight、API version negotiation 和 durable state 枚举覆盖。
 - `dfdc0455`：串行化 Shutdown 与 detached Create/Start/Stop，并在 VM teardown 错误时清除已释放 lease。
 - `f61d1317`：抽取可测试的 Shutdown transition，并增加并发操作等待与重复关闭回归测试。
+- `8713d4dd`、`aff6b0d5`、`e6a15a8b`：加固 recovery，预写确定性 cleanup identity，并增加 bundle 外 detached reaper 与 dead-shim 探针。
+- `a1b6173f`：关闭取消上下文、READY commit-unknown、FD control truncation、multi-queue TAP 和长时重试被 containerd kill 的恢复缺口。
+- `80c3050a`：实现 Release-before-Prepare durable fence、Go/Rust 共享身份向量、持久 reaper queue fsync 与 Cubelet startup/continuous scanner。
+- `37e08b32`：确保 exact active/tombstone Release 重试成功前重新 fsync 父目录，覆盖重启后 post-rename response-loss。
 
 ## 官方 containerd wire 验证
 
@@ -40,6 +44,23 @@ released s11-cross-sandbox-v5 3 18cc0e1ed5c6e800ae99d56b81ebfb3cc08c1acca1847ec0
 
 对应 durable record 的 generation 3 已转为 tombstone，无 active lease；`containerd-shim-cube-rs` 进程和本次 sandbox socket 均为 0。联调同时发现并修复 legacy Cube 网络 JSON 缺少必填 route `family` 的问题；IPv4/IPv6 family 和非法 IP 均已有单测。
 
+## 隔离 containerd job-only 恢复
+
+使用 containerd 2.3.4 的独立 root/state/socket 和当前二进制：
+
+1. 创建 Sandbox 并停止 RuntimeResource harness；
+2. 终止本次 shim，让 dead-shim delete helper 写入 bundle 外 durable reaper job；
+3. 精确终止本次 detached `runtime-resource-reaper`，确认 Release marker 不存在、job record 仍在；
+4. 不重启 containerd，仅用相同 state/reaper 目录重启 harness。
+
+Cubelet startup scanner 独立完成精确 Release，探针输出：
+
+```text
+S11_SHIM_KILL_RETRY_RELEASE_OK
+```
+
+随后 reaper job、adapter record、containerd sandbox bundle 均为空，containerd PID 保持不变。Release-before-Prepare、并发乱序、首次 parent-fsync 失败后的重启重试也有 Go race 回归；同一 subagent 独立重跑并对实现 `APPROVE`。
+
 ## 本地回归
 
 ```bash
@@ -53,16 +74,23 @@ go vet ./services/runtime/... ./plugins/cube/runtime_resource
 ```bash
 cd CubeShim
 LIBRARY_PATH=/tmp/cubesandbox-link-libs cargo test -p containerd-shim-cube-rs --lib
-cargo check -p containerd-shim-cube-rs
+cargo check -p containerd-shim-cube-rs --all-targets
 ```
 
-结果：`97 passed; 0 failed`，`cargo fmt --all --check` 与 `cargo check` 通过。依赖仓库原有 generated code 警告仍存在，没有新增编译错误。
+```bash
+cd CubeShim/sandbox-probe
+go test -race ./...
+go vet ./...
+```
+
+结果：`105 passed; 0 failed`，`cargo fmt --all --check` 与 `cargo check -p containerd-shim-cube-rs --all-targets` 通过。Cubelet RuntimeResource/plugin 与 sandbox-probe 的 Go race/vet 均通过；依赖仓库原有 generated code 警告仍存在，没有新增编译错误。
 
 ## 云端状态
 
 - 目标：香港二区我们创建的 `ins-4dyul5ag`（名称含“勿删”），16C32G，Linux 6.6 PVM host，`/dev/kvm` 可用，containerd 2.3.4。
 - 只读基线 TAT：`inv-b82na40m3i` 成功；确认 `/opt/cubesandbox-src` 仅含早期 S0.3 overlay，不含 RuntimeResource/S1.1 源码。
-- 待执行：把公开基线到实现提交 `f61d1317` 的 179327-byte binary patch（SHA-256 `64c4b6eebfd08e05d30542b8a8dec96f4f6871a338df2924134d30145d831445`）同步到该 CVM，构建当前 CubeShim/Cubelet，并完成真实 Create→Start→Status→Stop→Shutdown 与异常回滚。
-- 阻塞：执行策略要求用户在聊天中明确批准具体源码 payload 和目的地；未获批准前不通过公开 push、其他 bucket 或间接命令绕过。
+- 待执行：把基线 `09274501dd12e47dbed2dcc77d8eb67dd661d49c` 到实现 `37e08b325b5dd39f3a06b44d7da941aa800141b1` 的 207627-byte gzip binary patch（SHA-256 `532ddfcb57d22c77a5f50c8b9ae74621f90fd906359a89611976a3e82dd503c5`）同步到该 CVM，构建当前 CubeShim/Cubelet，并完成真实 TAP/完整 Cube VM Create→Start→Status→Stop→Shutdown 与异常回滚。
+- 重放：临时干净克隆从上述基线应用补丁成功，tree `404ecb2d1a0fab21c1edcb6c74c8145c86950658` 与目标提交完全一致。
+- 阻塞：执行策略要求用户在聊天中明确批准上述具体 payload、我们创建的私有 COS 和我们创建的目的 CVM；未获批准前不通过公开 push、其他 bucket 或间接命令绕过。
 
-S1.1 在真实 VM 成功链路、清理检查和 subagent `APPROVE` 前不得标记 `DONE`。
+代码 reviewer 已对 `37e08b32` 明确 `APPROVE`。S1.1 在真实 VM 成功链路、清理检查和云端结果最终复审 `APPROVE` 前不得标记 `DONE`。
