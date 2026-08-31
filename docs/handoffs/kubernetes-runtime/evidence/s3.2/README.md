@@ -64,3 +64,53 @@ runtime 生命周期，云存储后端兼容性留在 S3.2d 支持矩阵中明�
 
 同一 reviewer 对 live API 约束、清理集合、绑定时序、source 目录修正与最终云证据逐轮
 审查，最终明确给出 `APPROVE`；S3.2a 因此为 `DONE`。
+
+## S3.2b RWO 持久化
+
+### 固定输入
+
+- 实现 commit：`6e2df6fbe20bb271e406dcb47541629c434053ac`
+- 完整 tree：`fa6177d33f0a63e25be7a9e2740aa17ab7dad3a0`
+- 验收脚本：`CubeShim/sandbox-probe/scripts/verify-s32b-rwo-persistence-cloud.sh`
+- 脚本 SHA-256：
+  `17ff8e9db7bf3922acc45245deb4dad2e574018ba7c0a68b204659b73be5b616`
+- 私有 COS 对象：`s3.2b/verify-s32b-rwo-persistence-cloud-17ff8e9d.sh`
+- 最终云验：`inv-983v8eg0jr`，`SUCCESS`
+- 最终只读审计：`inv-983vb002pg`，`SUCCESS`
+- 证据目录：
+  `/data/cubelet/s3.2-evidence/s3.2b-rwo-persistence-20260831T205701Z`
+
+### 生命周期与数据结果
+
+验收沿用 S3.2a 的 static local、Filesystem、RWO、WaitForFirstConsumer、Retain 基线，
+不增加 Cube 私有 PVC 输入：
+
+1. 第一个 Cube Pod 的 `writer` 和 `peer` 把同一 PVC 挂到不同目标路径。四组从 CRI
+   inspect 和 containerd OCI spec 提取的目标挂载记录完全一致；同一轮两个容器的
+   kubelet source 相同，Guest 均看到可写 `virtiofs cubeVolumes`。writer→peer 和
+   peer→writer 的写后读均成功。
+2. 删除第一个 Pod 后，container、Task、Sandbox、snapshot、netns、shim、VM、share、
+   mount 与 active lease 一次恢复运行时基线；该 Pod 的 kubelet 目录、shared root 和旧
+   VM 路径消失。PVC/PV 仍为 `Bound`，UID 和 claimRef 未变，两个数据 marker 仍存在。
+3. 以同名 Pod 重建后，Pod UID、CRI Sandbox、RuntimeResource lease、VM sandbox 路径
+   和 kubelet mount source 全部变化；旧 VM 路径保持不存在。新 Pod 的两个容器读取第一
+   个 Pod 写入的数据，再双向写入两个新 marker。
+4. 删除第二个 Pod 后再次一次恢复运行时基线，PVC/PV 在第四个检查时点仍保持原 UID 与
+   `Bound` 关系，四个 marker 均存在。随后测试清理 storage 对象和本地测试目录，完整
+   Kubernetes/host/runtime 基线恢复，active lease 为 0，durable tombstone 精确增加 2。
+
+最终证据中的 PVC UID 为 `004fe080-0c60-4f4d-9b2b-f50a96d9d9db`，PV UID 为
+`f3b0ab58-c813-4395-b4e9-a65b5c5f8616`；两个 Pod UID 和 Sandbox 均不同。独立审计还
+核对了脚本 SHA、三组 runtime/full baseline、四组 CRI/OCI mount、四个时点的 PV/PVC
+UID 与状态、所有旧路径和固定对象消失，以及 containerd/kubelet/Node 健康。
+
+### 失败修订与阶段边界
+
+首轮 `inv-083v4v0pv7` 只因脚本错误假设 shared root 与 CRI Sandbox 同名而失败；诊断
+`inv-683v6a05ni` 证明 `cleanup_rc=0`，固定对象、adapter、shared、reaper、VM、cleanup
+record、active lease 和本地路径均无残留。修订改为解析活动期唯一的真实 shared root，
+删除后按实际路径验证消失；同一 reviewer 在重跑前明确 `APPROVE`。
+
+本阶段只证明 `static local + Filesystem + RWO` 输入下 Cube runtime 的多容器和 Pod
+重建持久化语义。它不声明 CSI、动态制备、CBS/CFS、跨节点 attach、RWX、扩容或生产
+可用性。同一 reviewer 对最终云验和独立审计明确 `APPROVE`；S3.2b 因此为 `DONE`。
