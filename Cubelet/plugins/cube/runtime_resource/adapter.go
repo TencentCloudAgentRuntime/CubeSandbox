@@ -66,6 +66,14 @@ type diskRecord struct {
 
 var _ runtimeservice.Adapter = (*adapter)(nil)
 
+// NewNodeAdapter builds the production Linux RuntimeResource adapter used by
+// Cubelet and by privileged end-to-end validation. The returned interface keeps
+// the implementation details private while allowing a standalone service to
+// exercise the exact asset, network, TAP, and cleanup path.
+func NewNodeAdapter(stateDir string, assets Assets) (runtimeservice.Adapter, error) {
+	return newAdapter(stateDir, assets, newLinuxNetwork())
+}
+
 func newAdapter(stateDir string, assets Assets, network NetworkOps) (*adapter, error) {
 	if stateDir == "" || network == nil {
 		return nil, errors.New("runtime resource adapter state/network is empty")

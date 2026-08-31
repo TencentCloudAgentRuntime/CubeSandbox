@@ -81,10 +81,10 @@ func initPlugin(ic *plugin.InitContext) (interface{}, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open runtime resource lease store: %w", err)
 	}
-	adapter, err := newAdapter(filepath.Join(config.StateDir, "resources"), Assets{
+	adapter, err := NewNodeAdapter(filepath.Join(config.StateDir, "resources"), Assets{
 		KernelPath: config.KernelPath, AgentPath: config.AgentPath,
 		GuestImagePath: config.GuestImagePath, SharedRootBase: config.SharedRoot,
-	}, newLinuxNetwork())
+	})
 	if err != nil {
 		return nil, err
 	}
