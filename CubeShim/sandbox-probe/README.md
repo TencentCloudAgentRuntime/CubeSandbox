@@ -159,6 +159,19 @@ tombstone。证据写入 `/data/cubelet/s2.1-evidence/multicontainer-<UTC>`。
 sudo scripts/verify-s21-multicontainer-cloud.sh
 ```
 
+## S2.2 Init 与定向重启验收
+
+`scripts/verify-s22-init-restart-cloud.sh` 覆盖三个独立 `RuntimeClass/cube` Pod：两个
+init container 严格串行成功、失败 init 的新 Task 重试、双业务容器中仅重建 exit 23
+的 alpha。脚本按 Pod UID 关联 CRI 对象，比较旧/新 Task 与 rootfs export，确认 app
+不会越过失败 init 启动，并要求 survivor、Pod UID/IP、Sandbox、VM 和 shim PID 保持
+不变。每例删除后均执行 S2.1 全量资源基线检查，最终要求三条 durable tombstone、
+active lease 为零。证据写入 `/data/cubelet/s2.2-evidence/init-restart-<UTC>`。
+
+```bash
+sudo scripts/verify-s22-init-restart-cloud.sh
+```
+
 shim 默认写 `/run/cube-s0/trace.jsonl`，CNI wrapper 写
 `/run/cube-s0/cni.jsonl`；可用 `CUBE_S0_TRACE_PATH` 改写 shim trace 位置。
 
