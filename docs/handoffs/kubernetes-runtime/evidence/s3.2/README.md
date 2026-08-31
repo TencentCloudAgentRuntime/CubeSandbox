@@ -114,3 +114,74 @@ record、active lease 和本地路径均无残留。修订改为解析活动期�
 本阶段只证明 `static local + Filesystem + RWO` 输入下 Cube runtime 的多容器和 Pod
 重建持久化语义。它不声明 CSI、动态制备、CBS/CFS、跨节点 attach、RWX、扩容或生产
 可用性。同一 reviewer 对最终云验和独立审计明确 `APPROVE`；S3.2b 因此为 `DONE`。
+
+## S3.2c 回收与故障
+
+### 固定输入
+
+- 实现 commit：`0bd252724523be144946f1e0f190121ff55344f7`
+- 完整 tree：`68ab2419c8b8686aae6537384b3154f70ced2eef`
+- 验收脚本：`CubeShim/sandbox-probe/scripts/verify-s32c-pvc-reclaim-cloud.sh`
+- 脚本 SHA-256：
+  `9c2bd640164dc1fd3cc8e7522d448ff67f60b8796f9484ca6963fe3e0065f1ee`
+- 私有 COS 对象：`s3.2c/verify-s32c-pvc-reclaim-cloud-9c2bd640.sh`
+- 最终云验：`inv-b83w9pgt64`，`SUCCESS`
+- 最终只读审计：`inv-b83wguggpg`，`SUCCESS`；审计脚本 SHA-256：
+  `132010c1acb7a82b65e20cb95b018856c6d00734aad40424d24e5d5e92ce665d`
+- 证据目录：
+  `/data/cubelet/s3.2-evidence/s3.2c-reclaim-failure-20260831T213231Z`
+
+### 失败启动与回滚
+
+验收创建一个同时挂载 static-local RWO PVC 和 `/dev/kvm` CharDevice hostPath 的 Cube
+Pod。CRI inspect 与 containerd OCI spec 均显示 `/pvc` 位于 mount index 7，`/bad`
+位于 index 8；PVC 的 source 精确指向该 Pod UID 的 kubelet local-volume 目录，两个视图
+中提取的这两条目标 mount 记录完全一致。容器随后以 `StartError`、exit code 128 失败，
+错误精确包含
+`host bind mount source is neither file nor directory: /dev/kvm`，从而证明失败发生在 PVC
+输入已进入 runtime 之后。
+
+失败 Pod 尚未删除时，连续 30 个 100 ms 样本均确认 Task generation 和该 shared root
+下的 host mount 为 0，同时 `/run/vc/vm/<sandbox>` runtime 路径仍是实际目录；这不代表
+已探测 VM 进程或 Guest 健康。PV/PVC 保持原 UID 与 `Bound`，
+后端 `admin-seed` 数据仍存在。证据把 shared root 的合法异步终态记录为 `present` 或
+`absent-cleaned`，把 `rootfs` 和 `volumes` 分别记录为 `present-empty` 或
+`absent-cleaned`；同时对 `find` 失败与目录并发消失作显式区分，不把真实遍历错误当作
+清理成功。删除失败 Pod 后，runtime 集合恢复基线；后续健康
+Cube Pod 使用同一 PVC 读取 `admin-seed` 并写入 `recovery-marker`，证明失败回滚没有破坏
+PVC 可用性。
+
+### Retain Released gate 与手工重绑
+
+删除第一个 PVC 后，PV 进入 `Released`，保留旧 PVC UID 的 `claimRef` 和两个数据 marker。
+显式指定同一 PV 的第二个 PVC 及其 consumer Pod 在管理员介入前连续 30 个样本保持：PVC
+`Pending`、PV `Released`、Pod `Pending` 且未分配节点。保存的完整 CRI Sandbox 快照中，
+该 Pod UID 的 Sandbox 数为 0。管理员移除 PV `claimRef` 后，第二个 PVC 以新 UID 绑定到
+原 PV UID，Cube Pod 读取前两个 marker 并写入 `rebind-marker`；最终清理前保存的三个
+SHA-256 分别按文件名对应内容独立复算通过。
+
+三次 Pod 生命周期各生成且仅生成一条对应 Sandbox ID 的 inactive durable lease；每轮
+删除后 container、Task、Sandbox、snapshot、netns、shim、VM 和 runtime resource 集合
+均恢复基线。最终固定 Kubernetes 对象、kubelet Pod 目录、VM 路径、local PV 测试目录和
+active lease 全部为 0，durable tombstone 精确增加 3；containerd、kubelet 保持 active，
+节点 Ready 且无 DiskPressure。
+
+### 后端边界与失败修订
+
+本阶段验证的是 `kubernetes.io/no-provisioner`、`Retain`、`WaitForFirstConsumer` 的
+static-local 手工回收。保存的测试前 Pod 清单中不存在 local volume/static provisioner，
+因此 `Delete` 在该后端被标为 `NOT_APPLICABLE_WITHOUT_DELETER`，不声明自动删除；CSI、
+动态制备、CBS/CFS、跨节点 attach、RWX、扩容和 VolumeSnapshot 仍未验证。
+
+前两轮失败均为验收脚本对 runtime 异步清理形态的错误假设，而非产品残留：
+
+- `inv-083vq60siv` 在父目录并发消失时把 `find` 结果当成错误；诊断
+  `inv-083vr6gdfq` 证明 cleanup 为 0、固定对象和全部 runtime 资源为 0。
+- `inv-083vusgxv0` 又错误要求 shared root 本身始终存在；诊断 `inv-883vvhgnmh`
+  再次证明 cleanup 为 0，并保留了精确 mount 顺序与失败错误证据。
+
+修订后的 `inv-983w0gg4bn` 首次完整通过；随后只增加 VM 目录、Pending 无 Sandbox 和
+数据 hash 的持久证据，最终冻结为上述 SHA。独立审计先后关闭 marker 唯一性、首条
+tombstone 归属和无 provisioner 基线三处伪阳性空间，`inv-b83wguggpg` 最终通过。同一
+reviewer 明确 `APPROVE`；S3.2c 因此为 `DONE`，结论仍严格限于 static-local runtime
+语义和 Retain 手工回收。
