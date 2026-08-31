@@ -4,10 +4,13 @@
 use containerd_shim::asynchronous::{publisher::RemotePublisher, Shim};
 use containerd_shim::protos::protobuf::Message;
 use containerd_shim::protos::{
-    sandbox_async::create_sandbox, shim_async::create_task, ttrpc::r#async::Server,
+    sandbox_async::create_sandbox,
+    shim_async::{create_task, Task as TaskRpc},
+    ttrpc::{self, r#async::Server},
 };
 use containerd_shim::{Config, Error, Flags};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -25,6 +28,8 @@ use crate::service::srv::Service;
 
 const DEFAULT_SOCKET_DIR: &str = "/run/containerd/s";
 const TTRPC_ADDRESS_ENV: &str = "TTRPC_ADDRESS";
+const TASK_SERVICE_V2: &str = "containerd.task.v2.Task";
+const TASK_SERVICE_V3: &str = "containerd.task.v3.Task";
 
 pub async fn run(runtime_id: &str, flags: Flags) -> Result<(), Error> {
     match flags.action.as_str() {
@@ -161,16 +166,19 @@ async fn serve(runtime_id: &str, flags: Flags) -> Result<(), Error> {
     };
     let mut shim = <Service as Shim>::new(runtime_id, &flags, &mut config).await;
     let publisher = RemotePublisher::new(&ttrpc_address).await?;
-    let task = shim.create_task_service(publisher).await;
+    let task = Arc::new(shim.create_task_service(publisher).await);
     let sandbox = SandboxService::new(&task);
     let exit = task.exit_signal();
 
-    let task_service = create_task(Arc::new(task));
+    let task: Arc<dyn TaskRpc + Send + Sync> = task;
+    let task_v2_service = create_task(task.clone());
+    let task_v3_service = create_task_v3(task)?;
     let sandbox_service = create_sandbox(Arc::new(sandbox));
     let mut server = Server::new()
         .bind(&flags.socket)
         .map_err(|error| Error::Other(format!("bind CubeShim socket: {error}")))?
-        .register_service(task_service)
+        .register_service(task_v2_service)
+        .register_service(task_v3_service)
         .register_service(sandbox_service);
     server
         .start()
@@ -205,6 +213,28 @@ async fn serve(runtime_id: &str, flags: Flags) -> Result<(), Error> {
     server.shutdown().await.unwrap_or_default();
     remove_socket(&flags.socket);
     Ok(())
+}
+
+fn create_task_v3(
+    task: Arc<dyn TaskRpc + Send + Sync>,
+) -> Result<HashMap<String, ttrpc::r#async::Service>, Error> {
+    // containerd 2.3 changed the Task protobuf package from v2 to v3 without
+    // changing its messages or RPC methods. rust-extensions 0.11.0 still only
+    // generates the v2 service, so reuse a second generated handler set under
+    // the v3 service name. Keep v2 registered as well for older containerd.
+    let mut services = create_task(task);
+    if services.contains_key(TASK_SERVICE_V3) {
+        return Err(Error::Other(format!(
+            "generated Task services already contain {TASK_SERVICE_V3}"
+        )));
+    }
+    let service = services.remove(TASK_SERVICE_V2).ok_or_else(|| {
+        Error::Other(format!(
+            "generated Task services do not contain {TASK_SERVICE_V2}"
+        ))
+    })?;
+    services.insert(TASK_SERVICE_V3.to_string(), service);
+    Ok(services)
 }
 
 fn socket_address(
@@ -275,6 +305,59 @@ fn signal_server_started() -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FakeTask;
+
+    #[async_trait::async_trait]
+    impl TaskRpc for FakeTask {}
+
+    #[test]
+    fn task_v3_registration_preserves_generated_rpc_methods() {
+        let v2 = create_task(Arc::new(FakeTask));
+        let v3 = create_task_v3(Arc::new(FakeTask)).unwrap();
+        let expected = [
+            "Checkpoint",
+            "CloseIO",
+            "Connect",
+            "Create",
+            "Delete",
+            "Exec",
+            "Kill",
+            "Pause",
+            "Pids",
+            "ResizePty",
+            "Resume",
+            "Shutdown",
+            "Start",
+            "State",
+            "Stats",
+            "Update",
+            "Wait",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(v2.len(), 1);
+        assert_eq!(v3.len(), 1);
+        assert!(v2.contains_key(TASK_SERVICE_V2));
+        assert!(v3.contains_key(TASK_SERVICE_V3));
+        assert_eq!(
+            v2[TASK_SERVICE_V2]
+                .methods
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected
+        );
+        assert_eq!(
+            v3[TASK_SERVICE_V3]
+                .methods
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected
+        );
+    }
 
     #[test]
     fn socket_address_uses_requested_short_directory() {
