@@ -334,7 +334,7 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 |---|---|---|---|---|---|
 | S3.1 基础 Volume | `DONE` | Codex | 输入、独立 Pod Volume share、可写卷/失败回滚、四类投射卷动态更新、subPath 固定语义和最终支持矩阵均已关闭 | 实现 `5b504b58`；S3.1d 回归 `aafdef40` / `inv-a83u0wgvxv`；审计 `inv-v83u490xa8`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.1/README.md)；同一 reviewer 确认 S3.1 `DONE` | S3.2 filesystem PVC |
 | S3.2 PVC | `DONE` | Codex | S3.2a～S3.2d 已完成输入基线、跨容器/Pod 重建持久化、失败回滚、static-local Retain 手工重绑、组合回归与支持矩阵 | `83902212`；组合终验 `inv-a83x7s0g04`；独立审计 `inv-883xivg7ub`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.2/README.md)；同一 reviewer 确认 S3.2 `DONE` | S3.3 SecurityContext |
-| S3.3 SecurityContext | `IN_PROGRESS` | Codex | S3.3a 已冻结 CRI/OCI/Guest 六项安全字段，五项当前匹配；定位 Cube NNP 被 Shim 清零 | `9380c163`；诊断 `inv-9840smg1q7`；审计 `inv-a840xpgpsu`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.3/README.md)；同一 reviewer `APPROVE` | S3.3b 固化 UID/GID 与 supplemental groups |
+| S3.3 SecurityContext | `IN_PROGRESS` | Codex | S3.3a 已冻结六项安全字段并定位 NNP 缺口；S3.3b 已固化 create/exec 的 UID/GID/groups、Merge/Strict、fsGroup、多容器继承与 kubelet pre-runtime 负例 | S3.3b 实现 `d6c16e6b`；终验 `inv-384315g7di`；独立审计 `inv-a843e8g0wv`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.3/README.md)；同一 reviewer `APPROVE` | S3.3c capabilities 与只读 rootfs |
 | S3.4 资源控制 | `NOT_STARTED` | 待指定 | — | — | 实现 Host/Guest 双层 cgroup |
 
 ### S3.1 子阶段执行记录
@@ -359,9 +359,9 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 
 | 子阶段 | 状态 | 目标 | 验收标准 | 当前结果/下一步 |
 |---|---|---|---|---|
-| S3.3a 输入与现状诊断 | `DONE` | 冻结 kubelet/CRI/OCI 到 Guest 的安全字段输入和当前差异 | 8 个 runc/Cube 对照 Pod 覆盖六项字段；原始 CRI/ctr、Guest init/log、lease 与精确基线证据完整；同一 reviewer `APPROVE` | `9380c163` / `inv-9840smg1q7` / `inv-a840xpgpsu`：UID/GID、groups、NET_RAW、readonly rootfs、RuntimeDefault seccomp 当前匹配；host NNP=true 但 Cube Guest=0，记入 `K8S-OQ-013`；S3.3b 开始 |
-| S3.3b UID/GID 与组 | `IN_PROGRESS` | 固化用户、主组和 supplemental groups 的实现契约 | 数值 UID/GID、主 GID、多个 supplemental groups 的正反用例通过；runc/Cube 输入等价；重复创建删除无残留；同一 reviewer `APPROVE` | 复用 S3.3a 已证实的当前路径，补单元/集成边界与独立云验 |
-| S3.3c capabilities 与只读 rootfs | `NOT_STARTED` | 固化 capability add/drop 和 rootfs 只读执行语义 | `drop ALL`、选择性 add、边界 capability 和只读写失败正反用例通过；Guest mask 与 OCI 输入一致；清理闭环 | S3.3b 完成后开始 |
+| S3.3a 输入与现状诊断 | `DONE` | 冻结 kubelet/CRI/OCI 到 Guest 的安全字段输入和当前差异 | 8 个 runc/Cube 对照 Pod 覆盖六项字段；原始 CRI/ctr、Guest init/log、lease 与精确基线证据完整；同一 reviewer `APPROVE` | `9380c163` / `inv-9840smg1q7` / `inv-a840xpgpsu`：UID/GID、groups、NET_RAW、readonly rootfs、RuntimeDefault seccomp 当前匹配；host NNP=true 但 Cube Guest=0，记入 `K8S-OQ-013`；身份与组边界已由下一行 S3.3b 闭环 |
+| S3.3b UID/GID 与组 | `DONE` | 固化用户、主组和 supplemental groups 的实现契约 | 数值 UID/GID、主 GID、多个 supplemental groups 的正反用例通过；runc/Cube 输入等价；重复创建删除无残留；同一 reviewer `APPROVE` | `d6c16e6b` / `inv-9841kq036r` / `inv-384315g7di` / `inv-a843e8g0wv`：create/exec 原样保留 UID/GID 和组顺序/重复项，exec 另覆盖 username；两轮 Merge/Strict、fsGroup emptyDir、classic init、restartable sidecar、PodStatus 与非 TTY exec 全部 runc/Cube 等价；14 个唯一 Pod UID、20 个唯一正例 container ID、7 个 Cube sandbox/tombstone，lease `466→473`，所有检查点与实时状态精确恢复基线；`runAsNonRoot=true + UID0` 在两种 runtime 均由 kubelet 于 workload 创建前拒绝；同一 reviewer 最终 `APPROVE` |
+| S3.3c capabilities 与只读 rootfs | `IN_PROGRESS` | 固化 capability add/drop 和 rootfs 只读执行语义 | `drop ALL`、选择性 add、边界 capability 和只读写失败正反用例通过；Guest mask 与 OCI 输入一致；清理闭环 | 先从 S3.3a 当前匹配结果冻结原始 OCI、Guest capability 五类 mask 和 readonly rootfs 输入/失败语义，再补边界与重复清理验收 |
 | S3.3d NNP 与 seccomp | `NOT_STARTED` | 去除 NNP 静默降级并固化 RuntimeDefault seccomp | host NNP=true 时 Guest `NoNewPrivs=1`；false/true 正反用例和 RuntimeDefault 过滤行为通过；关闭 `K8S-OQ-013`；清理闭环 | 修改前先冻结 Shim/Agent protobuf 兼容契约 |
 | S3.3e privileged 双门禁 | `NOT_STARTED` | 实现节点开关与 Pod 请求双门禁，只在 Guest 内提权 | 开关关闭时 privileged 请求明确失败；开关开启且 Pod 请求时才生效；普通 Pod 不提权；不自动透传 Host device/path；清理闭环 | S3.3d 完成后开始 |
 | S3.3f 回归与支持矩阵 | `NOT_STARTED` | 顺序重放安全子阶段并冻结首版支持范围 | 固定脚本 hash 的组合回归通过；正反用例、失败语义、lease/资源基线和支持矩阵闭环；同一 reviewer `APPROVE` | S3.3b～S3.3e 全部完成后执行 |
