@@ -49,21 +49,44 @@ pub const CUBE_ALLOW_PRIVILEGED_ENV: &str = "CUBE_ALLOW_PRIVILEGED";
 const LOG_FORWARD_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Translate the containerd OCI process used for an exec into the Agent
-/// protobuf without inventing, sorting, or dropping identity fields.
-fn exec_process_for_agent(source: &Process, terminal: bool) -> oci::Process {
-    let mut process = oci::Process::new();
+/// protobuf without inventing, sorting, or dropping supported process fields.
+///
+/// Keep AppArmor, OOM score, and SELinux at their existing PoC defaults: the
+/// create path does not transport SELinux and these policies are outside the
+/// first-version support matrix. Capabilities, rlimits, and no-new-privileges
+/// are representable by the Agent protobuf and must not be silently cleared.
+fn exec_process_for_agent(source: &Process, terminal: bool) -> CResult<oci::Process> {
+    validate_exec_process_transport(source)?;
+    let json =
+        serde_json::to_string(source).map_err(|e| format!("serialize exec process failed:{e}"))?;
+    let mut process: oci::Process =
+        serde_json::from_str(&json).map_err(|e| format!("deserialize exec process failed:{e}"))?;
     process.set_terminal(terminal);
-    process.set_user(oci::User {
-        uid: source.user().uid(),
-        gid: source.user().gid(),
-        additionalGids: source.user().additional_gids().clone().unwrap_or_default(),
-        username: source.user().username().clone().unwrap_or_default(),
-        ..Default::default()
-    });
-    process.set_args(source.args().clone().unwrap_or_default().into());
-    process.set_env(source.env().clone().unwrap_or_default().into());
-    process.set_cwd(source.cwd().to_str().unwrap_or("").to_string());
-    process
+    process.clear_apparmorProfile();
+    process.clear_oomScoreAdj();
+    process.clear_selinuxLabel();
+    Ok(process)
+}
+
+/// Fail closed for OCI exec fields that the current Cube Agent protobuf does
+/// not carry. Generated protobuf serde accepts unknown JSON fields, so relying
+/// on the serde round trip alone would silently discard these requests.
+fn validate_exec_process_transport(process: &Process) -> CResult<()> {
+    let unsupported = [
+        (process.user().umask().is_some(), "user.umask"),
+        (process.command_line().is_some(), "commandLine"),
+        (process.io_priority().is_some(), "ioPriority"),
+        (process.scheduler().is_some(), "scheduler"),
+        (process.exec_cpu_affinity().is_some(), "execCPUAffinity"),
+    ];
+
+    if let Some((_, field)) = unsupported.into_iter().find(|(present, _)| *present) {
+        return Err(format!(
+            "unsupported OCI exec process field {field}: not representable by Cube Agent protobuf"
+        ));
+    }
+
+    Ok(())
 }
 
 /// Reject OCI seccomp values that the current Cube Agent protobuf cannot
@@ -1277,7 +1300,7 @@ impl Container {
             exec.clone()
         };
 
-        let proc = exec_process_for_agent(&exec.proc, exec.tty.terminal);
+        let proc = exec_process_for_agent(&exec.proc, exec.tty.terminal).map_err(Error::Other)?;
 
         let (stdin_port, stdout_port, stderr_port) = if self.passfd_io_enabled() {
             let (i, o, e) = crate::common::utils::AsyncUtils::setup_passfd_streams(
@@ -1942,7 +1965,7 @@ mod identity_translation_tests {
         }))
         .unwrap();
 
-        let process = exec_process_for_agent(&source, false);
+        let process = exec_process_for_agent(&source, false).unwrap();
         let user = process.get_user();
         assert_eq!(user.get_uid(), 4321);
         assert_eq!(user.get_gid(), 5432);
@@ -1953,6 +1976,99 @@ mod identity_translation_tests {
         assert_eq!(process.get_env(), &["IDENTITY_TEST=1"]);
         assert_eq!(process.get_cwd(), "/work");
         assert!(!process.has_capabilities());
+        assert!(process.get_rlimits().is_empty());
+        assert!(!process.get_noNewPrivileges());
+    }
+
+    #[test]
+    fn exec_process_preserves_representable_security_fields() {
+        let source: Process = serde_json::from_value(serde_json::json!({
+            "terminal": true,
+            "user": {"uid": 1000, "gid": 3000, "additionalGids": [2000, 4000]},
+            "args": ["sh", "-c", "true"],
+            "env": ["SECURITY_TEST=1"],
+            "cwd": "/work",
+            "capabilities": {
+                "bounding": ["CAP_NET_RAW"],
+                "effective": ["CAP_NET_RAW"],
+                "inheritable": [],
+                "permitted": ["CAP_NET_RAW"],
+                "ambient": []
+            },
+            "rlimits": [{"type": "RLIMIT_NOFILE", "hard": 4096, "soft": 2048}],
+            "noNewPrivileges": true,
+            "apparmorProfile": "deferred-profile",
+            "oomScoreAdj": 123,
+            "selinuxLabel": "deferred-label"
+        }))
+        .unwrap();
+
+        let process = exec_process_for_agent(&source, false).unwrap();
+        let caps = process.get_capabilities();
+        assert_eq!(caps.get_bounding(), &["CAP_NET_RAW"]);
+        assert_eq!(caps.get_effective(), &["CAP_NET_RAW"]);
+        assert!(caps.get_inheritable().is_empty());
+        assert_eq!(caps.get_permitted(), &["CAP_NET_RAW"]);
+        assert!(caps.get_ambient().is_empty());
+        assert_eq!(process.get_rlimits().len(), 1);
+        assert_eq!(process.get_rlimits()[0].get_field_type(), "RLIMIT_NOFILE");
+        assert_eq!(process.get_rlimits()[0].get_hard(), 4096);
+        assert_eq!(process.get_rlimits()[0].get_soft(), 2048);
+        assert!(process.get_noNewPrivileges());
+        assert!(!process.get_terminal());
+        assert!(process.get_apparmorProfile().is_empty());
+        assert_eq!(process.get_oomScoreAdj(), 0);
+        assert!(process.get_selinuxLabel().is_empty());
+    }
+
+    #[test]
+    fn exec_process_rejects_unrepresentable_fields() {
+        let cases = [
+            (
+                "user.umask",
+                serde_json::json!({
+                    "user": {"uid": 1000, "gid": 3000, "umask": 18}
+                }),
+            ),
+            (
+                "commandLine",
+                serde_json::json!({"commandLine": "cmd.exe /c echo test"}),
+            ),
+            (
+                "ioPriority",
+                serde_json::json!({
+                    "ioPriority": {"class": "IOPRIO_CLASS_BE", "priority": 4}
+                }),
+            ),
+            (
+                "scheduler",
+                serde_json::json!({
+                    "scheduler": {"policy": "SCHED_OTHER", "nice": 1}
+                }),
+            ),
+            (
+                "execCPUAffinity",
+                serde_json::json!({
+                    // oci-spec 0.6.8's derived serde spelling is
+                    // `execCpuAffinity`; the validation error uses the OCI
+                    // specification's canonical `execCPUAffinity` name.
+                    "execCpuAffinity": {"cpu_affinity_initial": "0", "cpu_affinity_final": "1"}
+                }),
+            ),
+        ];
+
+        for (field, override_value) in cases {
+            let mut value = serde_json::to_value(Process::default()).unwrap();
+            let object = value.as_object_mut().unwrap();
+            object.extend(override_value.as_object().unwrap().clone());
+            let source: Process = serde_json::from_value(value).unwrap();
+
+            let error = exec_process_for_agent(&source, false).unwrap_err();
+            assert!(
+                error.contains(field),
+                "expected rejection for {field}, got {error}"
+            );
+        }
     }
 }
 

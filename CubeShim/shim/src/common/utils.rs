@@ -50,6 +50,33 @@ const DEV_URANDOM: &str = "/dev/urandom";
 const PASSFD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const PASSFD_ACK_MAX_LINE_LEN: usize = 64;
 
+/// Reject OCI exec fields before `oci-spec` deserialization can discard them.
+/// In particular, oci-spec 0.6.8 derives `execCpuAffinity` while the OCI
+/// specification uses `execCPUAffinity`, and its serde structs accept unknown
+/// fields. Check both spellings at the raw task-service boundary.
+fn validate_raw_exec_process_transport(value: &serde_json::Value) -> CResult<()> {
+    let unsupported = [
+        ("/user/umask", "user.umask"),
+        ("/commandLine", "commandLine"),
+        ("/ioPriority", "ioPriority"),
+        ("/scheduler", "scheduler"),
+        ("/execCPUAffinity", "execCPUAffinity"),
+        ("/execCpuAffinity", "execCPUAffinity"),
+    ];
+
+    if let Some((_, field)) = unsupported.iter().find(|(pointer, _)| {
+        value
+            .pointer(pointer)
+            .is_some_and(|field_value| !field_value.is_null())
+    }) {
+        return Err(format!(
+            "unsupported OCI exec process field {field}: not representable by Cube Agent protobuf"
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_passfd_send(request_len: usize, sent: usize) -> CResult<()> {
     if sent != request_len {
         return Err(format!(
@@ -237,6 +264,9 @@ impl Utils {
     }
 
     pub fn get_oci_proc(data: &[u8]) -> CResult<Process> {
+        let value: serde_json::Value = serde_json::from_slice(data)
+            .map_err(|e| format!("deserialize process failed:{}", e))?;
+        validate_raw_exec_process_transport(&value)?;
         let p = serde_json::from_slice::<oci_spec::runtime::Process>(data)
             .map_err(|e| format!("deserialize process failed:{}", e))?;
         Ok(p)
@@ -761,6 +791,61 @@ impl CPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn get_oci_proc_rejects_unrepresentable_raw_fields() {
+        let cases = [
+            (
+                "user.umask",
+                serde_json::json!({
+                    "user": {"uid": 1000, "gid": 3000, "umask": 18}
+                }),
+            ),
+            (
+                "commandLine",
+                serde_json::json!({"commandLine": "cmd.exe /c echo test"}),
+            ),
+            (
+                "ioPriority",
+                serde_json::json!({
+                    "ioPriority": {"class": "IOPRIO_CLASS_BE", "priority": 4}
+                }),
+            ),
+            (
+                "scheduler",
+                serde_json::json!({
+                    "scheduler": {"policy": "SCHED_OTHER", "nice": 1}
+                }),
+            ),
+            (
+                "execCPUAffinity",
+                serde_json::json!({
+                    "execCPUAffinity": {"initial": "0", "final": "1"}
+                }),
+            ),
+            (
+                "execCPUAffinity",
+                serde_json::json!({
+                    "execCpuAffinity": {"cpu_affinity_initial": "0", "cpu_affinity_final": "1"}
+                }),
+            ),
+        ];
+
+        for (field, override_value) in cases {
+            let mut value = serde_json::to_value(Process::default()).unwrap();
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(override_value.as_object().unwrap().clone());
+            let raw = serde_json::to_vec(&value).unwrap();
+
+            let error = Utils::get_oci_proc(&raw).unwrap_err();
+            assert!(
+                error.contains(field),
+                "expected raw ingress rejection for {field}, got {error}"
+            );
+        }
+    }
 
     #[test]
     fn load_spec_error_identifies_invalid_linux_capability() {
