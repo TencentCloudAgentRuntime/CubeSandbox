@@ -388,6 +388,18 @@ pub struct LinuxMemory {
         rename = "disableOOMKiller"
     )]
     pub disable_oom_killer: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "useHierarchy"
+    )]
+    pub use_hierarchy: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "checkBeforeUpdate"
+    )]
+    pub check_before_update: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
@@ -396,6 +408,8 @@ pub struct LinuxCpu {
     pub shares: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub period: Option<u64>,
     #[serde(
@@ -410,10 +424,12 @@ pub struct LinuxCpu {
         rename = "realtimePeriod"
     )]
     pub realtime_period: Option<u64>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub cpus: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub mems: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mems: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
@@ -468,6 +484,8 @@ pub struct LinuxResources {
     pub network: Option<LinuxNetwork>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub rdma: HashMap<String, LinuxRdma>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub unified: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
@@ -1457,15 +1475,19 @@ mod tests {
                         kernel_tcp: Some(-1),
                         swappiness: Some(0),
                         disable_oom_killer: Some(false),
+                        use_hierarchy: None,
+                        check_before_update: None,
                     }),
                     cpu: Some(crate::LinuxCpu {
                         shares: Some(1024),
                         quota: Some(1000000),
+                        burst: None,
                         period: Some(500000),
                         realtime_runtime: Some(950000),
                         realtime_period: Some(1000000),
-                        cpus: "2-3".to_string(),
-                        mems: "0-7".to_string(),
+                        cpus: Some("2-3".to_string()),
+                        mems: Some("0-7".to_string()),
+                        idle: None,
                     }),
                     pids: Some(crate::LinuxPids { limit: 32771 }),
                     block_io: Some(crate::LinuxBlockIo {
@@ -1524,6 +1546,7 @@ mod tests {
                         ],
                     }),
                     rdma: Default::default(),
+                    unified: Default::default(),
                 }),
                 cgroups_path: "/myRuntime/myContainer".to_string(),
                 namespaces: vec![

@@ -59,7 +59,7 @@ use rustjail::container::{
 };
 use rustjail::process::Process;
 use rustjail::process::ProcessOperations;
-use rustjail::specconv::CreateOpts;
+use rustjail::specconv::{CreateOpts, ResourceV2Config};
 use rustjail::{pipestream::PipeStream, process::StreamType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf};
 use tokio::sync::Mutex;
@@ -169,6 +169,10 @@ impl AgentService {
                 return Err(anyhow!(nix::Error::EINVAL));
             }
         };
+        let resources_v2_canonical = match oci_spec.as_ref() {
+            Some(spec) => rustjail::resources::replace_spec_resources_from_grpc(&mut oci, spec)?,
+            None => None,
+        };
         let anno = oci.annotations.clone();
         if let Some(id) = anno.get(ANNO_APP_SNAPSHOT_CONTAINER_ID) {
             info!(sl!(), "create container by restore");
@@ -262,11 +266,19 @@ impl AgentService {
             spec: Some(oci.clone()),
             rootless_euid: false,
             rootless_cgroup: false,
+            resources_v2: resources_v2_canonical.map(|canonical| ResourceV2Config {
+                version: rustjail::resources::RESOURCE_V2_VERSION,
+                canonical,
+            }),
         };
         let duration_setup_bundle = start.elapsed().as_millis();
         start = Instant::now();
         let mut ctr: LinuxContainer =
             LinuxContainer::new(cid.as_str(), CONTAINER_BASE, opts, &sl!())?;
+        if ctr.config.resources_v2.is_some() {
+            ctr.apply_resources_v2_create()
+                .map_err(|error| anyhow!(error))?;
+        }
 
         let pipe_size = AGENT_CONFIG.read().await.container_pipe_size;
 
@@ -888,8 +900,15 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
         let resp = Empty::new();
 
         if let Some(res) = res.as_ref() {
-            let oci_res = rustjail::resources_grpc_to_oci(res);
-            match ctr.set(oci_res) {
+            let (oci_res, resources_v2_canonical) =
+                rustjail::resources::resources_from_grpc(res, false)
+                    .map_err(|error| ttrpc_error!(ttrpc::Code::INVALID_ARGUMENT, error))?;
+            let result = if resources_v2_canonical.is_some() {
+                ctr.set_resources_v2(oci_res).map_err(anyhow::Error::from)
+            } else {
+                ctr.set(oci_res)
+            };
+            match result {
                 Err(e) => {
                     return Err(ttrpc_error!(ttrpc::Code::INTERNAL, e));
                 }
@@ -2524,6 +2543,7 @@ mod tests {
             spec: Some(spec),
             rootless_euid: false,
             rootless_cgroup: false,
+            resources_v2: None,
         }
     }
 

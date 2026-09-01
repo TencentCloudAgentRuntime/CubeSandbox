@@ -516,6 +516,7 @@ mod tests {
             rootless_euid: false,
             rootless_cgroup: false,
             spec: Some(spec),
+            resources_v2: None,
         };
 
         validate(&config).unwrap_err();

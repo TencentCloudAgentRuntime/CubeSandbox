@@ -36,6 +36,7 @@ pub mod container;
 pub mod mount;
 pub mod pipestream;
 pub mod process;
+pub mod resources;
 #[cfg(feature = "seccomp")]
 pub mod seccomp;
 pub mod specconv;
@@ -268,6 +269,8 @@ pub fn resources_grpc_to_oci(res: &grpc::LinuxResources) -> oci::LinuxResources 
             kernel_tcp: Some(mem.KernelTCP),
             swappiness: Some(mem.Swappiness),
             disable_oom_killer: Some(mem.DisableOOMKiller),
+            use_hierarchy: None,
+            check_before_update: None,
         })
     } else {
         None
@@ -278,11 +281,21 @@ pub fn resources_grpc_to_oci(res: &grpc::LinuxResources) -> oci::LinuxResources 
         Some(oci::LinuxCpu {
             shares: Some(c.Shares),
             quota: Some(c.Quota),
+            burst: None,
             period: Some(c.Period),
             realtime_runtime: Some(c.RealtimeRuntime),
             realtime_period: Some(c.RealtimePeriod),
-            cpus: c.Cpus.clone(),
-            mems: c.Mems.clone(),
+            cpus: if c.Cpus.is_empty() {
+                None
+            } else {
+                Some(c.Cpus.clone())
+            },
+            mems: if c.Mems.is_empty() {
+                None
+            } else {
+                Some(c.Mems.clone())
+            },
+            idle: None,
         })
     } else {
         None
@@ -343,6 +356,7 @@ pub fn resources_grpc_to_oci(res: &grpc::LinuxResources) -> oci::LinuxResources 
         hugepage_limits,
         network,
         rdma: HashMap::new(),
+        unified: HashMap::new(),
     }
 }
 

@@ -63,6 +63,7 @@ use crate::sync::{
 use crate::sync_with_async::{read_async, write_async};
 use crate::{mount, validator};
 pub const EXEC_FIFO_FILENAME: &str = "exec.fifo";
+pub const RESOURCE_V2_JOURNAL_FILENAME: &str = "resources-v2.undo.json";
 
 const INIT: &str = "INIT";
 const NO_PIVOT: &str = "NO_PIVOT";
@@ -1035,6 +1036,7 @@ impl BaseContainer for LinuxContainer {
             &st,
             &mut pipe_w,
             &mut pipe_r,
+            self.config.resources_v2.is_some(),
         )
         .await
         .map_err(|e| {
@@ -1298,6 +1300,7 @@ async fn join_namespaces(
     st: &OCIState,
     pipe_w: &mut PipeStream,
     pipe_r: &mut PipeStream,
+    resources_v2: bool,
 ) -> Result<()> {
     let logger = logger.new(o!("action" => "join-namespaces"));
     let linux = spec.linux.as_ref().unwrap();
@@ -1338,7 +1341,7 @@ async fn join_namespaces(
     }
 
     // apply cgroups
-    if p.init && res.is_some() {
+    if p.init && res.is_some() && !resources_v2 {
         debug!(logger, "apply cgroups!");
         cm.set(res.unwrap(), false)?;
     }
@@ -1420,6 +1423,92 @@ fn setid(uid: Uid, gid: Gid) -> Result<()> {
 }
 
 impl LinuxContainer {
+    fn resources_v2_journal_path(&self) -> PathBuf {
+        Path::new(&self.root).join(RESOURCE_V2_JOURNAL_FILENAME)
+    }
+
+    pub fn apply_resources_v2_create(
+        &mut self,
+    ) -> std::result::Result<(), crate::cgroups::fs::resources_v2::TransactionError> {
+        let journal_path = self.resources_v2_journal_path();
+        let resources = self
+            .config
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.linux.as_ref())
+            .and_then(|linux| linux.resources.as_ref())
+            .cloned()
+            .ok_or_else(|| crate::cgroups::fs::resources_v2::TransactionError {
+                kind: crate::cgroups::fs::resources_v2::TransactionFailureKind::Unchanged,
+                cause: "resources-v2 create has no Linux resources".to_string(),
+                rollback_error: None,
+                journal_path: journal_path.clone(),
+            })?;
+        let manager = self.cgroup_manager.as_ref().ok_or_else(|| {
+            crate::cgroups::fs::resources_v2::TransactionError {
+                kind: crate::cgroups::fs::resources_v2::TransactionFailureKind::Unchanged,
+                cause: "resources-v2 create has no cgroup manager".to_string(),
+                rollback_error: None,
+                journal_path: journal_path.clone(),
+            }
+        })?;
+        manager.set_resources_v2_create(&resources, &journal_path)
+    }
+
+    pub fn set_resources_v2(
+        &mut self,
+        incoming: LinuxResources,
+    ) -> std::result::Result<(), crate::cgroups::fs::resources_v2::TransactionError> {
+        let journal_path = self.resources_v2_journal_path();
+        let mut effective = self
+            .config
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.linux.as_ref())
+            .and_then(|linux| linux.resources.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        crate::cgroups::fs::resources_v2::merge(&mut effective, &incoming).map_err(|error| {
+            crate::cgroups::fs::resources_v2::TransactionError {
+                kind: crate::cgroups::fs::resources_v2::TransactionFailureKind::Unchanged,
+                cause: format!("merge resources-v2 update: {error:#}"),
+                rollback_error: None,
+                journal_path: journal_path.clone(),
+            }
+        })?;
+        let canonical = crate::resources::canonical_resources(&effective).map_err(|error| {
+            crate::cgroups::fs::resources_v2::TransactionError {
+                kind: crate::cgroups::fs::resources_v2::TransactionFailureKind::Unchanged,
+                cause: format!("persist resources-v2 update: {error:#}"),
+                rollback_error: None,
+                journal_path: journal_path.clone(),
+            }
+        })?;
+        let manager = self.cgroup_manager.as_ref().ok_or_else(|| {
+            crate::cgroups::fs::resources_v2::TransactionError {
+                kind: crate::cgroups::fs::resources_v2::TransactionFailureKind::Unchanged,
+                cause: "resources-v2 update has no cgroup manager".to_string(),
+                rollback_error: None,
+                journal_path: journal_path.clone(),
+            }
+        })?;
+        manager.set_resources_v2(&incoming, true, &journal_path)?;
+
+        self.config
+            .spec
+            .as_mut()
+            .unwrap()
+            .linux
+            .as_mut()
+            .unwrap()
+            .resources = Some(effective);
+        self.config.resources_v2 = Some(crate::specconv::ResourceV2Config {
+            version: crate::resources::RESOURCE_V2_VERSION,
+            canonical,
+        });
+        Ok(())
+    }
+
     pub fn new<T: Into<String> + Display + Clone>(
         id: T,
         base: T,
@@ -1988,6 +2077,7 @@ mod tests {
             spec: Some(spec),
             rootless_euid: false,
             rootless_cgroup: false,
+            resources_v2: None,
         }
     }
 

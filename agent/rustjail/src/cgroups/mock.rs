@@ -11,6 +11,9 @@ use anyhow::Result;
 use cgroups::freezer::FreezerState;
 use libc::{self, pid_t};
 use oci::LinuxResources;
+use std::path::Path;
+
+use crate::cgroups::fs::resources_v2::{TransactionError, TransactionFailureKind};
 use std::collections::HashMap;
 use std::string::String;
 
@@ -59,6 +62,32 @@ impl CgroupManager for Manager {
 }
 
 impl Manager {
+    pub fn set_resources_v2(
+        &self,
+        _: &LinuxResources,
+        _: bool,
+        journal_path: &Path,
+    ) -> std::result::Result<(), TransactionError> {
+        Err(TransactionError {
+            kind: TransactionFailureKind::Unchanged,
+            cause: "mock cgroup manager does not apply resources-v2".to_string(),
+            rollback_error: None,
+            journal_path: journal_path.to_path_buf(),
+        })
+    }
+
+    pub fn set_resources_v2_create(
+        &self,
+        _: &LinuxResources,
+        journal_path: &Path,
+    ) -> std::result::Result<(), TransactionError> {
+        Err(TransactionError {
+            kind: TransactionFailureKind::Unchanged,
+            cause: "mock cgroup manager does not apply resources-v2".to_string(),
+            rollback_error: None,
+            journal_path: journal_path.to_path_buf(),
+        })
+    }
     pub fn new(cpath: &str) -> Result<Self> {
         Ok(Self {
             paths: HashMap::new(),

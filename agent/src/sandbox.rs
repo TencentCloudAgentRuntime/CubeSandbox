@@ -301,7 +301,7 @@ impl Sandbox {
                 .unwrap()
                 .cpu
                 .as_ref();
-            let container_cpust = if let Some(c) = cpu { &c.cpus } else { "" };
+            let container_cpust = cpu.and_then(|value| value.cpus.as_deref()).unwrap_or("");
 
             info!(self.logger, "updating {}", ctr.id.as_str());
             ctr.cgroup_manager
@@ -657,6 +657,7 @@ mod tests {
             spec: Some(spec),
             rootless_euid: false,
             rootless_cgroup: false,
+            resources_v2: None,
         }
     }
 

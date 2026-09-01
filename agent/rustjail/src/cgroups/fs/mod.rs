@@ -40,6 +40,9 @@ use std::time::Duration;
 //use std::path::Path;
 use lazy_static::lazy_static;
 
+pub mod devices_v2;
+pub mod resources_v2;
+
 lazy_static! {
     static ref CUBE_CONTROLLER: Vec<String> = {
         let mut vec = Vec::new();
@@ -1409,6 +1412,96 @@ impl Manager {
             cgroup,
             process_cgroup,
         })
+    }
+
+    pub fn set_resources_v2(
+        &self,
+        resources: &LinuxResources,
+        update: bool,
+        journal_path: &Path,
+    ) -> std::result::Result<(), resources_v2::TransactionError> {
+        if !self.cgroup.v2() {
+            return Err(resources_v2::TransactionError {
+                kind: resources_v2::TransactionFailureKind::Unchanged,
+                cause: "resources-v2 requires a unified cgroup v2 hierarchy".to_string(),
+                rollback_error: None,
+                journal_path: journal_path.to_path_buf(),
+            });
+        }
+        let root = match cgroup_filesystem_path(&self.cpath) {
+            Ok(root) => root,
+            Err(error) => {
+                return Err(resources_v2::TransactionError {
+                    kind: resources_v2::TransactionFailureKind::Unchanged,
+                    cause: format!("resolve cgroup v2 path: {error:#}"),
+                    rollback_error: None,
+                    journal_path: journal_path.to_path_buf(),
+                })
+            }
+        };
+        resources_v2::apply(&root, journal_path, resources, update)
+    }
+
+    pub fn set_resources_v2_create(
+        &self,
+        resources: &LinuxResources,
+        journal_path: &Path,
+    ) -> std::result::Result<(), resources_v2::TransactionError> {
+        if !self.cgroup.v2() {
+            return Err(resources_v2::TransactionError {
+                kind: resources_v2::TransactionFailureKind::Unchanged,
+                cause: "resources-v2 requires a unified cgroup v2 hierarchy".to_string(),
+                rollback_error: None,
+                journal_path: journal_path.to_path_buf(),
+            });
+        }
+        let root = cgroup_filesystem_path(&self.cpath).map_err(|error| {
+            resources_v2::TransactionError {
+                kind: resources_v2::TransactionFailureKind::Unchanged,
+                cause: format!("resolve cgroup v2 path: {error:#}"),
+                rollback_error: None,
+                journal_path: journal_path.to_path_buf(),
+            }
+        })?;
+        resources_v2::preflight(&root, journal_path, resources, false)?;
+
+        let mut device_rules = resources.devices.clone();
+        device_rules.extend(DEFAULT_DEVICES.iter().map(|device| LinuxDeviceCgroup {
+            allow: true,
+            r#type: device.r#type.clone(),
+            major: Some(device.major),
+            minor: Some(device.minor),
+            access: "rwm".to_string(),
+        }));
+        device_rules.extend(DEFAULT_ALLOWED_DEVICES.iter().cloned());
+        let attached = devices_v2::attach(&root, &device_rules).map_err(|error| {
+            resources_v2::TransactionError {
+                kind: resources_v2::TransactionFailureKind::Unchanged,
+                cause: format!("attach resources-v2 device policy: {error:#}"),
+                rollback_error: None,
+                journal_path: journal_path.to_path_buf(),
+            }
+        })?;
+
+        match resources_v2::apply(&root, journal_path, resources, false) {
+            Ok(()) => {
+                attached.commit();
+                Ok(())
+            }
+            Err(mut transaction_error) => match attached.rollback() {
+                Ok(()) => Err(transaction_error),
+                Err(detach_error) => {
+                    transaction_error.kind = resources_v2::TransactionFailureKind::Degraded;
+                    let device_error = format!("detach cgroup device BPF: {detach_error:#}");
+                    transaction_error.rollback_error =
+                        Some(match transaction_error.rollback_error {
+                            Some(resource_error) => format!("{resource_error}; {device_error}"),
+                            None => device_error,
+                        });
+                    Err(transaction_error)
+                }
+            },
+        }
     }
 
     pub fn update_cpuset_path(&self, _guest_cpuset: &str, _container_cpuset: &str) -> Result<()> {
