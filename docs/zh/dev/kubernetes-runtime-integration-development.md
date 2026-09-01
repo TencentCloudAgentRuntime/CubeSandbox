@@ -335,7 +335,7 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 | S3.1 基础 Volume | `DONE` | Codex | 输入、独立 Pod Volume share、可写卷/失败回滚、四类投射卷动态更新、subPath 固定语义和最终支持矩阵均已关闭 | 实现 `5b504b58`；S3.1d 回归 `aafdef40` / `inv-a83u0wgvxv`；审计 `inv-v83u490xa8`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.1/README.md)；同一 reviewer 确认 S3.1 `DONE` | S3.2 filesystem PVC |
 | S3.2 PVC | `DONE` | Codex | S3.2a～S3.2d 已完成输入基线、跨容器/Pod 重建持久化、失败回滚、static-local Retain 手工重绑、组合回归与支持矩阵 | `83902212`；组合终验 `inv-a83x7s0g04`；独立审计 `inv-883xivg7ub`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.2/README.md)；同一 reviewer 确认 S3.2 `DONE` | S3.3 SecurityContext |
 | S3.3 SecurityContext | `DONE` | Codex | S3.3a～S3.3f 已完成输入诊断、身份与组、capability/rootfs、NNP/seccomp、privileged 双门禁、exec 安全上下文和组合支持矩阵 | 实现 `7bf7f09d`；组合终验 `inv-v84gjpgj7k`；独立审计 `inv-884huw00ab`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.3/README.md)；同一 reviewer `APPROVE S3.3f DONE` | S3.4 资源控制 |
-| S3.4 资源控制 | `IN_PROGRESS` | Codex | S3.4a 已由同一 reviewer 批准为 `DONE`；当前进入 S3.4b Guest per-container cgroup 设计冻结 | `inv-084uvpg3h5` / `inv-384uxu0pj7`：actual Runtime identity、resource parent/process leaf、20 份 trace 和 exact cleanup 闭环；同一 reviewer `APPROVE S3.4a DONE`；[V15 证据](../../handoffs/kubernetes-runtime/evidence/s3.4/README.md) | 冻结 S3.4b 协议、presence、字段矩阵与原子更新边界 |
+| S3.4 资源控制 | `IN_PROGRESS` | Codex | S3.4a 已由同一 reviewer 批准为 `DONE`；S3.4b 设计与 Shim/Protocol 单元已获批准 | `inv-084uvpg3h5` / `inv-384uxu0pj7`：actual Runtime identity、resource parent/process leaf、20 份 trace 和 exact cleanup 闭环；`d262a74f` 冻结设计；`6a07ff69` Shim/Protocol；同一 reviewer 已批准两项 | 实现 Agent strict decode、cgroup v2 planner/transaction 与失败状态机 |
 
 ### S3.1 子阶段执行记录
 
@@ -371,9 +371,18 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 | 子阶段 | 状态 | 目标 | 验收标准 | 当前结果/下一步 |
 |---|---|---|---|---|
 | S3.4a 资源输入与现状诊断 | `DONE` | 冻结 Kubernetes 1.36/containerd 2.3 在 cgroup v2 上对 CPU、内存、swap、PIDs、hugepages 和 ephemeral-storage 的职责边界，并定位 Cube create/update 的真实缺口 | runc/Cube 对照覆盖 BestEffort/Burstable/Guaranteed、request-only/limit、init/restartable sidecar/app；保存 raw Pod/CRI/ctr OCI、Host VM/Shim cgroup、Guest per-container cgroup 和 cleanup 基线；create/update/拒绝路径形成证据矩阵；同一 reviewer `APPROVE` | V15 `/data/cubelet/s3.4-evidence/s34a-20260901T145751Z-2537408`：6 个 Pod、17 个低层 Task、1 个预期 reject、2 个 invalid-unified、20 份 trace 与 exact cleanup 通过；quota 和 `memory.max` 数值链已生效，period 仅覆盖默认 `100000`、未独立证明；shares 映射不兼容、limit-only 隐式 swap=0，NoSwap 的 observable `0` 不是 unified 无损传输结果；其余缺口进入 S3.4b；同一 reviewer `APPROVE S3.4a DONE` |
-| S3.4b Guest per-container cgroup | `IN_PROGRESS` | 保持 quota 与 `memory.max` 数值链，独立验证非默认 period，并让标准 OCI/Task Update 资源在 Guest resource parent 正确生效或明确拒绝 | 非默认 period create/update 正确；shares→weight 与当前 containerd/cgroups v3/runc 对照一致；limit-only 不改变 swap；无损处理或白名单实现 unified `memory.swap.max` 且 Kubernetes NoSwap 回归通过；reservation、显式 swap、cpuset、PIDs、hugepage、其他 unified 的 create/update 值正确；暂不能表示的字段 fail-closed，不再 accepted-unapplied；压力/OOM/PIDs/hugepage 正反例可归因到目标容器；同 Pod survivor 不受影响；validation/preflight 零写入，运行期失败且 rollback 成功时 controller/spec 复原，rollback 失败进入可重试 undo 的 fail-stop；create 失败由显式 pending owner 清理；同一 reviewer `APPROVE` | [冻结设计](../../handoffs/kubernetes-runtime/evidence/s3.4/s3.4b-design.md) 已获同一 reviewer `APPROVE S3.4b DESIGN`，当前实现 mirrored proto、Shim/Agent V2 通道、事务与 cleanup |
+| S3.4b Guest per-container cgroup | `IN_PROGRESS` | 保持 quota 与 `memory.max` 数值链，独立验证非默认 period，并让标准 OCI/Task Update 资源在 Guest resource parent 正确生效或明确拒绝 | 非默认 period create/update 正确；shares→weight 与当前 containerd/cgroups v3/runc 对照一致；limit-only 不改变 swap；无损处理或白名单实现 unified `memory.swap.max` 且 Kubernetes NoSwap 回归通过；reservation、显式 swap、cpuset、PIDs、hugepage、其他 unified 的 create/update 值正确；暂不能表示的字段 fail-closed，不再 accepted-unapplied；压力/OOM/PIDs/hugepage 正反例可归因到目标容器；同 Pod survivor 不受影响；validation/preflight 零写入，运行期失败且 rollback 成功时 controller/spec 复原，rollback 失败进入可重试 undo 的 fail-stop；create 失败由显式 pending owner 清理；同一 reviewer `APPROVE` | [冻结设计](../../handoffs/kubernetes-runtime/evidence/s3.4/s3.4b-design.md) 与 `6a07ff69` Shim/Protocol 单元已获同一 reviewer 批准；当前实现 Agent decode/controller |
 | S3.4c Host Pod VM 资源包络 | `NOT_STARTED` | 在 Host cgroup 对一个 Pod VM 的总 CPU/内存/进程资源实施上限，并正确处理 init、restartable sidecar、app 与动态更新 | Host 预算算法有固定测试向量；VM/VMM/virtiofs/辅助进程归入唯一 Pod cgroup；压力下 Host 上限生效且不影响其他 Pod；更新、OOM、删除和失败创建均收敛；同一 reviewer `APPROVE` | 依赖 S3.4a 的 Host 拓扑和 S3.4b 的 Guest 语义 |
 | S3.4d 压力回归与支持矩阵 | `NOT_STARTED` | 组合验证 Host/Guest 双层限制、QoS、更新、故障与非 cgroup 资源，并冻结首版范围 | 多容器 CPU/内存压力、定向 OOM、in-place update、swap/hugepage/PIDs、ephemeral-storage 责任边界均有通过或明确拒绝证据；lease/Pod/VM/cgroup 全量基线恢复；独立审计和同一 reviewer `APPROVE S3.4 DONE` | 依赖 S3.4b、S3.4c |
+
+#### S3.4b 实现单元记录
+
+| 实现单元 | 状态 | 完成内容 | 验收结果/下一步 |
+|---|---|---|---|
+| S3.4b.1 Shim/Protocol V2 | `DONE` | mirrored tag-8 envelope；managed create/update 在 typed 解析和副作用前做 raw duplicate/unknown 校验；canonical presence；devices update fail-close；capability gate；legacy 不发 V2 | `6a07ff69`；双侧 golden wire、Shim/Agent `cargo check`、`git diff --check` 通过；同一 reviewer `APPROVE S3.4b SHIM/PROTOCOL UNIT` |
+| S3.4b.2 Agent decode 与 controller transaction | `IN_PROGRESS` | strict envelope/parser、字段 planner、确定顺序写入/readback/rollback、逐字段 merge | 完成单测和同一 reviewer 批准后进入 S3.4b.3 |
+| S3.4b.3 degraded/PendingCreate | `NOT_STARTED` | rollback failure fail-stop/undo replay、create 显式 owner 与可重试 cleanup | 依赖 S3.4b.2 |
+| S3.4b.4 云端矩阵与审计 | `NOT_STARTED` | runc/Cube 数值、压力、失败注入、兼容路径、exact baseline 与独立审计 | 依赖 S3.4b.2～S3.4b.3 |
 
 
 ### 目标

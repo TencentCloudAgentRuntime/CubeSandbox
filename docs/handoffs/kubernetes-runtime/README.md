@@ -2,19 +2,19 @@
 
 ## 当前 Stage
 
-S3.4b `IN_PROGRESS`：S3.4a V15 父 resource cgroup、`runtime` process leaf、实际 RuntimeClass/containerd runtime identity 和独立审计已闭环，同一 reviewer 已给出 `APPROVE S3.4a DONE`；Guest per-container cgroup 的协议、presence、字段矩阵、事务与失败语义已冻结，同一 reviewer 已给出 `APPROVE S3.4b DESIGN`，当前进入实现。
+S3.4b `IN_PROGRESS`：S3.4a 已获 `APPROVE S3.4a DONE`；Guest per-container cgroup 设计已获 `APPROVE S3.4b DESIGN`；S3.4b.1 mirrored proto、Shim raw 校验/V2 发包、capability gate 和 devices update fail-close 已获同一 reviewer `APPROVE S3.4b SHIM/PROTOCOL UNIT`。当前执行 S3.4b.2 Agent strict decode 与 cgroup v2 transaction。
 
 ## 基线
 
-最后一项已验证实现 commit 为 `96b5a64fedd1f58b6e4834466755cf175f92cddd`，tree 为 `7eabf7ef5a2ba0d3a006bf845428eaab6c0028d4`。V15 source SHA-256 为 `d4400132…`，containerd trace/helper 为 `88476ece…`/`242a68a8…`；live 原始 containerd 为 `15e00263…`，CubeShim 为 `3c715652…`，Agent ext4 为 `87bac7a6…`。私有 COS 输入对象为 `kubernetes-runtime/s3.4a/source/cubesandbox-s34a-source-v14-d4400132.tar.gz`。
+最后一项已验证实现 commit 为 `6a07ff69ec02d4d77203e1f9b3021713110e2d73`，tree 为 `22e9ae382ff3460d867b21d83d4387d24e92edd8`。该单元尚未部署，Agent 未广告 resources-v2 capability，中间态始终 fail-closed。V15 source SHA-256 为 `d4400132…`，containerd trace/helper 为 `88476ece…`/`242a68a8…`；live 原始 containerd 为 `15e00263…`，CubeShim 为 `3c715652…`，Agent ext4 为 `87bac7a6…`。
 
 ## 已完成
 
-S0、S1、S2.1～S2.4、S3.1～S3.3、S3.4a 全部 `DONE`。S3.4a V15 正式矩阵、raw create/update、Runtime identity、父/子 cgroup、Host 拓扑、terminated classic init、ephemeral-storage 和 exact cleanup 均已通过；同一 reviewer 最终确认 `APPROVE S3.4a DONE`。
+S0、S1、S2.1～S2.4、S3.1～S3.3、S3.4a 全部 `DONE`。S3.4b 设计和 S3.4b.1 Shim/Protocol 单元完成并获同一 reviewer 批准；双侧 tag-8 golden wire 与 Shim/Agent 编译检查通过。
 
 ## 未完成
 
-S3.4b 正在进行设计冻结，S3.4c～S3.4d 尚未开始。V15 已确认 CPU quota 与 `memory.max` 的 Guest create/update 数值链可用；period 输入和结果始终为默认 `100000`，尚未独立证明。shares 使用的旧线性 weight 映射与当前 runc/cgroups v3 不兼容，memory-limit-only create 还会把未指定 swap 隐式写为 `0`；Kubernetes NoSwap 的 observable `0` 同样来自该副作用，OCI unified `memory.swap.max=0` 并未进入 Agent。S3.4b 应连同非默认 period、NoSwap 无损传输/回归、reservation update、显式 swap、cpuset、PIDs、hugepage、unified 和 accepted-unapplied fail-close 一起修复。S3.3 的 TTY/stdin、Host device/GPU 和二期安全字段边界保持不变。
+S3.4b.2～S3.4b.4 与 S3.4c～S3.4d 尚未完成。Agent 仍使用旧 scalar/presence 转换和 cgroups-rs 写入器，因此新 capability 尚未广告、代码也未部署。V15 的非默认 period、shares 映射、limit-only swap presence、NoSwap 无损传输、reservation、显式 swap、cpuset、PIDs、hugepage、unified、transaction rollback/degraded 和 PendingCreate cleanup 仍待实现与云端验收。
 
 ## 验证
 
@@ -30,4 +30,4 @@ S3.4a V15 构建 `inv-984uubgkt5`、稳定预检 `inv-b84uvagqkj`、正式诊断
 
 ## 下一步
 
-按已批准的 [`s3.4b-design.md`](evidence/s3.4/s3.4b-design.md) 实现：先完成 mirrored proto、Shim raw JSON/capability/V2 发包与 Agent strict decode/presence，再完成 cgroup v2 planner/transaction/merge/degraded 状态及 PendingCreate cleanup。保持 quota 与 `memory.max` 数值更新不回退，增加非默认 period，统一 shares→weight 到当前 containerd/cgroups v3 语义，并修复 limit-only swap presence、无损处理/白名单 unified、reservation、显式 swap、cpuset、PIDs 与 hugepage；本地测试和同一 reviewer 批准后再做云端矩阵，S3.4b 获批前不得开始 S3.4c。
+实现 S3.4b.2：Agent 严格复核 envelope/canonical JSON，补齐 presence 模型与逐字段 merge，并以独立 cgroup v2 planner/transaction 完成 preflight、journal、确定顺序写入、readback 与 rollback。通过单测和同一 reviewer 后进入 S3.4b.3 degraded/PendingCreate；S3.4b 获批前不得开始 S3.4c。
