@@ -372,11 +372,6 @@ pub(crate) fn canonicalize_create_config(raw: &[u8]) -> CResult<Vec<u8>> {
 pub(crate) fn canonicalize_update(raw: &[u8]) -> CResult<Vec<u8>> {
     let resources = parse_strict(raw, "Task.Update resources")?;
     validate_resources(&resources, "resources")?;
-    if resources.as_object("resources")?.contains_key("devices") {
-        return Err(
-            "resources.devices updates are not supported; device policy is create-only".to_string(),
-        );
-    }
     canonical_payload(resources)
 }
 
@@ -455,17 +450,12 @@ mod tests {
     }
 
     #[test]
-    fn update_rejects_empty_and_nonempty_devices_before_rpc() {
-        for raw in [
-            br#"{"devices":[]}"#.as_slice(),
-            br#"{"devices":[{"allow":true,"access":"rwm"}]}"#.as_slice(),
-        ] {
-            let error = canonicalize_update(raw).unwrap_err();
-            assert!(
-                error.contains("devices updates are not supported"),
-                "{error}"
-            );
-        }
+    fn update_strips_devices_from_v2_controller_payload() {
+        let payload = canonicalize_update(
+            br#"{"memory":{"limit":1048576},"devices":[{"allow":true,"access":"rwm"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(payload, br#"{"memory":{"limit":1048576}}"#);
     }
 
     #[test]

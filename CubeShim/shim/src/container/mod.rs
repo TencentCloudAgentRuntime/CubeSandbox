@@ -163,6 +163,26 @@ fn has_exact_all_devices_rule(spec: &Spec) -> bool {
         .is_some_and(|devices| devices.len() == 1 && is_canonical_all_devices_rule(&devices[0]))
 }
 
+fn validate_unchanged_device_update(spec: &Spec, update: &LinuxResources) -> CResult<()> {
+    let Some(requested) = update.devices().as_ref() else {
+        return Ok(());
+    };
+    let current = spec
+        .linux()
+        .as_ref()
+        .and_then(|linux| linux.resources().as_ref())
+        .and_then(|resources| resources.devices().as_ref())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if requested.as_slice() != current {
+        return Err(
+            "resources.devices updates are not supported; device policy is create-only and the requested rules differ from the create-time policy"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Fail closed for a maximally elevated OCI input even if the containerd
 /// all-devices marker was accidentally disabled. A non-privileged Kubernetes
 /// container keeps the default masked/readonly paths, so this fallback does
@@ -1419,6 +1439,7 @@ impl Container {
         res: &LinuxResources,
         resources_v2: Option<&[u8]>,
     ) -> CResult<()> {
+        validate_unchanged_device_update(&self.spec, res)?;
         let mut pb_res = oci::LinuxResources::default();
 
         if let Some(c) = res.cpu() {
@@ -1528,6 +1549,62 @@ mod identity_translation_tests {
             "process": process_json,
             "linux": {}
         }))
+    }
+
+    fn resources_with_devices(devices: serde_json::Value) -> LinuxResources {
+        serde_json::from_value(serde_json::json!({"devices": devices})).unwrap()
+    }
+
+    #[test]
+    fn update_allows_absent_or_create_time_device_policy() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "ociVersion": "1.0.2",
+            "linux": {"resources": {"devices": [
+                {"allow": true, "type": "c", "major": 1, "minor": 3, "access": "rwm"},
+                {"allow": true, "type": "c", "major": 1, "minor": 5, "access": "rw"}
+            ]}}
+        }))
+        .unwrap();
+        let absent: LinuxResources = serde_json::from_value(serde_json::json!({})).unwrap();
+        let unchanged = resources_with_devices(serde_json::json!([
+            {"allow": true, "type": "c", "major": 1, "minor": 3, "access": "rwm"},
+            {"allow": true, "type": "c", "major": 1, "minor": 5, "access": "rw"}
+        ]));
+        assert!(validate_unchanged_device_update(&spec, &absent).is_ok());
+        assert!(validate_unchanged_device_update(&spec, &unchanged).is_ok());
+
+        let no_policy: Spec = serde_json::from_value(serde_json::json!({
+            "ociVersion": "1.0.2",
+            "linux": {"resources": {}}
+        }))
+        .unwrap();
+        let empty = resources_with_devices(serde_json::json!([]));
+        assert!(validate_unchanged_device_update(&no_policy, &empty).is_ok());
+    }
+
+    #[test]
+    fn update_rejects_changed_or_reordered_device_policy() {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "ociVersion": "1.0.2",
+            "linux": {"resources": {"devices": [
+                {"allow": true, "type": "c", "major": 1, "minor": 3, "access": "rwm"},
+                {"allow": true, "type": "c", "major": 1, "minor": 5, "access": "rw"}
+            ]}}
+        }))
+        .unwrap();
+        for changed in [
+            resources_with_devices(serde_json::json!([
+                {"allow": true, "type": "c", "major": 1, "minor": 5, "access": "rw"},
+                {"allow": true, "type": "c", "major": 1, "minor": 3, "access": "rwm"}
+            ])),
+            resources_with_devices(serde_json::json!([
+                {"allow": false, "type": "c", "major": 1, "minor": 3, "access": "rwm"},
+                {"allow": true, "type": "c", "major": 1, "minor": 5, "access": "rw"}
+            ])),
+        ] {
+            let error = validate_unchanged_device_update(&spec, &changed).unwrap_err();
+            assert!(error.contains("device policy is create-only"), "{error}");
+        }
     }
 
     fn privileged_spec_json() -> serde_json::Value {
