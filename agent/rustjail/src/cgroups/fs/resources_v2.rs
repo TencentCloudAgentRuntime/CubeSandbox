@@ -1410,7 +1410,11 @@ mod tests {
             );
             return;
         };
-        assert!(root.starts_with("/sys/fs/cgroup/cubesandbox-s34b-realio-"));
+        assert_eq!(root.parent(), Some(Path::new("/sys/fs/cgroup")));
+        assert!(root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("cubesandbox-s34b-realio-")));
         assert!(root.is_dir());
 
         let cpu_path = root.join("cpu.weight");
