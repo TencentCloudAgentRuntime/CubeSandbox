@@ -2201,6 +2201,7 @@ const AGENT_CAPABILITIES: &[(&str, u32)] = &[
     ("io.cubesandbox.agent.sandbox.shared-pidns", 1),
     ("io.cubesandbox.agent.mount.dynamic", 1),
     ("io.cubesandbox.agent.stdio.passfd", 1),
+    (rustjail::resources::RESOURCE_V2_CAPABILITY, 1),
 ];
 
 fn agent_version_response() -> VersionCheckResponse {
@@ -2873,6 +2874,7 @@ mod tests {
             assert!(names.insert(capability.name().to_string()));
         }
         assert_eq!(names.len(), AGENT_CAPABILITIES.len());
+        assert!(names.contains(rustjail::resources::RESOURCE_V2_CAPABILITY));
     }
 
     #[test]

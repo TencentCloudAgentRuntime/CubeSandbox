@@ -16,6 +16,7 @@ use serde_json::{Number, Value};
 pub const RESOURCE_V2_VERSION: u32 = 1;
 pub const RESOURCE_V2_MEDIA_TYPE: &str = "application/vnd.cubesandbox.oci.linux-resources.v1+json";
 pub const RESOURCE_V2_MAX_BYTES: usize = 256 * 1024;
+pub const RESOURCE_V2_CAPABILITY: &str = "io.cubesandbox.agent.container.resources-v2";
 
 #[derive(Clone, Debug, PartialEq)]
 enum StrictValue {
