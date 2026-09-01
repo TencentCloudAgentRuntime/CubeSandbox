@@ -302,11 +302,7 @@ pub fn cpu_shares_to_weight(shares: u64) -> u64 {
 /// `pids.max=0` and then moving an already-forked init process into the cgroup
 /// would otherwise start a container that requested a zero-process limit.
 pub fn validate_init_process_create(resources: &LinuxResources) -> Result<()> {
-    if resources
-        .pids
-        .as_ref()
-        .is_some_and(|pids| pids.limit == 0)
-    {
+    if resources.pids.as_ref().is_some_and(|pids| pids.limit == 0) {
         bail!(
             "resources-v2 create rejects pids.limit=0: cgroup v2 permits administrative process migration above pids.max, so starting an init process would violate the requested zero-process limit"
         );
@@ -1083,7 +1079,9 @@ mod tests {
         resources.pids = Some(LinuxPids { limit: 0 });
         let error = validate_init_process_create(&resources).unwrap_err();
         assert!(error.to_string().contains("pids.limit=0"));
-        assert!(error.to_string().contains("administrative process migration"));
+        assert!(error
+            .to_string()
+            .contains("administrative process migration"));
     }
 
     #[test]
