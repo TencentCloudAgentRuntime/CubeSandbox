@@ -790,6 +790,63 @@ mod tests {
     }
 
     #[test]
+    fn test_seccomp_grpc_to_oci_preserves_runtime_default_fields() {
+        let mut errno_syscall = grpc::LinuxSyscall {
+            Names: vec![String::from("clone")],
+            Action: String::from("SCMP_ACT_ERRNO"),
+            Args: vec![grpc::LinuxSeccompArg {
+                Index: 0,
+                Value: 2_114_060_288,
+                ValueTwo: 0,
+                Op: String::from("SCMP_CMP_MASKED_EQ"),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        errno_syscall.set_errnoret(38);
+
+        let grpc_seccomp = grpc::LinuxSeccomp {
+            DefaultAction: String::from("SCMP_ACT_ERRNO"),
+            Architectures: vec![
+                String::from("SCMP_ARCH_X86_64"),
+                String::from("SCMP_ARCH_X86"),
+                String::from("SCMP_ARCH_X32"),
+            ],
+            Flags: vec![String::from("SECCOMP_FILTER_FLAG_TSYNC")],
+            Syscalls: vec![
+                grpc::LinuxSyscall {
+                    Names: vec![String::from("read"), String::from("write")],
+                    Action: String::from("SCMP_ACT_ALLOW"),
+                    ..Default::default()
+                },
+                errno_syscall,
+            ],
+            ..Default::default()
+        };
+
+        let seccomp = seccomp_grpc_to_oci(&grpc_seccomp);
+        assert_eq!(seccomp.default_action, "SCMP_ACT_ERRNO");
+        assert_eq!(
+            seccomp.architectures,
+            ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32"]
+        );
+        assert_eq!(seccomp.flags, ["SECCOMP_FILTER_FLAG_TSYNC"]);
+        assert_eq!(seccomp.syscalls.len(), 2);
+        assert_eq!(seccomp.syscalls[0].names, ["read", "write"]);
+        assert_eq!(seccomp.syscalls[0].action, "SCMP_ACT_ALLOW");
+        assert_eq!(seccomp.syscalls[0].errno_ret, libc::EPERM as u32);
+        assert!(seccomp.syscalls[0].args.is_empty());
+        assert_eq!(seccomp.syscalls[1].names, ["clone"]);
+        assert_eq!(seccomp.syscalls[1].action, "SCMP_ACT_ERRNO");
+        assert_eq!(seccomp.syscalls[1].errno_ret, 38);
+        assert_eq!(seccomp.syscalls[1].args.len(), 1);
+        assert_eq!(seccomp.syscalls[1].args[0].index, 0);
+        assert_eq!(seccomp.syscalls[1].args[0].value, 2_114_060_288);
+        assert_eq!(seccomp.syscalls[1].args[0].value_two, 0);
+        assert_eq!(seccomp.syscalls[1].args[0].op, "SCMP_CMP_MASKED_EQ");
+    }
+
+    #[test]
     fn test_hooks_grpc_to_oci() {
         #[derive(Debug)]
         struct TestData {

@@ -59,6 +59,50 @@ fn exec_process_for_agent(source: &Process, terminal: bool) -> oci::Process {
     process
 }
 
+/// Reject OCI seccomp values that the current Cube Agent protobuf cannot
+/// represent without changing their meaning. Keep this check ahead of the
+/// serde conversion: generated protobuf serde ignores fields absent from its
+/// schema, which would otherwise turn a requested security policy into a
+/// silent downgrade.
+fn validate_seccomp_transport(spec: &Spec) -> CResult<()> {
+    let Some(linux) = spec.linux().as_ref() else {
+        return Ok(());
+    };
+    let Some(seccomp) = linux.seccomp().as_ref() else {
+        return Ok(());
+    };
+
+    if seccomp.default_errno_ret().is_some() {
+        return Err(
+            "unsupported OCI seccomp field defaultErrnoRet: not representable by Cube Agent protobuf"
+                .to_string(),
+        );
+    }
+    if seccomp.listener_path().is_some() {
+        return Err(
+            "unsupported OCI seccomp field listenerPath: not representable by Cube Agent protobuf"
+                .to_string(),
+        );
+    }
+    if seccomp.listener_metadata().is_some() {
+        return Err(
+            "unsupported OCI seccomp field listenerMetadata: not representable by Cube Agent protobuf"
+                .to_string(),
+        );
+    }
+    if let Some(syscalls) = seccomp.syscalls() {
+        for (index, syscall) in syscalls.iter().enumerate() {
+            if syscall.errno_ret() == Some(0) {
+                return Err(format!(
+                    "unsupported OCI seccomp field syscalls[{index}].errnoRet=0: protobuf presence would be lost"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Default)]
 struct LogForward {
     handle: Option<tokio::task::JoinHandle<()>>,
@@ -370,6 +414,8 @@ impl Container {
     }
 
     fn get_pb_spec(&mut self) -> CResult<oci::Spec> {
+        validate_seccomp_transport(&self.spec)?;
+
         let json_str = serde_json::to_string(&self.spec)
             .map_err(|e| format!("serialize spec failed:{}", e))?;
 
@@ -377,7 +423,6 @@ impl Container {
             .map_err(|e| format!("deserialize spec failed:{}", e))?;
 
         let proc = spec.mut_process();
-        proc.set_noNewPrivileges(false);
         proc.set_selinuxLabel(String::new());
 
         let res = spec.mut_linux().mut_resources();
@@ -1334,6 +1379,143 @@ mod identity_translation_tests {
         assert!(capabilities.get_permitted().is_empty());
         assert!(capabilities.get_ambient().is_empty());
         assert!(!spec.get_root().get_readonly());
+    }
+
+    #[tokio::test]
+    async fn create_process_preserves_no_new_privileges_and_runtime_default_seccomp() {
+        let mut container = container_with_spec(serde_json::json!({
+            "ociVersion": "1.0.2",
+            "process": {
+                "user": {"uid": 1000, "gid": 1000},
+                "args": ["sh", "-c", "true"],
+                "cwd": "/",
+                "noNewPrivileges": true
+            },
+            "linux": {
+                "seccomp": {
+                    "defaultAction": "SCMP_ACT_ERRNO",
+                    "architectures": [
+                        "SCMP_ARCH_X86_64",
+                        "SCMP_ARCH_X86",
+                        "SCMP_ARCH_X32"
+                    ],
+                    "syscalls": [
+                        {
+                            "names": ["read", "write"],
+                            "action": "SCMP_ACT_ALLOW"
+                        },
+                        {
+                            "names": ["clone"],
+                            "action": "SCMP_ACT_ERRNO",
+                            "errnoRet": 38,
+                            "args": [{
+                                "index": 0,
+                                "value": 2114060288,
+                                "valueTwo": 0,
+                                "op": "SCMP_CMP_MASKED_EQ"
+                            }]
+                        }
+                    ]
+                }
+            }
+        }));
+
+        let spec = container.get_pb_spec().unwrap();
+        assert!(spec.get_process().get_noNewPrivileges());
+        assert!(spec.get_linux().has_seccomp());
+
+        let seccomp = spec.get_linux().get_seccomp();
+        assert_eq!(seccomp.get_defaultAction(), "SCMP_ACT_ERRNO");
+        assert_eq!(
+            seccomp.get_architectures(),
+            &["SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32"]
+        );
+        assert!(seccomp.get_flags().is_empty());
+        assert_eq!(seccomp.get_syscalls().len(), 2);
+        assert_eq!(seccomp.get_syscalls()[0].get_names(), &["read", "write"]);
+        assert_eq!(seccomp.get_syscalls()[0].get_action(), "SCMP_ACT_ALLOW");
+        assert_eq!(seccomp.get_syscalls()[0].get_errnoRet(), 0);
+        assert!(seccomp.get_syscalls()[0].get_args().is_empty());
+        assert_eq!(seccomp.get_syscalls()[1].get_names(), &["clone"]);
+        assert_eq!(seccomp.get_syscalls()[1].get_action(), "SCMP_ACT_ERRNO");
+        assert_eq!(seccomp.get_syscalls()[1].get_errnoRet(), 38);
+        assert_eq!(seccomp.get_syscalls()[1].get_args().len(), 1);
+        let arg = &seccomp.get_syscalls()[1].get_args()[0];
+        assert_eq!(arg.get_index(), 0);
+        assert_eq!(arg.get_value(), 2114060288);
+        assert_eq!(arg.get_valueTwo(), 0);
+        assert_eq!(arg.get_op(), "SCMP_CMP_MASKED_EQ");
+    }
+
+    #[tokio::test]
+    async fn create_process_preserves_false_no_new_privileges_without_seccomp() {
+        let mut container = container_with_process(serde_json::json!({
+            "user": {"uid": 0, "gid": 0},
+            "args": ["true"],
+            "cwd": "/",
+            "noNewPrivileges": false
+        }));
+
+        let spec = container.get_pb_spec().unwrap();
+        assert!(!spec.get_process().get_noNewPrivileges());
+        assert!(!spec.get_linux().has_seccomp());
+    }
+
+    #[tokio::test]
+    async fn create_process_rejects_seccomp_fields_missing_from_agent_protocol() {
+        let cases = [
+            (
+                "defaultErrnoRet",
+                serde_json::json!({
+                    "defaultAction": "SCMP_ACT_ERRNO",
+                    "defaultErrnoRet": 13
+                }),
+            ),
+            (
+                "listenerPath",
+                serde_json::json!({
+                    "defaultAction": "SCMP_ACT_NOTIFY",
+                    "listenerPath": "/run/seccomp-listener.sock"
+                }),
+            ),
+            (
+                "listenerMetadata",
+                serde_json::json!({
+                    "defaultAction": "SCMP_ACT_NOTIFY",
+                    "listenerMetadata": "opaque"
+                }),
+            ),
+            (
+                "errnoRet=0",
+                serde_json::json!({
+                    "defaultAction": "SCMP_ACT_ALLOW",
+                    "syscalls": [{
+                        "names": ["unshare"],
+                        "action": "SCMP_ACT_ERRNO",
+                        "errnoRet": 0
+                    }]
+                }),
+            ),
+        ];
+
+        for (expected_error, seccomp) in cases {
+            let mut container = container_with_spec(serde_json::json!({
+                "ociVersion": "1.0.2",
+                "process": {
+                    "user": {"uid": 0, "gid": 0},
+                    "args": ["true"],
+                    "cwd": "/",
+                    "noNewPrivileges": true
+                },
+                "linux": {"seccomp": seccomp}
+            }));
+
+            let error = container.get_pb_spec().unwrap_err();
+            assert!(
+                error.contains(expected_error),
+                "expected {expected_error:?} in {error:?}"
+            );
+        }
     }
 
     #[test]
