@@ -178,3 +178,105 @@ lease inventory 和当前实时状态独立复算 14 个 UID、20 个 container 
 对应的 inactive durable tombstone 按设计保留。S3.3b 只声明 UID/GID/groups、fsGroup 与
 相关多容器继承语义；capabilities/readonly rootfs 属于 S3.3c，NNP/seccomp 属于 S3.3d，
 privileged 双门禁属于 S3.3e，不在本结论中提前宣称。
+
+## S3.3c capabilities 与只读 rootfs
+
+### 固定输入
+
+- 实现 commit：`c55b759e8d0f836164b092fab20739acceb42836`
+- 完整 tree：`3cd344f557471635e23b935175032dc35f717302`
+- 非法 capability 负例脚本 SHA-256：
+  `bfa8e6c7040108eb35d32c8acad094031debf7e5ef69284214a62284fa18399b`
+- capabilities/rootfs 正例脚本 SHA-256：
+  `6d3a5f52260e5d591c9cddb2eb3f9e861de1a798c67ef233074a3aaacce655d4`
+- legacy Cubebox 回归脚本 SHA-256：
+  `34f8a34319795ddf6a7eadaace8a83ecbe8e47c7eef71b0e9ce2fd604802719e`
+- 私有 COS 对象分别为
+  `s3.3c/diagnose-s33c-invalid-capability-cloud-bfa8e6c7.sh`、
+  `s3.3c/verify-s33c-capabilities-rootfs-cloud-6d3a5f52.sh` 和
+  `s3.3c/verify-s14-legacy-cubebox-tests-cloud-34f8a343.sh`。
+- 已部署 CubeShim SHA-256：
+  `51b5447236003dbd168f247696f23f2b4a95e105a5f98434400fcecc9a0e68bf`
+- 已部署 Guest Agent ext4 SHA-256：
+  `0b87e42457b676793030acf6b7b084297bde89b4f15c236c779ace199cf0a626`
+- Guest Agent binary SHA-256：
+  `38103fae57effc52205fe52a840b20bdcd042d6e5d3ba8a633bc9499ed80ec0e`
+- 云节点：本 PoC 创建的 `ins-pl7mznaa`；未修改账号内已有 TKE 集群。
+
+### 实现契约与构建
+
+Agent 在进入 capability 设置前验证 OCI `bounding/effective/inheritable/permitted/ambient`
+五个集合，错误包含字段与非法 token；ambient 设置错误不再被丢弃。Shim 在启动 workload
+Task 前对原始 OCI config 做同等预校验，同时仍以严格 raw parser 拒绝重复键，非法 capability
+因此在 host Shim fail-closed，不会启动 workload Task。create 请求到 Guest 的五个集合
+保持原样。
+
+Agent rootfs 不再无条件强制只读，而是保留 OCI `root.readonly`；缺失 root 时保守默认为
+只读，显式 write-layer annotation 仍可覆盖为可写。定向单元测试覆盖五集合、非法 token、
+ambient 错误、OCI readonly true/false、缺失 root 和 write-layer override。
+
+Shim 构建 `inv-v845640s9h`、Agent v9 构建 `inv-9846kv0vte` 和构建物独立审计
+`inv-a846t9gxuh` 均为 `SUCCESS`。Agent 构建固定 Cargo.lock，显式移除复制来的旧 binary，
+要求重新编译，并从 ext4 回读 Agent/holder 与 host binary 逐一比较 SHA；完整 suite 为
+Agent `119/119`、rustjail `83/83`。部署前检 `inv-v846vq0qwm` 和部署
+`inv-6846w1gvr1` 均成功，部署时 Cube Pod、Shim 和 active lease 为 0，未重启
+containerd/kubelet，并保留上一版 Agent 回滚副本。
+
+### 正反用例与最终结果
+
+非法 capability 正式负例 `inv-b845t9grgt` 为 `SUCCESS`，证据目录为：
+
+`/data/cubelet/s3.3-evidence/s3.3c-invalid-capability-baseline-20260901T015011Z`
+
+runc 对照 Pod 正常 `Running` 且存在 workload Task；Cube Pod 在 host Shim 以
+`CAP_NOT_A_CAPABILITY` 和 `StartError` 明确失败，marker 不存在、workload Task 为 0。
+两种 runtime 的 Pod reason、原始 CRI/ctr、Task 和清理基线均被逐项核对。
+
+正式正例 `inv-6846wbgtiv` 为 `SUCCESS`，证据目录为：
+
+`/data/cubelet/s3.3-evidence/s3.3c-capabilities-rootfs-20260901T022736Z`
+
+两轮共 18 个唯一 Pod UID、26 个唯一 workload container 和 9 个唯一 Cube sandbox；
+覆盖 classic init、restartable sidecar、app、`drop ALL`、选择性 add、CAP 40 边界、
+只读/可写 rootfs、emptyDir 和非 TTY exec。五类 Guest capability mask 与原始 CRI/ctr
+集合严格相等，覆盖 `0`、`0x400`、`0x2000`、`0x2400` 和 `0x10000000000`；只读写根
+返回 `EROFS`，可写 rootfs 与 emptyDir 写入成功。round1、round2、cleanup 和实时状态均
+精确恢复初始 container、Task、Sandbox、snapshot、netns、shim、VM、mount 与 runtime
+resource 集合；lease `479→480→484→488`，9 个 sandbox 各一条 inactive tombstone，
+active lease 为 0。
+
+不信任正式摘要的总体只读审计 `inv-6847cm06pi` 为 `SUCCESS`。审计器从负例 Pod
+JSON/Task/error、26 份原始 CRI/ctr、18 份 Pod JSON、26 份 Guest 观察、4 次 exec、
+9 组 sandbox/lease/tombstone 和全部检查点独立重算上述结论。
+
+### legacy 回归
+
+最终 legacy 回归 `inv-084814gvgg` 为 `SUCCESS`，证据目录为：
+
+`/data/cubelet/s1.4-evidence/legacy-cubebox-tests-20260901T030441Z-554186`
+
+回归每次从固定 SHA archive 解压 Rust/Go vendor；Rust/Go image 使用不可变 amd64 OCI
+manifest，分别核验 registry config digest、本节点 Docker `.Id` 和 RepoDigest。Cubecow
+在断网容器中 `--offline --locked` 完成 release 构建；BPF 生成记录 Debian package 和
+compiler 版本，精确生成 14 个非空文件并逐个验证源/目标 SHA。Cubebox 使用
+`go test -json -race -count=1`，唯一目标 package 的 324 个 test run 和 324 个 pass
+完全相等，无 cache、空测试、fail 或 data race。
+
+legacy 独立审计器 SHA-256 为
+`6113eae82bcb3bfa57a9c38a2b54c119a7e990d55984adbeb7b774c1a135a2f0`；
+`inv-a8487g0n1w` 为 `SUCCESS`，从固定 13 个证据文件独立重算两份 vendor/source tree、
+镜像身份、工具链、14 个 BPF 双 SHA 和 324/324 JSONL 测试结果。
+
+### 失败迭代与边界
+
+- 首轮正例揭示 Agent 无条件强制 rootfs 只读；修复 OCI readonly 保留语义并重新构建、
+  独立审计、部署后，正式正例通过。
+- legacy 前置轮次先后暴露 CVM 缺少固定 vendor archive、Docker/containerd image store
+  的 `.Id` 采用 manifest digest，以及 bpf2go 文件名包含 `x86`/`test` 后缀；每项均保持
+  fail-closed，修正为固定输入或精确集合并由同一 reviewer 重新 `APPROVE` 后才重跑。
+- legacy 审计首轮仅因预期 GCC 输出含 `gcc version` 而停止；按原始证据改为逐字固定
+  Debian GCC 版本后，`inv-a8487g0n1w` 完整通过。
+
+同一 reviewer 对实现、构建、部署、正反用例、两个独立审计和 legacy 回归最终给出
+`APPROVE S3.3c DONE`。本阶段只声明 capabilities 与 rootfs 只读/可写语义；NNP/seccomp
+属于 S3.3d，privileged 双门禁属于 S3.3e，不在本结论中提前宣称。
