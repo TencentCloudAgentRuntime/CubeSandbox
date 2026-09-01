@@ -359,3 +359,83 @@ active lease=0，因失败发生在 baseline capture 前而正确记录
 同一 reviewer 已分别批准实现、正式 E2E 脚本和独立审计脚本，并最终给出
 `APPROVE S3.3d DONE`；S3.3d 的技术证据链和清理闭环无遗留问题。privileged 双门禁
 属于 S3.3e，不在本节提前声明。
+
+## S3.3e：privileged 双门禁
+
+### 实现契约
+
+实现提交为 `d594a7faf2b3e7a8f8179745e2c971d0b4cb4e1b`。节点开关固定为
+`CUBE_ALLOW_PRIVILEGED`：缺失和精确值 `false` 均关闭，只有精确值 `true` 开启，其他
+取值对 privileged 请求 fail-closed。containerd runtime 同时设置
+`privileged_without_host_devices=true` 和
+`privileged_without_host_devices_all_devices_allowed=true`；Pod 必须通过
+`securityContext.privileged=true` 产生唯一、规范的 OCI allow-all device marker，节点
+开关与 Pod 请求缺一不可。普通 Pod 即使运行在已开启节点上也不提升权限。
+
+privileged 仅表示 Guest 内提权：Shim 要求 Host OCI `.linux.devices` 为空，传给 Agent 的
+规则固定为一条 `a,-1,-1,rwm`；Agent 将 `-1` 还原为 OCI `None`，再映射到 cgroup
+wildcard，而不是错误地变成 major/minor 0。Shim 在 Task reservation、lease 和 rootfs
+准备前 canonicalize privileged bind source；缺失、相对、无法解析、直接 `/dev` 或通过
+符号链接解析到 `/dev` 的 source 都会被拒绝，成功解析的 source 写回 OCI spec，消除后续
+符号链接切换窗口。Host device/path 的显式透传不属于本阶段能力。
+
+### 构建、测试与部署
+
+云端构建固定 source patch SHA-256
+`a57d057ad338607d4b4d45d4032ee41693ea6b5cee3a533f87d951030c747995`，证据目录为
+`/data/cubelet/s3.3-evidence/s3.3e-build-v4-20260901T051239Z`。Shim privileged 定向
+测试 9/9、create 定向测试 15/15，并完成 workspace build/check；Agent wildcard 定向测试
+2/2，完整 suite 为 118/118，另有两个按原定义跳过的环境依赖测试。最终产物为：
+
+- CubeShim：`84c276492422bbc862e70a61c97c5d1c964595b808051400f33bfb7f531d06fd`；
+- Guest Agent binary：`56a3ab87194820b405f90e6c9c19426d6f39ace8511315108ba5aa64c84c0baf`；
+- Guest Agent ext4：`87bac7a6cc620595ece5fa5dfa046da8d7b0a6afe63193d7990c6f535b6e6873`。
+
+部署 `inv-684bwgg03r` 为 `SUCCESS`，证据目录为
+`/data/cubelet/s3.3-evidence/s3.3e-deploy-20260901T051825Z`；旧版本保存在
+`/opt/cubesandbox-s33e-predeploy-backup-v1`。最终 live Shim/Agent ext4 与上述哈希一致。
+
+### Kubernetes/Guest 正反例与独立审计
+
+正式脚本
+`CubeShim/sandbox-probe/scripts/verify-s33e-privileged-cloud.sh` SHA-256 为
+`31d92bde92677d5121f60925b2ab3ca2d88b09c5e0d3b75a1c521710add90b1f`；最终执行
+`inv-084cdrgc1k` 为 `SUCCESS`、exit code 0，证据目录为：
+
+`/data/cubelet/s3.3-evidence/s33e-final-20260901T053443Z-806800`
+
+开关关闭时普通 Pod Ready，privileged Pod 以 `StartError` 和
+`CUBE_ALLOW_PRIVILEGED=true is required` 明确拒绝，CRI running workload 为 0。开关
+开启后普通与 privileged Pod 均 Ready；普通 Guest 保持默认 capability mask
+`00000000a80425fb` 且 mount 被拒，privileged Guest 的 permitted/effective/bounding mask
+为 `000001ffffffffff` 且 tmpfs mount 成功；两者都看不到 Host `/dev/kvm`。privileged
+原始 OCI 恰有一条 canonical allow-all marker、`.linux.devices` 为空、无 `/dev` source；
+普通 OCI 没有 allow-all marker。显式 hostPath `/dev` 的 privileged Pod 在 Task 启动前以
+`StartError` 拒绝，CRI running workload 为 0。
+
+目标 Guest 使用 cgroup v2，不提供 cgroup v1 的 `devices.list`，因此本次 E2E 无法直接
+读取 Guest all-devices 规则，证据明确记录
+`guest_device_e2e=unobservable-cgroup-v2`，没有把它虚报为已观察；Shim 的 canonical OCI
+marker 和 Agent `grpc→OCI→cgroup` wildcard 映射由云端定向测试 2/2 闭环。
+
+独立只读审计脚本
+`CubeShim/sandbox-probe/scripts/audit-s33e-privileged-cloud.sh` SHA-256 为
+`1037cfd0f16a8d6f80f57aeab082a70fb6ae7f6fbeb7217c9c4432a7d4af11e7`；审计
+`inv-384cpa0n8v` 为 `SUCCESS`、exit code 0。审计不信任正式摘要，而是从原始 Pod/CRI/OCI
+重新计算两条 `StartError`、失败 message 字节与语义、Pod privileged 分类、UID 绑定、
+canonical marker、Guest capability/mount、Host `/dev` 输入和 Agent 两个具体测试名；同时
+绑定 build/deploy/live 哈希并逐一枚举 `before`、`after-off`、`after-on`、
+`after-host-dev`、`final`、`cleanup` 六个检查点。六次均为 adapter/shared/reaper/cleanup/
+mount/active lease/shim/VM/Cube Pod 全零，最终开关恢复 `false`，containerd、kubelet、
+runtime-resource service 与目标节点健康。同一 reviewer 最终给出
+`APPROVE S3.3e DONE`。
+
+### 失败迭代与边界
+
+- `inv-884c1rg5tf`：Kubernetes 1.36 把 `StartError` 放在 terminated state，而早期脚本只
+  查询 waiting；改为 waiting/terminated fallback 后重跑。
+- `inv-084c8mgfxf`：核心正反例已通过，但早期脚本在 cgroup v2 Guest 上误要求 v1
+  `devices.list`；改为按 cgroup 模式分支并诚实记录 v2 不可观测边界。
+
+上述失败轮次均完成 owned Pod 清理、开关恢复和活动资源精确归零。S3.3e 只声明 Guest 内
+privileged 双门禁；Host device passthrough、GPU 与生产准入策略不在本阶段范围。
