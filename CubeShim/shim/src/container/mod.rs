@@ -41,6 +41,24 @@ pub const ANNO_APP_SNAPSHOT_CONTAINER_ID: &str = "cube.appsnapshot.container.id"
 /// and stall all other log-forward lifecycle operations on this container.
 const LOG_FORWARD_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Translate the containerd OCI process used for an exec into the Agent
+/// protobuf without inventing, sorting, or dropping identity fields.
+fn exec_process_for_agent(source: &Process, terminal: bool) -> oci::Process {
+    let mut process = oci::Process::new();
+    process.set_terminal(terminal);
+    process.set_user(oci::User {
+        uid: source.user().uid(),
+        gid: source.user().gid(),
+        additionalGids: source.user().additional_gids().clone().unwrap_or_default(),
+        username: source.user().username().clone().unwrap_or_default(),
+        ..Default::default()
+    });
+    process.set_args(source.args().clone().unwrap_or_default().into());
+    process.set_env(source.env().clone().unwrap_or_default().into());
+    process.set_cwd(source.cwd().to_str().unwrap_or("").to_string());
+    process
+}
+
 #[derive(Default)]
 struct LogForward {
     handle: Option<tokio::task::JoinHandle<()>>,
@@ -980,31 +998,7 @@ impl Container {
             exec.clone()
         };
 
-        let mut proc = oci::Process::new();
-        proc.set_terminal(exec.tty.terminal);
-        let user = oci::User {
-            uid: exec.proc.user().uid(),
-            gid: exec.proc.user().gid(),
-            additionalGids: exec
-                .proc
-                .user()
-                .additional_gids()
-                .clone()
-                .unwrap_or(Vec::new())
-                .clone(),
-            username: exec
-                .proc
-                .user()
-                .username()
-                .clone()
-                .unwrap_or(String::new())
-                .clone(),
-            ..Default::default()
-        };
-        proc.set_user(user);
-        proc.set_args(exec.proc.args().clone().unwrap_or(Vec::new()).into());
-        proc.set_env(exec.proc.env().clone().unwrap_or(Vec::new()).into());
-        proc.set_cwd(exec.proc.cwd().clone().to_str().unwrap_or("").to_string());
+        let proc = exec_process_for_agent(&exec.proc, exec.tty.terminal);
 
         let (stdin_port, stdout_port, stderr_port) = if self.passfd_io_enabled() {
             let (i, o, e) = crate::common::utils::AsyncUtils::setup_passfd_streams(
@@ -1167,6 +1161,106 @@ impl Container {
 
     pub fn get_id(&self) -> String {
         self.id.clone()
+    }
+}
+
+#[cfg(test)]
+mod identity_translation_tests {
+    use super::*;
+    use nix::sys::socket::{socketpair, AddressFamily, SockFlag, SockType};
+    use std::os::fd::IntoRawFd;
+    use tokio::sync::mpsc::channel;
+
+    fn container_with_process(process_json: serde_json::Value) -> Container {
+        let spec: Spec = serde_json::from_value(serde_json::json!({
+            "ociVersion": "1.0.2",
+            "process": process_json,
+            "linux": {}
+        }))
+        .unwrap();
+        let (client_fd, _peer_fd) = socketpair(
+            AddressFamily::Unix,
+            SockType::Stream,
+            None,
+            SockFlag::empty(),
+        )
+        .unwrap();
+        let client = ttrpc::r#async::Client::new(client_fd.into_raw_fd());
+        let agent_client = Arc::new(Mutex::new(agent_ttrpc::AgentServiceClient::new(client)));
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(8);
+        Container::new(
+            "identity-sandbox".to_string(),
+            "identity-container".to_string(),
+            spec,
+            agent_client,
+            Log::default(),
+            Config::default(),
+            ContainerInfo::default(),
+            tx,
+            false,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_process_preserves_numeric_identity_and_group_order() {
+        let mut container = container_with_process(serde_json::json!({
+            "user": {
+                "uid": 1234,
+                "gid": 2345,
+                "additionalGids": [2345, 4567, 3456, 2345]
+            },
+            "args": ["id"],
+            "cwd": "/"
+        }));
+
+        let spec = container.get_pb_spec().unwrap();
+        let user = spec.get_process().get_user();
+        assert_eq!(user.get_uid(), 1234);
+        assert_eq!(user.get_gid(), 2345);
+        assert_eq!(user.get_additionalGids(), &[2345, 4567, 3456, 2345]);
+    }
+
+    #[tokio::test]
+    async fn create_process_does_not_synthesize_additional_groups() {
+        let mut container = container_with_process(serde_json::json!({
+            "user": {"uid": 65534, "gid": 65533},
+            "args": ["id"],
+            "cwd": "/"
+        }));
+
+        let spec = container.get_pb_spec().unwrap();
+        let user = spec.get_process().get_user();
+        assert_eq!(user.get_uid(), 65534);
+        assert_eq!(user.get_gid(), 65533);
+        assert!(user.get_additionalGids().is_empty());
+    }
+
+    #[test]
+    fn exec_process_preserves_identity_and_group_order() {
+        let source: Process = serde_json::from_value(serde_json::json!({
+            "user": {
+                "uid": 4321,
+                "gid": 5432,
+                "additionalGids": [5432, 7654, 6543, 5432],
+                "username": "identity-user"
+            },
+            "args": ["sh", "-c", "id"],
+            "env": ["IDENTITY_TEST=1"],
+            "cwd": "/work"
+        }))
+        .unwrap();
+
+        let process = exec_process_for_agent(&source, false);
+        let user = process.get_user();
+        assert_eq!(user.get_uid(), 4321);
+        assert_eq!(user.get_gid(), 5432);
+        assert_eq!(user.get_additionalGids(), &[5432, 7654, 6543, 5432]);
+        assert_eq!(user.get_username(), "identity-user");
+        assert!(!process.get_terminal());
+        assert_eq!(process.get_args(), &["sh", "-c", "id"]);
+        assert_eq!(process.get_env(), &["IDENTITY_TEST=1"]);
+        assert_eq!(process.get_cwd(), "/work");
     }
 }
 
