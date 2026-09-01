@@ -66,7 +66,13 @@ impl PreparedRootfs {
 
     fn unmount_all(&mut self, detach: bool) -> Result<(), String> {
         while let Some(path) = self.mounts.pop() {
-            let target = path_cstring(&path)?;
+            let target = match path_cstring(&path) {
+                Ok(target) => target,
+                Err(error) => {
+                    self.mounts.push(path);
+                    return Err(error);
+                }
+            };
             let flags = if detach { libc::MNT_DETACH } else { 0 };
             let ret = unsafe { libc::umount2(target.as_ptr(), flags) };
             if ret != 0 {
