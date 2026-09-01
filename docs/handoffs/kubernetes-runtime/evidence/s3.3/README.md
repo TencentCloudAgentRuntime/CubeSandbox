@@ -280,3 +280,82 @@ legacy 独立审计器 SHA-256 为
 同一 reviewer 对实现、构建、部署、正反用例、两个独立审计和 legacy 回归最终给出
 `APPROVE S3.3c DONE`。本阶段只声明 capabilities 与 rootfs 只读/可写语义；NNP/seccomp
 属于 S3.3d，privileged 双门禁属于 S3.3e，不在本结论中提前宣称。
+
+## S3.3d：NNP 与 seccomp
+
+### 协议边界与实现
+
+实现提交为 `5a8512456b46ab31a28bc0fc11500562c0385499`。CubeShim 不再把 OCI
+`process.noNewPrivileges` 强制改成 `false`，而是原样传入 Agent；Agent 既有启动顺序在
+NNP=true 时于 exec 前加载 seccomp，并设置 NNP。Shim/Agent protobuf 的 Process NNP
+均为 tag 9，Linux seccomp 均为 tag 8；Kubernetes RuntimeDefault 当前实际输入只包含
+`architectures/defaultAction/syscalls`，其中 syscall 包含 names/action、可选 args 和非零
+`errnoRet`，可由现有 wire contract 无损传输。
+
+Shim syscall `errnoRet` 是 scalar，而 Agent 同 tag 字段带 presence。为避免安全策略静默
+降级，Shim 在 serde/protobuf 转换前拒绝现有协议无法表达的 `defaultErrnoRet`、
+`listenerPath`、`listenerMetadata`，并拒绝显式 syscall `errnoRet=0`；后者否则会在 wire
+上丢失 presence 并被 Agent 当成缺省 `EPERM`。实现源 SHA-256 为
+`2d07043963f05d2a8283defcbb3fbbc35ef9235db7a246aefac4e1cef8e62d0b`；Agent 定向
+转换测试源 SHA-256 为
+`64f15fbf68b8b754447d185bda071230c8084a49c483738c8fd241361a3997c3`。
+
+### 构建、测试与部署
+
+最终 Shim 构建 `inv-b8497x0qge` 为 `SUCCESS`：8 项定向测试和 148 项主库测试全部
+通过，workspace 其余 suite 无失败；产物 SHA-256 为
+`60ba8906a391bb899b8a393ffc7c6cb9b35c37184ab9018be2a5bc523dd343d2`，证据目录为
+`/data/cubelet/s3.3-evidence/s3.3d-build-final-20260901T034606Z`。Agent 重放
+`inv-98492wgis7` 为 `SUCCESS`：定向测试 1 项通过，cube-agent 119 项通过，rustjail
+84 项通过、1 项按原定义 filtered，其余 suite 无失败；生产 Agent 代码和 ext4 产物未变，
+产物 SHA-256 仍为
+`0b87e42457b676793030acf6b7b084297bde89b4f15c236c779ace199cf0a626`。
+
+部署 `inv-6849ef00t9` 为 `SUCCESS`。部署前 Cube Pod、Cube Shim 和 active lease 均为
+0；旧 Shim `51b54472…` 备份到 `/opt/cubesandbox-s33d-predeploy-backup-v1`，最终 Shim
+以原子替换方式安装，失败路径可回滚。containerd 和 kubelet 均未重启，Agent 摘要未变。
+
+### Kubernetes/Guest 正反例
+
+正式脚本
+`CubeShim/sandbox-probe/scripts/verify-s33d-nnp-seccomp-cloud.sh` SHA-256 为
+`79aba88c3a46e4f7f6d0d3834f44ddf6152bc779a9a4503bdc4d8f055b04658a`；正式执行
+`inv-b849phgapi` 为 `SUCCESS`，证据目录为：
+
+`/data/cubelet/s3.3-evidence/s3.3d-nnp-seccomp-20260901T040243Z`
+
+两轮各创建 runc/Cube × Unconfined/RuntimeDefault 四个 Pod，共 8 个唯一 Pod UID 和
+4 个唯一 Cube sandbox。原始 CRI 与 ctr OCI 输入逐项相等；Unconfined +
+`allowPrivilegeEscalation=true` 的 host NNP=false，Guest `NoNewPrivs=0`、`Seccomp=0`、
+filters=0，`busybox unshare true` 成功。RuntimeDefault +
+`allowPrivilegeEscalation=false` 的 host NNP=true，Guest `NoNewPrivs=1`、`Seccomp=2`、
+filters>=1，`unshare(0)` 以 `EPERM` 被阻断。runc 与 Cube 两轮结果完全一致。
+
+lease record 从 488 增至 492；四个 Cube sandbox 各对应一条 inactive tombstone，active
+lease 为 0。round1、round2 和 cleanup 的 containers、tasks、sandboxes、snapshots、
+netns、Cube shims、VM runtime 与 runtime-resource 集合均精确恢复到初始基线；固定测试
+Pod 全部不存在，containerd、kubelet 和 runtime-resource service 保持 active。
+
+独立审计脚本
+`CubeShim/sandbox-probe/scripts/audit-s33d-nnp-seccomp-cloud.sh` SHA-256 为
+`4baeaf7699a1f721d88ad74d77d21c44072d053e712a8f8ed787a87b9dbb3bd6`；
+`inv-3849tjgnmx` 为 `SUCCESS`。审计从 16 份原始 CRI/ctr 记录重算 host 输入，校验
+8 份 Pod spec/UID 与 CRI label 的绑定、4 份 sandboxID 与 lease tombstone 的绑定、Guest
+唯一字段、完整 input fingerprint、lease `488→492`、active lease=0、三次基线以及最终
+节点/服务状态，输出 `S33D_AUDIT_OK`。
+
+### 环境失败分类与恢复
+
+第一次正式执行 `inv-0849f6g6w5` 在创建 Pod 前的节点门禁处返回 `FAILED/1`，唯一 trace
+是 `DiskPressure != False`；cleanup 为 `original_rc=1 cleanup_rc=0`、固定 Pod 全部不存在、
+active lease=0，因失败发生在 baseline capture 前而正确记录
+`exact_baseline=not-captured`。原因是此前多轮 Rust 中间构建目录占用磁盘。只删除 8 个
+已有独立运行产物和证据的中间 build 目录后，约 49 GiB 空间恢复；
+`inv-9849p3051k` 记录节点于 `2026-09-01T04:00:26Z` 恢复
+`KubeletHasNoDiskPressure`。最终现场汇总 `inv-8849wngpex` 为 `SUCCESS`：测试 Pod
+不存在，三项服务 active，Node Ready=true、DiskPressure=false，live Shim/Agent 摘要
+与正式 fingerprint 一致，约 52.44 GB 可用。
+
+同一 reviewer 已分别批准实现、正式 E2E 脚本和独立审计脚本，并最终给出
+`APPROVE S3.3d DONE`；S3.3d 的技术证据链和清理闭环无遗留问题。privileged 双门禁
+属于 S3.3e，不在本节提前声明。
