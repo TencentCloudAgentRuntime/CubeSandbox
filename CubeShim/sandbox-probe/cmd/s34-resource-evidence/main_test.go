@@ -16,6 +16,7 @@ import (
 
 	tasksapi "github.com/containerd/containerd/api/services/tasks/v1"
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/typeurl/v2"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"google.golang.org/protobuf/proto"
@@ -66,6 +67,17 @@ func TestRetryCleanupRejectsZeroAttempts(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "at least one attempt") {
 		t.Fatalf("retryCleanup error = %v", err)
+	}
+}
+
+func TestCreateRollbackContextKeepsNamespace(t *testing.T) {
+	ctx, cancel := createRollbackContext("s34-test")
+	defer cancel()
+	if namespace, ok := namespaces.Namespace(ctx); !ok || namespace != "s34-test" {
+		t.Fatalf("namespace = %q, %v; want s34-test, true", namespace, ok)
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		t.Fatal("rollback context has no deadline")
 	}
 }
 

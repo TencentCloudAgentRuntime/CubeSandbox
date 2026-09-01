@@ -258,7 +258,7 @@ func createCommand(args []string) error {
 	if err != nil {
 		_ = captureBundleConfigs(id, outputDir, true)
 		createErr := err
-		cleanupErr := cleanupCreatedProbeContainer(client, container, id+"-snapshot")
+		cleanupErr := cleanupCreatedProbeContainer(client, container, namespace, id+"-snapshot")
 		created = false
 		result := "error=" + createErr.Error() + "\ncleanup=complete\n"
 		if cleanupErr != nil {
@@ -295,11 +295,11 @@ func createCommand(args []string) error {
 	return nil
 }
 
-func cleanupCreatedProbeContainer(client *containerd.Client, container containerd.Container, snapshotKey string) error {
+func cleanupCreatedProbeContainer(client *containerd.Client, container containerd.Container, namespace, snapshotKey string) error {
 	snapshotter := client.SnapshotService("overlayfs")
 	containerGone := false
 	return retryCleanup(createRollbackAttempts, createRollbackInterval, time.Sleep, func() (bool, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), createRollbackTimeout)
+		ctx, cancel := createRollbackContext(namespace)
 		defer cancel()
 
 		if !containerGone {
@@ -323,6 +323,10 @@ func cleanupCreatedProbeContainer(client *containerd.Client, container container
 		}
 		return true, nil
 	})
+}
+
+func createRollbackContext(namespace string) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(namespaces.WithNamespace(context.Background(), namespace), createRollbackTimeout)
 }
 
 func retryCleanup(attempts int, interval time.Duration, pause func(time.Duration), operation func() (bool, error)) error {
