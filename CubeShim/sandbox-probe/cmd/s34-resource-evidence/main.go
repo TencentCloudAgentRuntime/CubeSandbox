@@ -36,6 +36,9 @@ import (
 
 const (
 	commandTimeout           = 2 * time.Minute
+	createRollbackAttempts   = 300
+	createRollbackInterval   = 100 * time.Millisecond
+	createRollbackTimeout    = 5 * time.Second
 	criAPIModuleVersion      = "k8s.io/cri-api@v0.36.4"
 	containerMetadataTypeURL = "github.com/containerd/cri/pkg/store/container/Metadata"
 	containerMetadataKey     = "io.containerd.cri.container.metadata"
@@ -254,7 +257,17 @@ func createCommand(args []string) error {
 	task, err := container.NewTask(ctx, cio.NullIO)
 	if err != nil {
 		_ = captureBundleConfigs(id, outputDir, true)
-		_ = os.WriteFile(filepath.Join(outputDir, "create.result.txt"), []byte("error="+err.Error()+"\n"), 0o644)
+		createErr := err
+		cleanupErr := cleanupCreatedProbeContainer(client, container, id+"-snapshot")
+		created = false
+		result := "error=" + createErr.Error() + "\ncleanup=complete\n"
+		if cleanupErr != nil {
+			result = "error=" + createErr.Error() + "\ncleanup=error: " + cleanupErr.Error() + "\n"
+		}
+		_ = os.WriteFile(filepath.Join(outputDir, "create.result.txt"), []byte(result), 0o644)
+		if cleanupErr != nil {
+			return errors.Join(createErr, cleanupErr)
+		}
 		return err
 	}
 	taskCreated := true
@@ -280,6 +293,59 @@ func createCommand(args []string) error {
 	created, taskCreated = false, false
 	fmt.Printf("S34_CREATE_OK id=%s runtime=%s sandbox=%s pid=%d\n", id, runtimeName, sandboxID, task.Pid())
 	return nil
+}
+
+func cleanupCreatedProbeContainer(client *containerd.Client, container containerd.Container, snapshotKey string) error {
+	snapshotter := client.SnapshotService("overlayfs")
+	containerGone := false
+	return retryCleanup(createRollbackAttempts, createRollbackInterval, time.Sleep, func() (bool, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), createRollbackTimeout)
+		defer cancel()
+
+		if !containerGone {
+			err := container.Delete(ctx, containerd.WithSnapshotCleanup)
+			if err == nil || errdefs.IsNotFound(err) {
+				containerGone = true
+			} else {
+				return false, err
+			}
+		}
+
+		_, err := snapshotter.Stat(ctx, snapshotKey)
+		if errdefs.IsNotFound(err) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if err := snapshotter.Remove(ctx, snapshotKey); err != nil && !errdefs.IsNotFound(err) {
+			return false, err
+		}
+		return true, nil
+	})
+}
+
+func retryCleanup(attempts int, interval time.Duration, pause func(time.Duration), operation func() (bool, error)) error {
+	if attempts < 1 {
+		return errors.New("cleanup requires at least one attempt")
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		done, err := operation()
+		if done && err == nil {
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		}
+		if attempt < attempts {
+			pause(interval)
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("container or snapshot still exists")
+	}
+	return fmt.Errorf("create rollback incomplete after %d attempts: %w", attempts, lastErr)
 }
 
 func updateCommand(args []string) error {

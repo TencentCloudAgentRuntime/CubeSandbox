@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	tasksapi "github.com/containerd/containerd/api/services/tasks/v1"
 	"github.com/containerd/containerd/v2/core/containers"
@@ -28,6 +29,43 @@ func TestReadResourcesRejectsUnknownField(t *testing.T) {
 	}
 	if _, err := readResources(path); err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("readResources error = %v, want unknown field", err)
+	}
+}
+
+func TestRetryCleanupRetriesTransientFailure(t *testing.T) {
+	attempts := 0
+	pauses := 0
+	err := retryCleanup(3, time.Millisecond, func(time.Duration) { pauses++ }, func() (bool, error) {
+		attempts++
+		if attempts < 3 {
+			return false, errors.New("busy")
+		}
+		return true, nil
+	})
+	if err != nil {
+		t.Fatalf("retryCleanup: %v", err)
+	}
+	if attempts != 3 || pauses != 2 {
+		t.Fatalf("attempts=%d pauses=%d, want 3 and 2", attempts, pauses)
+	}
+}
+
+func TestRetryCleanupReportsLastFailure(t *testing.T) {
+	err := retryCleanup(2, 0, func(time.Duration) {}, func() (bool, error) {
+		return false, errors.New("still busy")
+	})
+	if err == nil || !strings.Contains(err.Error(), "after 2 attempts: still busy") {
+		t.Fatalf("retryCleanup error = %v", err)
+	}
+}
+
+func TestRetryCleanupRejectsZeroAttempts(t *testing.T) {
+	err := retryCleanup(0, 0, func(time.Duration) {}, func() (bool, error) {
+		t.Fatal("operation must not run")
+		return true, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "at least one attempt") {
+		t.Fatalf("retryCleanup error = %v", err)
 	}
 }
 
