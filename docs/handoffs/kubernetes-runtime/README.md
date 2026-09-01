@@ -2,23 +2,23 @@
 
 ## 当前 Stage
 
-S3.4b `IN_PROGRESS`：S3.4a 已获 `APPROVE S3.4a DONE`；Guest per-container cgroup 设计已获 `APPROVE S3.4b DESIGN`；S3.4b.1 mirrored proto、Shim raw 校验/V2 发包、capability gate 和 devices update fail-close 已获同一 reviewer `APPROVE S3.4b SHIM/PROTOCOL UNIT`。当前执行 S3.4b.2 Agent strict decode 与 cgroup v2 transaction。
+S3.4b `IN_PROGRESS`：S3.4a 已获 `APPROVE S3.4a DONE`；Guest per-container cgroup 设计已获 `APPROVE S3.4b DESIGN`；S3.4b.1 Shim/Protocol 已获 `APPROVE S3.4b SHIM/PROTOCOL UNIT`，S3.4b.2 Agent decode/controller transaction 已获同一 reviewer `APPROVE S3.4b.2`。当前执行 S3.4b.3 degraded/PendingCreate。
 
 ## 基线
 
-最后一项已验证实现 commit 为 `6a07ff69ec02d4d77203e1f9b3021713110e2d73`，tree 为 `22e9ae382ff3460d867b21d83d4387d24e92edd8`。该单元尚未部署，Agent 未广告 resources-v2 capability，中间态始终 fail-closed。V15 source SHA-256 为 `d4400132…`，containerd trace/helper 为 `88476ece…`/`242a68a8…`；live 原始 containerd 为 `15e00263…`，CubeShim 为 `3c715652…`，Agent ext4 为 `87bac7a6…`。
+最后一项已验证实现 commit 为 `8e54a209521070d007e10919f807cbfdc570c4a0`，tree 为 `50c572b16af7e0e70eb5321377b66429f446a3c2`。该单元尚未部署，Agent 未广告 resources-v2 capability，中间态始终 fail-closed。V15 source SHA-256 为 `d4400132…`，containerd trace/helper 为 `88476ece…`/`242a68a8…`；live 原始 containerd 为 `15e00263…`，CubeShim 为 `3c715652…`，Agent ext4 为 `87bac7a6…`。
 
 ## 已完成
 
-S0、S1、S2.1～S2.4、S3.1～S3.3、S3.4a 全部 `DONE`。S3.4b 设计和 S3.4b.1 Shim/Protocol 单元完成并获同一 reviewer 批准；双侧 tag-8 golden wire 与 Shim/Agent 编译检查通过。
+S0、S1、S2.1～S2.4、S3.1～S3.3、S3.4a 全部 `DONE`。S3.4b 设计、S3.4b.1 Shim/Protocol 和 S3.4b.2 Agent transaction 已获同一 reviewer 批准。Agent 已实现严格 V2 二次解码、presence/partial merge、cgroup v2 planner/journal/readback/rollback/replay、区间式 cpuset、空值恢复及 cgroup-device eBPF。
 
 ## 未完成
 
-S3.4b.2～S3.4b.4 与 S3.4c～S3.4d 尚未完成。Agent 仍使用旧 scalar/presence 转换和 cgroups-rs 写入器，因此新 capability 尚未广告、代码也未部署。V15 的非默认 period、shares 映射、limit-only swap presence、NoSwap 无损传输、reservation、显式 swap、cpuset、PIDs、hugepage、unified、transaction rollback/degraded 和 PendingCreate cleanup 仍待实现与云端验收。
+S3.4b.3～S3.4b.4 与 S3.4c～S3.4d 尚未完成。ResourceDegraded 的 RPC 门禁/replay-first、PendingCreate owner/可重试 cleanup、capability 广告和云端正式矩阵仍未完成，因此代码尚未部署。V15 的非默认 period、shares、limit-only swap、NoSwap、reservation、显式 swap、cpuset、PIDs、hugepage、unified、transaction/degraded 与 create cleanup 仍待真实 Guest 验收。
 
 ## 验证
 
-S3.4a V15 构建 `inv-984uubgkt5`、稳定预检 `inv-b84uvagqkj`、正式诊断 `inv-084uvpg3h5` 和独立审计 `inv-384uxu0pj7` 均为 `SUCCESS`。核心证据目录为 `/data/cubelet/s3.4-evidence/s34a-20260901T145751Z-2537408`；覆盖 6 个高层 Pod、17 个成功低层 Task、1 个预期 create reject、2 个 invalid-unified 和 20 份 trace protobuf。raw create/update 与 actual Runtime identity 均验证，正式脚本和审计均确认 `cleanup=exact`；原始 containerd 恢复、三项服务 active、Node healthy且测试对象无残留。完整摘要见 `evidence/s3.4/README.md`。
+S3.4b.2 本地资源专项 22/22、device eBPF 3/3、`cargo check -p cube-agent` 和 `git diff --check` 通过；rustjail 全量 101/102，唯一失败为受限本机 `fchown` EINVAL；Agent 可运行用例 85 项通过，其余为 mount/netlink/chown/cgroup 权限限制。S3.4a V15 构建、正式诊断和独立审计仍为 `SUCCESS`，完整摘要见 `evidence/s3.4/README.md`。
 
 ## 阻塞
 
@@ -30,4 +30,4 @@ S3.4a V15 构建 `inv-984uubgkt5`、稳定预检 `inv-b84uvagqkj`、正式诊断
 
 ## 下一步
 
-实现 S3.4b.2：Agent 严格复核 envelope/canonical JSON，补齐 presence 模型与逐字段 merge，并以独立 cgroup v2 planner/transaction 完成 preflight、journal、确定顺序写入、readback 与 rollback。通过单测和同一 reviewer 后进入 S3.4b.3 degraded/PendingCreate；S3.4b 获批前不得开始 S3.4c。
+实现 S3.4b.3：把 transaction `Degraded`/undo replay 接入 container 与 RPC fail-stop 状态机；引入 `PendingCreate` owner，覆盖 storage/bundle/process/resource cgroup 的幂等、可重试 cleanup；完成失败注入单测并由同一 reviewer 批准后进入 S3.4b.4。S3.4b 获批前不得开始 S3.4c。
