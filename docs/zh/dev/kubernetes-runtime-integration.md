@@ -127,14 +127,29 @@ version = 3
     sandboxer = "shim"
     disable_pause_image_pull = true
     privileged_without_host_devices = true
-    privileged_without_host_devices_all_devices_allowed = false
+    privileged_without_host_devices_all_devices_allowed = true
     pod_annotations = [
       "cubesandbox.io/vm-cpu",
       "cubesandbox.io/vm-memory",
       "cubesandbox.io/resource-spec-hash",
       "cubesandbox.io/restore-from",
     ]
+
+[plugins."io.containerd.shim.v1.manager"]
+  env = ["CUBE_ALLOW_PRIVILEGED=false"]
 ```
+
+Cube 的 privileged 语义限定在 Guest 内：containerd 的两个
+`privileged_without_host_devices*` 开关必须同时为 `true`，这样
+`securityContext.privileged=true` 会产生 Guest 的 all-devices 规则，但不会自动枚举
+Host `/dev`。CubeShim 还要求节点开关 `CUBE_ALLOW_PRIVILEGED=true`；未配置或设为
+`false` 时，privileged 容器会在启动前得到明确拒绝，普通容器不受影响。PoC 通过
+containerd shim manager 的 `env` 下发节点开关；同一 `env` 数组中不得同时出现该变量
+的多个取值。生产安装器后续可把它生成到独立的 containerd import 片段中。当前实现
+按 containerd 2.3 的实机输出固定输入契约：`linux.resources.devices` 必须只有一条
+`allow=true`、type/major/minor 省略、`access="rwm"` 的规则；混入 deny 或重复规则都会
+拒绝，避免清理规则时意外扩大原有语义。该通配规则经 Agent 转换为 Guest cgroup 的
+`a *:* rwm`。
 
 首版不为 Cube 配置专属 snapshotter；使用 containerd 的常规 overlayfs snapshotter。以后切换 remote snapshotter 时，CubeShim 仍只消费 `CreateTaskRequest.rootfs` 中的 mount 列表。
 
@@ -333,10 +348,17 @@ ConfigMap/Secret 的原子更新依赖 kubelet 投影目录中的 symlink 交换
 
 ### 10.1 privileged 双门禁
 
-只有节点配置 `allow_privileged = true` 且 Pod/container spec 请求 privileged 时才允许。privileged 只提升 Guest 内权限：
+只有节点配置 `CUBE_ALLOW_PRIVILEGED=true` 且 containerd 产生唯一、规范的 Guest
+all-devices 标记时才允许。高 capability 特征只用于识别并拒绝配置错误，不能作为授权
+依据。privileged 只提升 Guest 内权限：
 
 - 不自动透传 Host `/dev`、Host namespaces 或任意 Host path。
-- containerd 设置 `privileged_without_host_devices = true`，避免把宿主设备加入 OCI spec。
+- containerd 同时设置 `privileged_without_host_devices = true` 和
+  `privileged_without_host_devices_all_devices_allowed = true`，避免把宿主设备加入 OCI
+  spec，并显式授予 Guest 设备通配规则。
+- CubeShim 在 Task reservation 和 rootfs/volume 导出前解析原始 bind source；解析失败
+  即拒绝，直接 `/dev` 或解析到 `/dev` 的路径也会拒绝。解析成功后把 canonical path
+  写回 OCI spec，后续导出不再复用调用方提供的符号链接。
 - 需要设备的能力以后通过显式 device policy/plugin 开放；GPU 不在首版范围。
 - 生产部署应由 Pod Security Admission/准入策略限制谁可以选择 Cube privileged。
 

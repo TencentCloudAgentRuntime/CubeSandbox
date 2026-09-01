@@ -150,7 +150,7 @@ impl CgroupManager for Manager {
         }
 
         // set devices resources
-        set_devices_resources(&self.cgroup, &r.devices, res);
+        set_devices_resources(&r.devices, res);
 
         // apply resources
         self.cgroup.apply(res)?;
@@ -435,11 +435,7 @@ fn set_network_resources(
     res.network.priorities = priorities;
 }
 
-fn set_devices_resources(
-    _cg: &cgroups::Cgroup,
-    device_resources: &[LinuxDeviceCgroup],
-    res: &mut cgroups::Resources,
-) {
+fn set_devices_resources(device_resources: &[LinuxDeviceCgroup], res: &mut cgroups::Resources) {
     let mut devices = vec![];
 
     for d in device_resources.iter() {
@@ -682,8 +678,8 @@ fn linux_device_group_to_cgroup_device(d: &LinuxDeviceCgroup) -> Option<DeviceRe
     Some(DeviceResource {
         allow: d.allow,
         devtype: dev_type,
-        major: d.major.unwrap_or(0),
-        minor: d.minor.unwrap_or(0),
+        major: d.major.unwrap_or(WILDCARD),
+        minor: d.minor.unwrap_or(WILDCARD),
         access: permissions,
     })
 }
@@ -1537,6 +1533,34 @@ fn convert_memory_swap_to_v2_value(memory_swap: i64, memory: i64) -> Result<i64>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_devices_wildcard_survives_cgroup_resource_application() {
+        let input = LinuxDeviceCgroup {
+            allow: true,
+            r#type: "a".to_string(),
+            major: None,
+            minor: None,
+            access: "rwm".to_string(),
+        };
+        let converted = linux_device_group_to_cgroup_device(&input).unwrap();
+        assert!(converted.allow);
+        assert_eq!(converted.devtype, DeviceType::All);
+        assert_eq!(converted.major, WILDCARD);
+        assert_eq!(converted.minor, WILDCARD);
+        assert_eq!(
+            converted.access,
+            vec![
+                DevicePermissions::Read,
+                DevicePermissions::Write,
+                DevicePermissions::MkNod,
+            ]
+        );
+
+        let mut resources = cgroups::Resources::default();
+        set_devices_resources(&[input], &mut resources);
+        assert_eq!(resources.devices.devices[0], converted);
+    }
 
     #[test]
     fn resource_metrics_capability_requires_complete_v2_accounting_layout() {

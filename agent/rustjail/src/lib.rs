@@ -519,6 +519,30 @@ pub fn grpc_to_oci(grpc: &grpc::Spec) -> oci::Spec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_devices_wildcard_survives_grpc_to_oci_resources() {
+        let grpc_resources = grpc::LinuxResources {
+            Devices: vec![grpc::LinuxDeviceCgroup {
+                Allow: true,
+                Type: "a".to_string(),
+                Major: -1,
+                Minor: -1,
+                Access: "rwm".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let resources = resources_grpc_to_oci(&grpc_resources);
+        assert_eq!(resources.devices.len(), 1);
+        assert!(resources.devices[0].allow);
+        assert_eq!(resources.devices[0].r#type, "a");
+        assert_eq!(resources.devices[0].major, None);
+        assert_eq!(resources.devices[0].minor, None);
+        assert_eq!(resources.devices[0].access, "rwm");
+    }
+
     #[macro_export]
     macro_rules! skip_if_not_root {
         () => {

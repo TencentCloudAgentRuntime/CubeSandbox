@@ -6,7 +6,8 @@ pub mod container_mgr;
 pub mod exec;
 pub mod rootfs;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent::CustomFile;
@@ -15,7 +16,7 @@ use container_mgr::{ContainerInfo, ContainerState, TaskState};
 use containerd_shim::protos::protobuf::MessageDyn;
 use containerd_shim::{Error, Result};
 use exec::{Exec, Tty};
-use oci_spec::runtime::{LinuxResources, Mount, Process, Spec};
+use oci_spec::runtime::{Capability, LinuxResources, Mount, Process, Spec};
 use protoc::{agent, agent_ttrpc, oci};
 use serde_json;
 use tokio::sync::mpsc::Sender;
@@ -35,6 +36,12 @@ use crate::{infof, warnf};
 
 pub const GUEST_DEV_SHM: &str = "/run/cube-containers/sandbox/shm";
 pub const ANNO_APP_SNAPSHOT_CONTAINER_ID: &str = "cube.appsnapshot.container.id";
+
+/// Node-local opt-in for Kubernetes `securityContext.privileged=true`.
+/// containerd and every Cube shim inherit this value from the containerd
+/// service environment. Privileged workloads remain disabled when it is
+/// absent.
+pub const CUBE_ALLOW_PRIVILEGED_ENV: &str = "CUBE_ALLOW_PRIVILEGED";
 
 /// Upper bound on the dedicated vsock connect in start_log_forward.  It runs
 /// while holding log_forward_lifecycle, so an unbounded connect would serialize
@@ -101,6 +108,217 @@ fn validate_seccomp_transport(spec: &Spec) -> CResult<()> {
     }
 
     Ok(())
+}
+
+/// containerd emits this OCI device-cgroup rule only for privileged
+/// containers when the Cube runtime is configured with
+/// `privileged_without_host_devices_all_devices_allowed=true`. Keep the
+/// check on the original OCI spec: the protobuf uses -1 rather than absent
+/// major/minor values to represent a wildcard.
+fn is_canonical_all_devices_rule(device: &oci_spec::runtime::LinuxDeviceCgroup) -> bool {
+    device.allow()
+        && device.typ().is_none()
+        && device.major().is_none()
+        && device.minor().is_none()
+        && device.access().as_deref() == Some("rwm")
+}
+
+fn contains_all_devices_rule(spec: &Spec) -> bool {
+    spec.linux()
+        .as_ref()
+        .and_then(|linux| linux.resources().as_ref())
+        .and_then(|resources| resources.devices().as_ref())
+        .is_some_and(|devices| devices.iter().any(is_canonical_all_devices_rule))
+}
+
+fn has_exact_all_devices_rule(spec: &Spec) -> bool {
+    spec.linux()
+        .as_ref()
+        .and_then(|linux| linux.resources().as_ref())
+        .and_then(|resources| resources.devices().as_ref())
+        .is_some_and(|devices| devices.len() == 1 && is_canonical_all_devices_rule(&devices[0]))
+}
+
+/// Fail closed for a maximally elevated OCI input even if the containerd
+/// all-devices marker was accidentally disabled. A non-privileged Kubernetes
+/// container keeps the default masked/readonly paths, so this fallback does
+/// not classify ordinary capability additions as privileged.
+fn has_privileged_capability_signature(spec: &Spec) -> bool {
+    let Some(process) = spec.process().as_ref() else {
+        return false;
+    };
+    let Some(capabilities) = process.capabilities().as_ref() else {
+        return false;
+    };
+    let has_elevated_caps = [
+        capabilities.bounding(),
+        capabilities.effective(),
+        capabilities.permitted(),
+    ]
+    .into_iter()
+    .all(|set| {
+        set.as_ref().is_some_and(|set| {
+            set.contains(&Capability::SysAdmin)
+                && set.contains(&Capability::SysModule)
+                && set.contains(&Capability::SysRawio)
+        })
+    });
+    if !has_elevated_caps {
+        return false;
+    }
+
+    spec.linux().as_ref().is_some_and(|linux| {
+        linux
+            .masked_paths()
+            .as_ref()
+            .map_or(true, |paths| paths.is_empty())
+            && linux
+                .readonly_paths()
+                .as_ref()
+                .map_or(true, |paths| paths.is_empty())
+            && linux.seccomp().is_none()
+    })
+}
+
+fn requests_guest_privileged(spec: &Spec) -> bool {
+    contains_all_devices_rule(spec) || has_privileged_capability_signature(spec)
+}
+
+fn is_host_dev_path(source: &Path) -> bool {
+    source == Path::new("/dev") || source.starts_with("/dev/")
+}
+
+fn reject_host_dev_bind_sources(spec: &Spec) -> CResult<()> {
+    if let Some(mount) = spec.mounts().as_ref().into_iter().flatten().find(|mount| {
+        mount.typ().as_deref() == Some("bind")
+            && mount
+                .source()
+                .as_ref()
+                .is_some_and(|source| is_host_dev_path(source))
+    }) {
+        return Err(format!(
+            "privileged OCI request contains Host /dev mount source {:?}",
+            mount.source()
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve privileged Host bind sources while they still refer to the
+/// original OCI paths, then replace the sources in the spec with those
+/// canonical paths. Standard-rootfs preparation later exports exactly these
+/// rewritten paths rather than reusing a caller-controlled symlink. Any
+/// resolution failure is rejected before Task reservation or rootfs effects.
+pub(crate) fn resolve_guest_privileged_bind_sources(spec: &mut Spec) -> CResult<()> {
+    if !requests_guest_privileged(spec) {
+        return Ok(());
+    }
+
+    let Some(mounts) = spec.mounts_mut().as_mut() else {
+        return Ok(());
+    };
+    for mount in mounts.iter_mut() {
+        if mount.typ().as_deref() != Some("bind") {
+            continue;
+        }
+        let source = mount.source().as_ref().ok_or_else(|| {
+            format!(
+                "privileged host bind mount for {:?} has no source",
+                mount.destination()
+            )
+        })?;
+        if !source.is_absolute() {
+            return Err(format!(
+                "privileged host bind mount source must be absolute for {:?}: {}",
+                mount.destination(),
+                source.display()
+            ));
+        }
+        let resolved = std::fs::canonicalize(source).map_err(|error| {
+            format!(
+                "resolve privileged host bind mount source {} for {:?} failed: {error}",
+                source.display(),
+                mount.destination()
+            )
+        })?;
+        if is_host_dev_path(&resolved) {
+            return Err(format!(
+                "privileged OCI request contains Host /dev mount source {:?} resolved from {}",
+                resolved,
+                source.display()
+            ));
+        }
+        mount.set_source(Some(resolved));
+    }
+
+    Ok(())
+}
+
+fn parse_privileged_node_switch(value: Option<&OsStr>) -> CResult<bool> {
+    let Some(value) = value else {
+        return Ok(false);
+    };
+    let value = value.to_str().ok_or_else(|| {
+        format!("invalid non-UTF-8 {CUBE_ALLOW_PRIVILEGED_ENV} value: expected true or false")
+    })?;
+    match value {
+        "false" => Ok(false),
+        "true" => Ok(true),
+        value => Err(format!(
+            "invalid {CUBE_ALLOW_PRIVILEGED_ENV} value {value:?}: expected true or false"
+        )),
+    }
+}
+
+/// Enforce the VM-runtime form of privileged: elevation is confined to the
+/// Guest kernel and containerd must not enumerate Host device nodes into the
+/// OCI input. Explicit device passthrough can be designed separately rather
+/// than becoming an accidental side effect of `privileged=true`.
+fn validate_guest_privileged_input(spec: &Spec, node_allows_privileged: bool) -> CResult<bool> {
+    let requested = requests_guest_privileged(spec);
+    if !requested {
+        return Ok(false);
+    }
+    if !node_allows_privileged {
+        return Err(format!(
+            "privileged OCI request rejected: node switch {CUBE_ALLOW_PRIVILEGED_ENV}=true is required"
+        ));
+    }
+
+    if let Some(devices) = spec
+        .linux()
+        .as_ref()
+        .and_then(|linux| linux.devices().as_ref())
+    {
+        if let Some(device) = devices.first() {
+            return Err(format!(
+                "privileged OCI request contains Host device candidate {:?}; Cube Guest device nodes must not come from OCI linux.devices, configure containerd privileged_without_host_devices=true",
+                device.path()
+            ));
+        }
+    }
+
+    reject_host_dev_bind_sources(spec)?;
+
+    if !has_exact_all_devices_rule(spec) {
+        return Err(
+            "privileged OCI request must contain exactly one canonical Guest all-devices rule and no additional device rules; configure containerd privileged_without_host_devices_all_devices_allowed=true"
+                .to_string(),
+        );
+    }
+
+    Ok(true)
+}
+
+fn guest_all_devices_rule() -> oci::LinuxDeviceCgroup {
+    oci::LinuxDeviceCgroup {
+        allow: true,
+        field_type: "a".to_string(),
+        major: -1,
+        minor: -1,
+        access: "rwm".to_string(),
+        ..Default::default()
+    }
 }
 
 #[derive(Default)]
@@ -414,7 +632,20 @@ impl Container {
     }
 
     fn get_pb_spec(&mut self) -> CResult<oci::Spec> {
+        let node_allows_privileged = if requests_guest_privileged(&self.spec) {
+            parse_privileged_node_switch(std::env::var_os(CUBE_ALLOW_PRIVILEGED_ENV).as_deref())?
+        } else {
+            false
+        };
+        self.get_pb_spec_with_privileged_policy(node_allows_privileged)
+    }
+
+    fn get_pb_spec_with_privileged_policy(
+        &mut self,
+        node_allows_privileged: bool,
+    ) -> CResult<oci::Spec> {
         validate_seccomp_transport(&self.spec)?;
+        let guest_privileged = validate_guest_privileged_input(&self.spec, node_allows_privileged)?;
 
         let json_str = serde_json::to_string(&self.spec)
             .map_err(|e| format!("serialize spec failed:{}", e))?;
@@ -427,6 +658,9 @@ impl Container {
 
         let res = spec.mut_linux().mut_resources();
         res.clear_devices();
+        if guest_privileged {
+            res.mut_devices().push(guest_all_devices_rule());
+        }
         res.clear_pids();
         res.clear_blockIO();
 
@@ -1256,6 +1490,32 @@ mod identity_translation_tests {
         }))
     }
 
+    fn privileged_spec_json() -> serde_json::Value {
+        serde_json::json!({
+            "ociVersion": "1.0.2",
+            "process": {
+                "user": {"uid": 0, "gid": 0},
+                "args": ["true"],
+                "cwd": "/",
+                "capabilities": {
+                    "bounding": ["CAP_SYS_ADMIN", "CAP_SYS_MODULE", "CAP_SYS_RAWIO"],
+                    "effective": ["CAP_SYS_ADMIN", "CAP_SYS_MODULE", "CAP_SYS_RAWIO"],
+                    "inheritable": [],
+                    "permitted": ["CAP_SYS_ADMIN", "CAP_SYS_MODULE", "CAP_SYS_RAWIO"],
+                    "ambient": []
+                }
+            },
+            "linux": {
+                "devices": [],
+                "resources": {
+                    "devices": [{"allow":true, "access":"rwm"}]
+                },
+                "maskedPaths": [],
+                "readonlyPaths": []
+            }
+        })
+    }
+
     #[tokio::test]
     async fn create_process_preserves_numeric_identity_and_group_order() {
         let mut container = container_with_process(serde_json::json!({
@@ -1516,6 +1776,155 @@ mod identity_translation_tests {
                 "expected {expected_error:?} in {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn privileged_node_switch_is_explicit_and_defaults_off() {
+        assert!(!parse_privileged_node_switch(None).unwrap());
+        assert!(!parse_privileged_node_switch(Some(OsStr::new("false"))).unwrap());
+        assert!(parse_privileged_node_switch(Some(OsStr::new("true"))).unwrap());
+        let error = parse_privileged_node_switch(Some(OsStr::new("1"))).unwrap_err();
+        assert!(error.contains(CUBE_ALLOW_PRIVILEGED_ENV));
+        assert!(error.contains("expected true or false"));
+    }
+
+    #[tokio::test]
+    async fn privileged_request_requires_node_opt_in() {
+        let mut container = container_with_spec(privileged_spec_json());
+        let error = container
+            .get_pb_spec_with_privileged_policy(false)
+            .unwrap_err();
+        assert!(error.contains("privileged OCI request rejected"));
+        assert!(error.contains("CUBE_ALLOW_PRIVILEGED=true"));
+    }
+
+    #[tokio::test]
+    async fn privileged_request_keeps_elevation_guest_only() {
+        let mut container = container_with_spec(privileged_spec_json());
+        let spec = container.get_pb_spec_with_privileged_policy(true).unwrap();
+
+        assert!(spec.get_linux().get_devices().is_empty());
+        let rules = spec.get_linux().get_resources().get_devices();
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].get_allow());
+        assert_eq!(rules[0].get_field_type(), "a");
+        assert_eq!(rules[0].get_major(), -1);
+        assert_eq!(rules[0].get_minor(), -1);
+        assert_eq!(rules[0].get_access(), "rwm");
+    }
+
+    #[tokio::test]
+    async fn privileged_request_rejects_host_device_enumeration() {
+        let mut spec = privileged_spec_json();
+        spec["linux"]["devices"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "path":"/dev/kvm", "type":"c", "major":10, "minor":232
+            }));
+        let mut container = container_with_spec(spec);
+        let error = container
+            .get_pb_spec_with_privileged_policy(true)
+            .unwrap_err();
+        assert!(error.contains("Host device candidate"));
+        assert!(error.contains("/dev/kvm"));
+        assert!(error.contains("privileged_without_host_devices=true"));
+    }
+
+    #[tokio::test]
+    async fn privileged_request_rejects_host_dev_mount() {
+        let mut spec = privileged_spec_json();
+        spec["mounts"] = serde_json::json!([{
+            "destination":"/host-dev",
+            "type":"bind",
+            "source":"/dev",
+            "options":["rbind", "rw"]
+        }]);
+        let mut container = container_with_spec(spec);
+        let error = container
+            .get_pb_spec_with_privileged_policy(true)
+            .unwrap_err();
+        assert!(error.contains("Host /dev mount source"));
+    }
+
+    #[tokio::test]
+    async fn privileged_signature_requires_containerd_guest_device_marker() {
+        let mut spec = privileged_spec_json();
+        spec["linux"]["resources"]["devices"] = serde_json::json!([]);
+        let mut container = container_with_spec(spec);
+        let error = container
+            .get_pb_spec_with_privileged_policy(true)
+            .unwrap_err();
+        assert!(error.contains("exactly one canonical Guest all-devices rule"));
+        assert!(error.contains("privileged_without_host_devices_all_devices_allowed=true"));
+    }
+
+    #[tokio::test]
+    async fn privileged_request_rejects_marker_followed_by_deny_rule() {
+        let mut spec = privileged_spec_json();
+        spec["linux"]["resources"]["devices"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "allow": false,
+                "type": "c",
+                "major": 10,
+                "minor": 232,
+                "access": "rwm"
+            }));
+        let mut container = container_with_spec(spec);
+        let error = container
+            .get_pb_spec_with_privileged_policy(true)
+            .unwrap_err();
+        assert!(error.contains("exactly one canonical Guest all-devices rule"));
+        assert!(error.contains("no additional device rules"));
+    }
+
+    #[tokio::test]
+    async fn privileged_request_rejects_duplicate_all_devices_markers() {
+        let mut spec = privileged_spec_json();
+        spec["linux"]["resources"]["devices"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"allow": true, "access": "rwm"}));
+        let mut container = container_with_spec(spec);
+        let error = container
+            .get_pb_spec_with_privileged_policy(true)
+            .unwrap_err();
+        assert!(error.contains("exactly one canonical Guest all-devices rule"));
+        assert!(error.contains("no additional device rules"));
+    }
+
+    #[tokio::test]
+    async fn ordinary_container_is_not_elevated_when_node_switch_is_on() {
+        let mut container = container_with_spec(serde_json::json!({
+            "ociVersion": "1.0.2",
+            "process": {
+                "user": {"uid": 0, "gid": 0},
+                "args": ["true"],
+                "cwd": "/",
+                "capabilities": {
+                    "bounding": ["CAP_NET_BIND_SERVICE"],
+                    "effective": ["CAP_NET_BIND_SERVICE"],
+                    "permitted": ["CAP_NET_BIND_SERVICE"]
+                }
+            },
+            "linux": {
+                "resources": {"devices": [{
+                    "allow":true, "type":"c", "major":1, "minor":3, "access":"rwm"
+                }]},
+                "maskedPaths": ["/proc/kcore"],
+                "readonlyPaths": ["/proc/sys"]
+            }
+        }));
+        let spec = container.get_pb_spec_with_privileged_policy(true).unwrap();
+        assert!(spec.get_linux().get_resources().get_devices().is_empty());
+        assert_eq!(
+            sorted_capabilities(spec.get_process().get_capabilities().get_effective()),
+            ["CAP_NET_BIND_SERVICE"]
+        );
+        assert_eq!(spec.get_linux().get_maskedPaths(), &["/proc/kcore"]);
+        assert_eq!(spec.get_linux().get_readonlyPaths(), &["/proc/sys"]);
     }
 
     #[test]

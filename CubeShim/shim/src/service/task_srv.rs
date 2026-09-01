@@ -55,6 +55,12 @@ fn create_error_with_rootfs_cleanup(
     Error::Other(message)
 }
 
+fn validate_create_spec_before_rootfs_prepare(
+    spec: &mut oci_spec::runtime::Spec,
+) -> Result<(), String> {
+    crate::container::resolve_guest_privileged_bind_sources(spec)
+}
+
 fn normalize_guest_stats(stats: &protoc::agent::StatsContainerResponse) -> Result<Metrics, String> {
     let version = stats.get_resource_metrics_version();
     if version != RESOURCE_METRICS_VERSION_V1 {
@@ -372,6 +378,16 @@ impl Task for TaskService {
             self.log.clone(),
         );
 
+        let bundle = req.bundle.as_str();
+        let mut spec = Utils::load_spec(bundle).map_err(|e| {
+            errf!(self.log, "Load spec failed:{}", e.clone());
+            Others(format!("Load spec failed:{}", e))
+        })?;
+        validate_create_spec_before_rootfs_prepare(&mut spec).map_err(|e| {
+            errf!(self.log, "Validate OCI bind sources failed:{}", e);
+            Others(format!("Validate OCI bind sources failed:{}", e))
+        })?;
+
         let task_reservation = self
             .sandbox_lifecycle
             .reserve_task_create(&req.id)
@@ -380,12 +396,6 @@ impl Task for TaskService {
         let task_mode = task_reservation.mode();
 
         let result = async {
-            let bundle = req.bundle.as_str();
-
-            let mut spec = Utils::load_spec(bundle).map_err(|e| {
-                errf!(self.log, "Load spec failed:{}", e.clone());
-                Others(format!("Load spec failed:{}", e))
-            })?;
             let mut prepared_rootfs = match task_mode {
                 TaskMode::Legacy => standard_rootfs::prepare_legacy(
                     &self.sandbox_id,
@@ -1132,6 +1142,35 @@ fn is_internal_probe_exec_id(exec_id: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn privileged_spec_with_mount(source: &std::path::Path) -> oci_spec::runtime::Spec {
+        serde_json::from_value(serde_json::json!({
+            "ociVersion": "1.0.2",
+            "process": {
+                "user": {"uid": 0, "gid": 0},
+                "args": ["true"],
+                "cwd": "/",
+                "capabilities": {
+                    "bounding": ["CAP_SYS_ADMIN", "CAP_SYS_MODULE", "CAP_SYS_RAWIO"],
+                    "effective": ["CAP_SYS_ADMIN", "CAP_SYS_MODULE", "CAP_SYS_RAWIO"],
+                    "permitted": ["CAP_SYS_ADMIN", "CAP_SYS_MODULE", "CAP_SYS_RAWIO"]
+                }
+            },
+            "mounts": [{
+                "destination": "/host-dev",
+                "type": "bind",
+                "source": source,
+                "options": ["rbind", "rw"]
+            }],
+            "linux": {
+                "devices": [],
+                "resources": {"devices": [{"allow": true, "access": "rwm"}]},
+                "maskedPaths": [],
+                "readonlyPaths": []
+            }
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn internal_probe_exec_requires_exec_id_prefix() {
         assert!(is_internal_probe_exec_id(
@@ -1141,6 +1180,76 @@ mod tests {
         assert!(!is_internal_probe_exec_id(
             "user-cubesandbox-internal-probe-4e7d6a"
         ));
+    }
+
+    #[test]
+    fn create_rejects_direct_host_dev_before_rootfs_prepare() {
+        let mut spec = privileged_spec_with_mount(std::path::Path::new("/dev"));
+        let error = validate_create_spec_before_rootfs_prepare(&mut spec).unwrap_err();
+        assert!(error.contains("Host /dev mount source"));
+    }
+
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn create_rejects_host_dev_symlink_before_rootfs_prepare() {
+        use std::os::unix::fs::symlink;
+
+        let test_root = std::env::temp_dir().join(format!(
+            "cubesandbox-privileged-dev-alias-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&test_root).unwrap();
+        let alias = test_root.join("host-dev");
+        symlink("/dev", &alias).unwrap();
+
+        let mut spec = privileged_spec_with_mount(&alias);
+        let error = validate_create_spec_before_rootfs_prepare(&mut spec).unwrap_err();
+        assert!(error.contains("Host /dev mount source"));
+
+        std::fs::remove_dir_all(test_root).unwrap();
+    }
+
+    #[test]
+    fn create_fails_closed_when_privileged_bind_source_cannot_be_resolved() {
+        let source = std::env::temp_dir().join(format!(
+            "cubesandbox-missing-privileged-bind-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut spec = privileged_spec_with_mount(&source);
+        let error = validate_create_spec_before_rootfs_prepare(&mut spec).unwrap_err();
+        assert!(error.contains("resolve privileged host bind mount source"));
+        assert!(error.contains("failed"));
+    }
+
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn create_freezes_resolved_bind_source_before_symlink_switch() {
+        use std::os::unix::fs::symlink;
+
+        let test_root = std::env::temp_dir().join(format!(
+            "cubesandbox-privileged-bind-freeze-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let safe = test_root.join("safe");
+        std::fs::create_dir_all(&safe).unwrap();
+        let alias = test_root.join("source");
+        symlink(&safe, &alias).unwrap();
+
+        let mut spec = privileged_spec_with_mount(&alias);
+        validate_create_spec_before_rootfs_prepare(&mut spec).unwrap();
+        let frozen = spec.mounts().as_ref().unwrap()[0]
+            .source()
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert_eq!(frozen, std::fs::canonicalize(&safe).unwrap());
+        assert_ne!(frozen, alias);
+
+        std::fs::remove_file(&alias).unwrap();
+        symlink("/dev", &alias).unwrap();
+        assert_eq!(spec.mounts().as_ref().unwrap()[0].source(), &Some(frozen));
+
+        std::fs::remove_dir_all(test_root).unwrap();
     }
 }
 
