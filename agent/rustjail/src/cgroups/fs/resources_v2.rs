@@ -296,6 +296,24 @@ pub fn cpu_shares_to_weight(shares: u64) -> u64 {
     10_f64.powf(exponent).ceil() as u64
 }
 
+/// Validate resource values whose create-time semantics cannot be delegated to
+/// cgroup migration alone. Linux intentionally allows administrative process
+/// migration to make `pids.current` exceed `pids.max`, so writing
+/// `pids.max=0` and then moving an already-forked init process into the cgroup
+/// would otherwise start a container that requested a zero-process limit.
+pub fn validate_init_process_create(resources: &LinuxResources) -> Result<()> {
+    if resources
+        .pids
+        .as_ref()
+        .is_some_and(|pids| pids.limit == 0)
+    {
+        bail!(
+            "resources-v2 create rejects pids.limit=0: cgroup v2 permits administrative process migration above pids.max, so starting an init process would violate the requested zero-process limit"
+        );
+    }
+    Ok(())
+}
+
 fn parse_cpu_max(value: &str) -> Result<(String, u64)> {
     let fields = value.split_whitespace().collect::<Vec<_>>();
     if fields.len() != 2 {
@@ -1050,6 +1068,22 @@ mod tests {
         for (shares, weight) in values {
             assert_eq!(cpu_shares_to_weight(shares), weight, "shares={shares}");
         }
+    }
+
+    #[test]
+    fn init_create_rejects_zero_pids_despite_cgroup_migration_exception() {
+        let mut resources = LinuxResources::default();
+        validate_init_process_create(&resources).unwrap();
+
+        resources.pids = Some(LinuxPids { limit: -1 });
+        validate_init_process_create(&resources).unwrap();
+        resources.pids = Some(LinuxPids { limit: 1 });
+        validate_init_process_create(&resources).unwrap();
+
+        resources.pids = Some(LinuxPids { limit: 0 });
+        let error = validate_init_process_create(&resources).unwrap_err();
+        assert!(error.to_string().contains("pids.limit=0"));
+        assert!(error.to_string().contains("administrative process migration"));
     }
 
     #[test]

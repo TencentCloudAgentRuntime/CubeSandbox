@@ -587,6 +587,14 @@ impl AgentService {
             if ctr.config.resources_v2.is_some() {
                 ctr.apply_resources_v2_create()
                     .map_err(|error| anyhow!(error))?;
+                let resources = ctr
+                    .config
+                    .spec
+                    .as_ref()
+                    .and_then(|spec| spec.linux.as_ref())
+                    .and_then(|linux| linux.resources.as_ref())
+                    .ok_or_else(|| anyhow!("resources-v2 create has no Linux resources"))?;
+                rustjail::cgroups::fs::resources_v2::validate_init_process_create(resources)?;
             }
 
             let pipe_size = AGENT_CONFIG.read().await.container_pipe_size;
