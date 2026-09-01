@@ -2266,6 +2266,7 @@ pub fn setup_bundle(
     spec: &mut Spec,
     cust_files: Vec<agent::CustomFile>,
 ) -> Result<PathBuf> {
+    let read_only = requested_rootfs_read_only(spec);
     let lowerdir;
     if let Some(ri_str) = spec.annotations.get(rootfs::ANNOTATION_K_ROOTFS_INFO) {
         info!(sl!(), "annotation rootfs");
@@ -2321,9 +2322,7 @@ pub fn setup_bundle(
     ));
 
     fs::create_dir_all(&rootfs_path)?;
-    let mut read_only = true;
     if let Some(wl_path) = spec.annotations.get(ANNOTATION_K_ROOTFS_WL_PATH) {
-        read_only = false;
         let blk_path = Path::new(wl_path);
         work_dir = blk_path.join("work");
         if let Ok(_) = fs::metadata(work_dir.clone()) {
@@ -2390,6 +2389,13 @@ pub fn setup_bundle(
     )?;
 
     Ok(olddir)
+}
+
+fn requested_rootfs_read_only(spec: &Spec) -> bool {
+    if spec.annotations.contains_key(ANNOTATION_K_ROOTFS_WL_PATH) {
+        return false;
+    }
+    spec.root.as_ref().map(|root| root.readonly).unwrap_or(true)
 }
 
 pub fn mount_custom_file(
@@ -2463,6 +2469,30 @@ mod tests {
             assert!(names.insert(capability.name().to_string()));
         }
         assert_eq!(names.len(), AGENT_CAPABILITIES.len());
+    }
+
+    #[test]
+    fn requested_rootfs_read_only_preserves_oci_intent() {
+        let mut spec = Spec::default();
+        spec.root = Some(Root {
+            path: "rootfs".to_string(),
+            readonly: false,
+        });
+        assert!(!requested_rootfs_read_only(&spec));
+
+        spec.root.as_mut().unwrap().readonly = true;
+        assert!(requested_rootfs_read_only(&spec));
+
+        spec.annotations.insert(
+            ANNOTATION_K_ROOTFS_WL_PATH.to_string(),
+            "/write-layer".to_string(),
+        );
+        assert!(!requested_rootfs_read_only(&spec));
+    }
+
+    #[test]
+    fn requested_rootfs_read_only_defaults_to_fail_closed_without_root() {
+        assert!(requested_rootfs_read_only(&Spec::default()));
     }
 
     fn mk_ttrpc_context() -> TtrpcContext {

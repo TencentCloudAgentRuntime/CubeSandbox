@@ -1171,13 +1171,14 @@ mod identity_translation_tests {
     use std::os::fd::IntoRawFd;
     use tokio::sync::mpsc::channel;
 
-    fn container_with_process(process_json: serde_json::Value) -> Container {
-        let spec: Spec = serde_json::from_value(serde_json::json!({
-            "ociVersion": "1.0.2",
-            "process": process_json,
-            "linux": {}
-        }))
-        .unwrap();
+    fn sorted_capabilities(values: &[String]) -> Vec<&str> {
+        let mut sorted: Vec<_> = values.iter().map(String::as_str).collect();
+        sorted.sort_unstable();
+        sorted
+    }
+
+    fn container_with_spec(spec_json: serde_json::Value) -> Container {
+        let spec: Spec = serde_json::from_value(spec_json).unwrap();
         let (client_fd, _peer_fd) = socketpair(
             AddressFamily::Unix,
             SockType::Stream,
@@ -1200,6 +1201,14 @@ mod identity_translation_tests {
             false,
         )
         .unwrap()
+    }
+
+    fn container_with_process(process_json: serde_json::Value) -> Container {
+        container_with_spec(serde_json::json!({
+            "ociVersion": "1.0.2",
+            "process": process_json,
+            "linux": {}
+        }))
     }
 
     #[tokio::test]
@@ -1236,6 +1245,97 @@ mod identity_translation_tests {
         assert!(user.get_additionalGids().is_empty());
     }
 
+    #[tokio::test]
+    async fn create_process_preserves_capability_sets_and_readonly_rootfs() {
+        let mut container = container_with_spec(serde_json::json!({
+            "ociVersion": "1.0.2",
+            "process": {
+                "user": {"uid": 0, "gid": 0},
+                "args": ["id"],
+                "cwd": "/",
+                "capabilities": {
+                    "bounding": ["CAP_NET_RAW", "CAP_NET_BIND_SERVICE", "CAP_CHECKPOINT_RESTORE"],
+                    "effective": ["CAP_CHECKPOINT_RESTORE", "CAP_NET_RAW"],
+                    "inheritable": ["CAP_NET_BIND_SERVICE"],
+                    "permitted": ["CAP_CHECKPOINT_RESTORE", "CAP_NET_RAW", "CAP_NET_BIND_SERVICE"],
+                    "ambient": ["CAP_NET_BIND_SERVICE"]
+                }
+            },
+            "root": {"path": "rootfs", "readonly": true},
+            "linux": {}
+        }));
+
+        let spec = container.get_pb_spec().unwrap();
+        assert!(spec.has_process());
+        assert!(spec.get_process().has_capabilities());
+        assert!(spec.has_root());
+        assert_eq!(spec.get_root().get_path(), "rootfs");
+        let capabilities = spec.get_process().get_capabilities();
+        assert_eq!(
+            sorted_capabilities(capabilities.get_bounding()),
+            [
+                "CAP_CHECKPOINT_RESTORE",
+                "CAP_NET_BIND_SERVICE",
+                "CAP_NET_RAW",
+            ]
+        );
+        assert_eq!(
+            sorted_capabilities(capabilities.get_effective()),
+            ["CAP_CHECKPOINT_RESTORE", "CAP_NET_RAW"]
+        );
+        assert_eq!(
+            sorted_capabilities(capabilities.get_inheritable()),
+            ["CAP_NET_BIND_SERVICE"]
+        );
+        assert_eq!(
+            sorted_capabilities(capabilities.get_permitted()),
+            [
+                "CAP_CHECKPOINT_RESTORE",
+                "CAP_NET_BIND_SERVICE",
+                "CAP_NET_RAW",
+            ]
+        );
+        assert_eq!(
+            sorted_capabilities(capabilities.get_ambient()),
+            ["CAP_NET_BIND_SERVICE"]
+        );
+        assert!(spec.get_root().get_readonly());
+    }
+
+    #[tokio::test]
+    async fn create_process_preserves_empty_capability_sets_and_writable_rootfs() {
+        let mut container = container_with_spec(serde_json::json!({
+            "ociVersion": "1.0.2",
+            "process": {
+                "user": {"uid": 0, "gid": 0},
+                "args": ["id"],
+                "cwd": "/",
+                "capabilities": {
+                    "bounding": [],
+                    "effective": [],
+                    "inheritable": [],
+                    "permitted": [],
+                    "ambient": []
+                }
+            },
+            "root": {"path": "rootfs", "readonly": false},
+            "linux": {}
+        }));
+
+        let spec = container.get_pb_spec().unwrap();
+        assert!(spec.has_process());
+        assert!(spec.get_process().has_capabilities());
+        assert!(spec.has_root());
+        assert_eq!(spec.get_root().get_path(), "rootfs");
+        let capabilities = spec.get_process().get_capabilities();
+        assert!(capabilities.get_bounding().is_empty());
+        assert!(capabilities.get_effective().is_empty());
+        assert!(capabilities.get_inheritable().is_empty());
+        assert!(capabilities.get_permitted().is_empty());
+        assert!(capabilities.get_ambient().is_empty());
+        assert!(!spec.get_root().get_readonly());
+    }
+
     #[test]
     fn exec_process_preserves_identity_and_group_order() {
         let source: Process = serde_json::from_value(serde_json::json!({
@@ -1261,6 +1361,7 @@ mod identity_translation_tests {
         assert_eq!(process.get_args(), &["sh", "-c", "id"]);
         assert_eq!(process.get_env(), &["IDENTITY_TEST=1"]);
         assert_eq!(process.get_cwd(), "/work");
+        assert!(!process.has_capabilities());
     }
 }
 

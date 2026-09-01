@@ -18,7 +18,7 @@ use cube_hypervisor::vm_config::{
     DiskConfig, FsConfig, MacAddr, NetConfig, PmemConfig, VsockConfig,
 };
 use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
-use oci_spec::runtime::{LinuxResources, Process, Spec};
+use oci_spec::runtime::{Capability, LinuxResources, Process, Spec};
 use serde::Deserialize;
 use serde_json;
 use tokio::{
@@ -176,8 +176,49 @@ impl Utils {
     pub fn load_spec(bundle: &str) -> CResult<Spec> {
         let mut conf_path = PathBuf::from(bundle);
         conf_path.push("config.json");
-        let spec = Spec::load(conf_path)
-            .map_err(|e| format!("load config failed:{} bundle:{}", e, bundle))?;
+        let raw = fs::read(&conf_path).map_err(|error| {
+            format!(
+                "host Shim spec-validation failed: OCI spec I/O error: {} bundle:{}",
+                error, bundle
+            )
+        })?;
+        let value: serde_json::Value = serde_json::from_slice(&raw).map_err(|error| {
+            format!(
+                "host Shim spec-validation failed: invalid OCI spec JSON: {} bundle:{}",
+                error, bundle
+            )
+        })?;
+        if let Some(capabilities) = value.pointer("/process/capabilities") {
+            for field in [
+                "bounding",
+                "effective",
+                "inheritable",
+                "permitted",
+                "ambient",
+            ] {
+                let Some(entries) = capabilities.get(field).and_then(|entry| entry.as_array())
+                else {
+                    continue;
+                };
+                for entry in entries {
+                    let Some(name) = entry.as_str() else {
+                        continue;
+                    };
+                    if serde_json::from_value::<Capability>(entry.clone()).is_err() {
+                        return Err(format!(
+                            "host Shim spec-validation failed: invalid OCI Linux capability: {} in process.capabilities.{} bundle:{}",
+                            name, field, bundle
+                        ));
+                    }
+                }
+            }
+        }
+        let spec = serde_json::from_slice(&raw).map_err(|error| {
+            format!(
+                "host Shim spec-validation failed: invalid OCI spec JSON: {} bundle:{}",
+                error, bundle
+            )
+        })?;
         Ok(spec)
     }
 
@@ -720,6 +761,138 @@ impl CPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_spec_error_identifies_invalid_linux_capability() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let bundle = std::env::temp_dir().join(format!(
+            "cube-shim-invalid-capability-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&bundle).unwrap();
+        fs::write(
+            bundle.join("config.json"),
+            r#"{
+                "ociVersion":"1.0.2",
+                "process":{
+                    "terminal":false,
+                    "user":{"uid":0,"gid":0},
+                    "args":["true"],
+                    "cwd":"/",
+                    "capabilities":{
+                        "bounding":["CAP_NOT_A_CAPABILITY"],
+                        "effective":[],
+                        "inheritable":[],
+                        "permitted":[],
+                        "ambient":[]
+                    }
+                },
+                "root":{"path":"rootfs","readonly":false},
+                "linux":{}
+            }"#,
+        )
+        .unwrap();
+
+        let error = Utils::load_spec(bundle.to_str().unwrap())
+            .expect_err("unknown Linux capability must be rejected by OCI spec parsing");
+        fs::remove_dir_all(&bundle).unwrap();
+
+        assert!(error.contains("host Shim spec-validation failed"));
+        assert!(error.contains("invalid OCI Linux capability"));
+        assert!(error.contains("CAP_NOT_A_CAPABILITY"));
+        assert!(error.contains("process.capabilities.bounding"));
+    }
+
+    #[test]
+    fn load_spec_accepts_valid_prefixed_linux_capabilities() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let bundle = std::env::temp_dir().join(format!(
+            "cube-shim-valid-capabilities-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&bundle).unwrap();
+        fs::write(
+            bundle.join("config.json"),
+            r#"{
+                "ociVersion":"1.0.2",
+                "process":{
+                    "terminal":false,
+                    "user":{"uid":0,"gid":0},
+                    "args":["true"],
+                    "cwd":"/",
+                    "capabilities":{
+                        "bounding":["CAP_NET_RAW","CAP_CHECKPOINT_RESTORE"],
+                        "effective":["CAP_NET_RAW"],
+                        "inheritable":[],
+                        "permitted":["CAP_NET_RAW","CAP_CHECKPOINT_RESTORE"],
+                        "ambient":[]
+                    }
+                },
+                "root":{"path":"rootfs","readonly":false},
+                "linux":{}
+            }"#,
+        )
+        .unwrap();
+
+        let result = Utils::load_spec(bundle.to_str().unwrap());
+        fs::remove_dir_all(&bundle).unwrap();
+
+        result.expect("valid CAP_ names accepted by OCI serde must load");
+    }
+
+    #[test]
+    fn load_spec_still_rejects_duplicate_structural_fields() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let bundle = std::env::temp_dir().join(format!(
+            "cube-shim-duplicate-fields-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&bundle).unwrap();
+        fs::write(
+            bundle.join("config.json"),
+            r#"{
+                "ociVersion":"1.0.2",
+                "process":{
+                    "terminal":false,
+                    "user":{"uid":0,"gid":0},
+                    "args":["true"],
+                    "cwd":"/"
+                },
+                "process":{
+                    "terminal":false,
+                    "user":{"uid":0,"gid":0},
+                    "args":["false"],
+                    "cwd":"/"
+                },
+                "root":{"path":"rootfs","readonly":false},
+                "linux":{}
+            }"#,
+        )
+        .unwrap();
+
+        let error = Utils::load_spec(bundle.to_str().unwrap())
+            .expect_err("duplicate OCI structural fields must remain invalid");
+        fs::remove_dir_all(&bundle).unwrap();
+
+        assert!(error.contains("host Shim spec-validation failed"));
+        assert!(error.contains("invalid OCI spec JSON"));
+        assert!(error.contains("duplicate field"));
+    }
 
     #[test]
     fn passfd_send_requires_one_complete_sendmsg() {
