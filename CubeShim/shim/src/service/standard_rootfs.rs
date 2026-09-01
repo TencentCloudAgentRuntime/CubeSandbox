@@ -48,7 +48,18 @@ impl PreparedRootfs {
     }
 
     pub fn cleanup(mut self) -> Result<(), String> {
-        self.unmount_all(false)?;
+        if let Err(normal_error) = self.unmount_all(false) {
+            // A Guest unmount can complete just before its virtiofs/FUSE
+            // references are released on the Host.  The export is no longer
+            // usable by the failed container, so detach the remaining mounts
+            // from this namespace instead of leaking the containerd snapshot.
+            // Only remove directories after every remaining mount detached.
+            self.unmount_all(true).map_err(|detach_error| {
+                format!(
+                    "normal unmount failed: {normal_error}; lazy-detach fallback failed: {detach_error}"
+                )
+            })?;
+        }
         self.remove_dirs();
         Ok(())
     }
@@ -906,6 +917,41 @@ mod tests {
             remove_share_root: false,
         });
 
+        assert_eq!(
+            fs::read(target.join("must-remain")).unwrap(),
+            b"host-volume-sentinel"
+        );
+        fs::remove_dir_all(&share_root).unwrap();
+    }
+
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn cleanup_preserves_export_when_normal_and_detach_unmount_fail() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let share_root = std::env::temp_dir().join(format!(
+            "cubesandbox-rootfs-cleanup-unmount-failure-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let target = share_root.join("rootfs/task-a-42");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("must-remain"), b"host-volume-sentinel").unwrap();
+
+        let error = PreparedRootfs {
+            target: target.clone(),
+            share_root: share_root.clone(),
+            mounts: vec![PathBuf::from(OsString::from_vec(
+                b"invalid\0mount".to_vec(),
+            ))],
+            cleanup_dirs: vec![target.clone()],
+            remove_share_root: false,
+        }
+        .cleanup()
+        .unwrap_err();
+
+        assert!(error.contains("normal unmount failed"));
+        assert!(error.contains("lazy-detach fallback failed"));
         assert_eq!(
             fs::read(target.join("must-remain")).unwrap(),
             b"host-volume-sentinel"
