@@ -2,27 +2,27 @@
 
 ## 当前 Stage
 
-S3.4a `IN_PROGRESS`：S3.3 SecurityContext 已完成；当前冻结 Kubernetes/CRI/OCI 到 Host Pod VM 与 Guest per-container cgroup 的资源输入、现状和 create/update 缺口。
+S3.4b `IN_PROGRESS`：S3.4a 资源输入与现状诊断已完成；当前实现标准 OCI/Task Update 在 Guest per-container cgroup 的 create/update、拒绝与回滚语义。
 
 ## 基线
 
-最后一项已验证实现 commit 为 `7bf7f09d69d7bde8b0553c2231ff16d6111880b7`，tree 为 `1d028a40df6265a11f6c270c9fa38f5681d9e748`；S3.3f 脚本与证据提交为 `92a4fa56d431b9f0cb029bb3c960b2464972f777`，tree 为 `66267a147e3a62bddc95539a5295dada0782b44a`。正式 E2E/审计脚本 SHA-256 为 `86cc6a11…`/`972e9962…`；live Shim 为 `3c715652…`，Agent ext4 为 `87bac7a6…`，回滚副本在 `/opt/cubesandbox-s33f-predeploy-backup-exec-v1`，effective privileged 开关为 `false`。
+最后一项已验证实现 commit 为 `2c4ebff5f17793fa229e473835ad860725118f51`，tree 为 `e458ef5920fa9e6288b1f84b79242c99f06c3ed5`。S3.4a v13 source SHA-256 为 `4934867f…`，containerd trace/helper 为 `88476ece…`/`61749200…`；live 原始 containerd 为 `15e00263…`，CubeShim 为 `3c715652…`，Agent ext4 为 `87bac7a6…`。私有 COS 输入对象为 `kubernetes-runtime/s3.4a/source/cubesandbox-s34a-source-v13-4934867f.tar.gz`。
 
 ## 已完成
 
-S0、S1、S2.1～S2.4、S3.1～S3.3 全部 `DONE`。S3.3f 补齐非 TTY exec 的 capability/rlimit/NNP 传输与不可表达字段 fail-closed；组合回归覆盖 16 个成功容器、3 类 StartError、2 类 no-record、8 个 Cube sandbox/tombstone 和 21 项支持矩阵。同一 reviewer 最终给出 `APPROVE S3.3f DONE`。
+S0、S1、S2.1～S2.4、S3.1～S3.3 和 S3.4a 全部 `DONE`。S3.4a 冻结 Kubernetes 1.36/containerd 2.3 的高低层资源边界：runc 对照生效；Cube 收到 raw create/update 输入但 Guest controller 保持默认，Shim/后代全部继承 `containerd.service`，尚无 Host Pod VM envelope；terminated classic init resize 仅更新 kubelet accounting；ephemeral-storage 保持 kubelet/snapshotter 责任。同一 reviewer 最终给出 `APPROVE S3.4a DONE`。
 
 ## 未完成
 
-S3.4a～S3.4d 尚未完成。当前需诊断 CPU、memory、swap、PIDs、hugepages、ephemeral-storage 在 kubelet/containerd、Host VM cgroup 与 Guest per-container cgroup 的实际输入和职责；随后实现 Guest 限制、Host Pod VM 包络及压力回归。S3.3 的 TTY/stdin、Host device/GPU 和二期安全字段边界保持不变。
+S3.4b～S3.4d 尚未完成。S3.4b 需补齐 Guest CPU、memory limit/reservation、swap、cpuset、PIDs、hugepage 和允许的 unified create/update，修复 `hugetlb..max` 与 swap-only 语义，并让无法执行的字段 fail-closed；之后 S3.4c 实现 Host Pod VM 包络，S3.4d 完成压力与故障回归。S3.3 的 TTY/stdin、Host device/GPU 和二期安全字段边界保持不变。
 
 ## 验证
 
-S3.3f 构建 `inv-984fnr0n8h`、构建审计 `inv-b84fx5ght7`、部署 `inv-384g480rcx`、部署审计 `inv-884ga1gc5e`、正式 E2E `inv-v84gjpgj7k` 和独立审计 `inv-884huw00ab` 均为 `SUCCESS`。核心证据目录为 `/data/cubelet/s3.3-evidence/s33f-20260901T075735Z-1024831`；lease `524→532`，14 类集合在 `after-off`、`after-on` 和最终 `cleanup` 均恢复精确基线。终审结束时三项服务 active、节点 Ready/无 DiskPressure，Cube Pod、Shim、VM、active lease 和 runtime resource 均为 0。完整摘要见 `evidence/s3.3/README.md`。
+S3.4a 构建 `inv-984tmbgax4`、稳定预检 `inv-v84tnd0995`、正式 V14 `inv-884tns09r5` 和独立审计 `inv-384tqf09ng` 均为 `SUCCESS`。核心证据目录为 `/data/cubelet/s3.4-evidence/s34a-20260901T141620Z-2459937`；覆盖 6 个高层 Pod、17 个成功低层 Task、1 个预期 create reject、2 个 invalid-unified 和 20 份 trace protobuf。raw create/update 均验证，正式脚本与审计均确认 `cleanup=exact`；三项服务 active、Node healthy，原始 containerd 恢复且测试对象无残留。完整摘要见 `evidence/s3.4/README.md`。
 
 ## 阻塞
 
-无外部阻塞。`K8S-OQ-014`～`K8S-OQ-016` 处于 `VALIDATING`：Host/Guest 资源分层、in-place update 和非 CPU/内存资源职责必须由 S3.4a 原始证据决定，不能先写死实现。只操作本 PoC 创建的 CVM/自建 Kubernetes 和指定私有 COS，不触碰账号内其他资源。
+无外部阻塞。`K8S-OQ-014`～`K8S-OQ-016` 继续 `VALIDATING`：S3.4a 已冻结现状，S3.4b/c/d 仍需分别闭环 Guest、Host 包络和压力/故障语义。只操作本 PoC 创建的 CVM/自建 Kubernetes 和指定私有 COS，不触碰账号内其他资源。
 
 ## 受保护路径
 
@@ -30,4 +30,4 @@ S3.3f 构建 `inv-984fnr0n8h`、构建审计 `inv-b84fx5ght7`、部署 `inv-384g
 
 ## 下一步
 
-执行 S3.4a：先只读审计 CubeShim/Agent 现有 Linux resources 与 Task Update 转换，再由同一 reviewer 审核云端探针。探针需用 runc/Cube 对照覆盖 QoS、request/limit、init/restartable sidecar/app，保存 raw Pod/CRI/ctr OCI、Host cgroup、Guest cgroup 和清理基线；结论更新 `K8S-OQ-014`～`K8S-OQ-016` 后才能进入 S3.4b。
+执行 S3.4b：先冻结 Host Shim→Agent 的无损资源协议和 Guest cgroup v2 写入顺序；补齐 create/update 的 CPU、memory、swap、cpuset、PIDs、hugepage 与允许的 unified 字段，对不支持/非法输入 fail-closed。单元与故障测试通过并由同一 reviewer 批准后，再在项目 CVM 上重放 S3.4a 低层矩阵并增加 CPU throttle、定向 memory OOM、PIDs/hugepage 正反例和 sibling survivor 验证；完成前不得进入 S3.4c。
