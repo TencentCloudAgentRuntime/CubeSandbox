@@ -64,18 +64,90 @@ audit_container_metadata_capture() {
   test "$(cat "$directory/$expected_prefix.type-url.txt")" = 'github.com/containerd/cri/pkg/store/container/Metadata'
 }
 
+runtime_name_for_case() {
+  case "$1" in
+    runc) printf '%s\n' io.containerd.runc.v2 ;;
+    cube) printf '%s\n' io.containerd.cube.rs ;;
+    *) return 1 ;;
+  esac
+}
+
+assert_pod_runtime_class() {
+  local runtime=$1 pod_capture=$2
+  case "$runtime" in
+    runc) jq -e '(.spec | has("runtimeClassName")) | not' "$pod_capture" >/dev/null ;;
+    cube) jq -e '.spec.runtimeClassName == "cube"' "$pod_capture" >/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
+assert_sandbox_runtime_identity() {
+  local runtime=$1 capture=$2 expected
+  expected=$(runtime_name_for_case "$runtime") || return 1
+  jq -e --arg expected "$expected" '.Runtime.Name == $expected' "$capture/raw-containerd/sandbox-info.json" >/dev/null
+}
+
+assert_container_runtime_identity() {
+  local runtime=$1 capture=$2 expected
+  expected=$(runtime_name_for_case "$runtime") || return 1
+  jq -e --arg expected "$expected" '.Runtime.Name == $expected' "$capture/raw-containerd/container-info.json" >/dev/null
+}
+
+assert_lowlevel_runtime_identity() {
+  local runtime=$1 directory=$2 expected
+  expected=$(runtime_name_for_case "$runtime") || return 1
+  jq -e --arg expected "$expected" '.Runtime.Name == $expected' "$directory/container-info.json" >/dev/null
+}
+
 assert_cgroup_capture() {
-  local capture=$1 name
+  local capture=$1 name layout process_dir resource_dir process_relative resource_relative process_membership resource_membership value
   grep -Fxq 'cgroup_path_resolution=mount-root-relative' "$capture" || return 1
   grep -Fxq 'cgroup_mount_count=1' "$capture" || return 1
   grep -Eq '^cgroup_mount_root=/' "$capture" || return 1
   grep -Eq '^cgroup_mount_point=/' "$capture" || return 1
   grep -Eq '^cgroup_mount_relative=/' "$capture" || return 1
+  layout=$(capture_required_value "$capture" cgroup_layout) || return 1
+  process_dir=$(capture_required_value "$capture" cgroup_process_dir) || return 1
+  resource_dir=$(capture_required_value "$capture" cgroup_resource_dir) || return 1
+  process_relative=$(capture_required_value "$capture" cgroup_process_relative) || return 1
+  resource_relative=$(capture_required_value "$capture" cgroup_resource_relative) || return 1
+  process_membership=$(capture_required_value "$capture" cgroup_process_pid_membership) || return 1
+  resource_membership=$(capture_required_value "$capture" cgroup_resource_pid_membership) || return 1
+  test "$process_membership" = self || return 1
+  case "$layout" in
+    process-leaf)
+      test "$process_dir" = "$resource_dir" || return 1
+      test "$process_relative" = "$resource_relative" || return 1
+      test "$resource_membership" = self || return 1
+      ;;
+    agent-parent-with-runtime-leaf)
+      test "$process_dir" = "$resource_dir/runtime" || return 1
+      if test "$resource_relative" = /; then
+        test "$process_relative" = /runtime || return 1
+      else
+        test "$process_relative" = "$resource_relative/runtime" || return 1
+      fi
+      test "$resource_membership" = delegated-child || return 1
+      ;;
+    *) return 1 ;;
+  esac
   for name in cgroup.controllers cgroup.subtree_control cpu.max cpu.weight cpuset.cpus cpuset.cpus.effective cpuset.mems cpuset.mems.effective memory.max memory.low memory.swap.max memory.oom.group pids.max; do
-    grep -q "^$name=" "$capture" || return 1
+    value=$(capture_required_value "$capture" "$name") || return 1
+    test "$value" != ABSENT || return 1
+    value=$(capture_required_value "$capture" "process.$name") || return 1
+    test "$value" != ABSENT || return 1
   done
-  if grep -q '=ABSENT$' "$capture"; then return 1; fi
   return 0
+}
+
+assert_runtime_cgroup_capture() {
+  local runtime=$1 capture=$2
+  assert_cgroup_capture "$capture" || return 1
+  case "$runtime" in
+    runc) grep -Fxq 'cgroup_layout=process-leaf' "$capture" || return 1 ;;
+    cube) grep -Fxq 'cgroup_layout=agent-parent-with-runtime-leaf' "$capture" || return 1 ;;
+    *) return 1 ;;
+  esac
 }
 
 capture_required_value() {
@@ -114,7 +186,7 @@ assert_lowlevel_cgroup_capture() {
   local runtime=$1 capture=$2 host_capture=$3 expected_pid=$4 name
   assert_host_cgroup_capture "$expected_pid" "$host_capture" || return 1
   if test "$runtime" != runc || ! grep -Fxq 'cgroup_path_resolution=cgroup2-mount-absent' "$capture"; then
-    assert_cgroup_capture "$capture"
+    assert_runtime_cgroup_capture "$runtime" "$capture"
     return
   fi
   test "$(wc -l <"$capture")" -eq 5 || return 1
@@ -123,9 +195,10 @@ assert_lowlevel_cgroup_capture() {
   grep -Eq '^self_pid=[1-9][0-9]*$' "$capture" || return 1
   grep -Fxq 'cgroup_path_resolution=cgroup2-mount-absent' "$capture" || return 1
   grep -Fxq 'cgroup_mount_count=0' "$capture" || return 1
-  for name in cgroup_dir cgroup_mount_root cgroup_mount_point cgroup_mount_relative cgroup2_mountinfo cgroup.controllers cgroup.subtree_control cpu.max cpu.weight cpuset.cpus cpuset.cpus.effective cpuset.mems cpuset.mems.effective memory.max memory.low memory.swap.max memory.oom.group pids.max; do
+  for name in cgroup_dir cgroup_mount_root cgroup_mount_point cgroup_mount_relative cgroup_layout cgroup_process_dir cgroup_process_relative cgroup_process_pid_membership cgroup_resource_dir cgroup_resource_relative cgroup_resource_pid_membership cgroup2_mountinfo cgroup.controllers cgroup.subtree_control cpu.max cpu.weight cpuset.cpus cpuset.cpus.effective cpuset.mems cpuset.mems.effective memory.max memory.low memory.swap.max memory.oom.group pids.max; do
     if grep -q "^$name=" "$capture"; then return 1; fi
   done
+  if grep -q '^process\.' "$capture"; then return 1; fi
   return 0
 }
 
@@ -195,12 +268,18 @@ for pod in "${pods[@]}"; do
   qos=$(cut -d- -f3 <<<"$pod")
   case "$qos" in besteffort) expected_qos=BestEffort;; burstable) expected_qos=Burstable;; guaranteed) expected_qos=Guaranteed;; esac
   jq -e --arg want "$expected_qos" '.status.qosClass == $want' "$evidence/kubernetes/$pod/ready-pod.json" >/dev/null
+  assert_pod_runtime_class "$runtime" "$evidence/kubernetes/$pod/classic-running-pod.json"
+  assert_pod_runtime_class "$runtime" "$evidence/kubernetes/$pod/ready-pod.json"
+  assert_sandbox_runtime_identity "$runtime" "$evidence/kubernetes/$pod/sandbox"
   jq -e '.status.initContainerStatuses[] | select(.name == "classic" and .state.terminated.exitCode == 0)' "$evidence/kubernetes/$pod/ready-pod.json" >/dev/null
   jq -e '.status.initContainerStatuses[] | select(.name == "sidecar" and .state.running != null and .restartCount == 0)' "$evidence/kubernetes/$pod/ready-pod.json" >/dev/null
   jq -e '.status.containerStatuses[] | select(.name == "app" and .state.running != null and .restartCount == 0)' "$evidence/kubernetes/$pod/ready-pod.json" >/dev/null
-  assert_cgroup_capture "$evidence/kubernetes/$pod/classic-cgroup.txt"
-  assert_cgroup_capture "$evidence/kubernetes/$pod/sidecar-cgroup-before.txt"
-  assert_cgroup_capture "$evidence/kubernetes/$pod/app-cgroup-before.txt"
+  assert_runtime_cgroup_capture "$runtime" "$evidence/kubernetes/$pod/classic-cgroup.txt"
+  assert_runtime_cgroup_capture "$runtime" "$evidence/kubernetes/$pod/sidecar-cgroup-before.txt"
+  assert_runtime_cgroup_capture "$runtime" "$evidence/kubernetes/$pod/app-cgroup-before.txt"
+  for role in classic sidecar app; do
+    assert_container_runtime_identity "$runtime" "$evidence/kubernetes/$pod/$role-create"
+  done
   test "$(find "$evidence/kubernetes/$pod/host-topology-before" -type f -name '*.txt' -size +0c -printf '.\n' | awk 'NF {n++} END {print n+0}')" -ge 1
   test -s "$evidence/kubernetes/$pod/sandbox/raw-containerd/extension-metadata.value"
   test "$(cat "$evidence/kubernetes/$pod/sandbox/raw-containerd/extension-metadata.type-url.txt")" = 'github.com/containerd/cri/pkg/store/sandbox/Metadata'
@@ -281,6 +360,7 @@ for pod in s34a-runc-besteffort s34a-cube-besteffort; do
 done
 
 for pod in s34a-runc-guaranteed s34a-cube-guaranteed; do
+  runtime=$(cut -d- -f2 <<<"$pod")
   grep -Fxq 'exit=0 spec_cpu=250m status_allocated_cpu=250m status_resources_cpu=250m classic_cri_trace=0->0 classic_task_trace=0->0 classification=api-spec-and-kubelet-accounting-only-terminated-task' "$evidence/kubernetes/$pod/classic-resize.result.txt"
   grep -Fxq "pod/$pod patched" "$evidence/kubernetes/$pod/classic-resize.response.txt"
   classic_id=$(cat "$evidence/kubernetes/$pod/classic-create/container-id.txt")
@@ -322,6 +402,8 @@ for pod in s34a-runc-guaranteed s34a-cube-guaranteed; do
   test -s "$evidence/kubernetes/$pod/classic-resize.end"
   audit_container_metadata_capture "$evidence/kubernetes/$pod/classic-post-accounting"
   audit_container_metadata_capture "$evidence/kubernetes/$pod/classic-post-pod-resize"
+  assert_container_runtime_identity "$runtime" "$evidence/kubernetes/$pod/classic-post-accounting"
+  assert_container_runtime_identity "$runtime" "$evidence/kubernetes/$pod/classic-post-pod-resize"
   grep -Fxq "$classic_id" "$evidence/kubernetes/$pod/classic-post-accounting/container-id.txt"
   grep -Fxq "$classic_id" "$evidence/kubernetes/$pod/classic-post-pod-resize/container-id.txt"
   test "$(cat "$evidence/kubernetes/$pod/classic-post-accounting/raw-containerd/container-spec.type-url.txt")" = 'types.containerd.io/opencontainers/runtime-spec/1/Spec'
@@ -367,11 +449,12 @@ for pod in s34a-runc-guaranteed s34a-cube-guaranteed; do
       .resources.requests["ephemeral-storage"] == "2Mi" and .resources.limits["ephemeral-storage"] == "8Mi") and
     ([.status.conditions[]? | select(.type == "PodResizeInProgress" or .type == "PodResizePending")] | length == 0)
   ' "$evidence/kubernetes/$pod/classic-tail.status.json" >/dev/null
-  assert_cgroup_capture "$evidence/kubernetes/$pod/app-cgroup-after.txt"
-  assert_cgroup_capture "$evidence/kubernetes/$pod/sidecar-cgroup-after.txt"
+  assert_runtime_cgroup_capture "$runtime" "$evidence/kubernetes/$pod/app-cgroup-after.txt"
+  assert_runtime_cgroup_capture "$runtime" "$evidence/kubernetes/$pod/sidecar-cgroup-after.txt"
   test "$(find "$evidence/kubernetes/$pod/host-topology-after" -type f -name '*.txt' -size +0c -printf '.\n' | awk 'NF {n++} END {print n+0}')" -ge 1
   phase=$(cut -d- -f2 <<<"$pod")
   for role in app sidecar; do
+    assert_container_runtime_identity "$runtime" "$evidence/kubernetes/$pod/$role-update"
     id=$(cat "$evidence/kubernetes/$pod/$role-create/container-id.txt")
     if test "$role" = app; then
       shares=307; quota=30000; period=100000; memory=167772160
@@ -456,6 +539,7 @@ for runtime in runc cube; do
         ;;
     esac
     if test "$runtime" = cube && test "$case_name" = hugepage-create; then
+      assert_lowlevel_runtime_identity "$runtime" "$directory/create"
       test "$(cat "$directory/create.exit")" -ne 0
       test -s "$directory/create/container-spec.any.pb"
       grep -Eq '^error=.+' "$directory/create/create.result.txt"
@@ -467,6 +551,8 @@ for runtime in runc cube; do
       continue
     fi
     test "$(cat "$directory/create.exit")" -eq 0
+    assert_lowlevel_runtime_identity "$runtime" "$directory/create"
+    assert_lowlevel_runtime_identity "$runtime" "$directory/container-after"
     test -s "$directory/create/container-spec.any.pb"
     test -s "$directory/create/bundle-config-00.json"
     test -s "$directory/create/create.result.txt"
@@ -527,6 +613,8 @@ for runtime in runc cube; do
     esac
   done
   directory=$evidence/lowlevel/$runtime/invalid-unified
+  assert_lowlevel_runtime_identity "$runtime" "$directory/create"
+  assert_lowlevel_runtime_identity "$runtime" "$directory/container-after"
   test "$(cat "$directory/create.exit")" -eq 0
   grep -Fxq success "$directory/create/create.result.txt"
   test -s "$directory/create/container-spec.any.pb"

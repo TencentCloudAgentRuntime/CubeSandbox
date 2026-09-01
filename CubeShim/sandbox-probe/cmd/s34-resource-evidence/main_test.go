@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	tasksapi "github.com/containerd/containerd/api/services/tasks/v1"
+	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/typeurl/v2"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"google.golang.org/protobuf/proto"
@@ -30,6 +31,39 @@ func TestReadResourcesRejectsUnknownField(t *testing.T) {
 	}
 }
 
+func TestDumpLoadedContainerInfoIncludesRuntimeIdentity(t *testing.T) {
+	specAny, err := typeurl.MarshalAny(&specs.Spec{Version: specs.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	info := containers.Container{
+		ID:      "s34-low-cube-test",
+		Runtime: containers.RuntimeInfo{Name: cubeRuntimeName},
+		Spec:    specAny,
+	}
+	if err := dumpLoadedContainerInfo(directory, info); err != nil {
+		t.Fatal(err)
+	}
+	var captured struct {
+		ID      string
+		Runtime struct{ Name string }
+	}
+	content, err := os.ReadFile(filepath.Join(directory, "container-info.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(content, &captured); err != nil {
+		t.Fatal(err)
+	}
+	if captured.ID != info.ID || captured.Runtime.Name != cubeRuntimeName {
+		t.Fatalf("captured container identity = id:%q runtime:%q", captured.ID, captured.Runtime.Name)
+	}
+	if _, err := os.Stat(filepath.Join(directory, "container-spec.any.pb")); err != nil {
+		t.Fatalf("raw OCI spec evidence: %v", err)
+	}
+}
+
 func TestCgroupProbeProcessUsesAbsoluteShellPath(t *testing.T) {
 	process := cgroupProbeProcess(cubeRuntimeName)
 	if len(process.Args) != 3 || process.Args[0] != "/bin/sh" || process.Args[1] != "-c" || process.Args[2] != cgroupScript {
@@ -38,17 +72,25 @@ func TestCgroupProbeProcessUsesAbsoluteShellPath(t *testing.T) {
 	if process.Cwd != "/" || process.User.UID != 0 || process.User.GID != 0 {
 		t.Fatalf("cgroup probe identity/cwd = uid:%d gid:%d cwd:%q", process.User.UID, process.User.GID, process.Cwd)
 	}
-	for _, marker := range []string{"cgroup_count=0", "if test \"$cgroup_count\" != 0; then exit 1; fi", "if test \"$cgroup_count\" != 1 || test -z \"$cgroup_path\"; then exit 1; fi", "cgroup_path=${cgroup_line#0::}", "read -r self_pid _ </proc/self/stat", "S34_CGROUP2_MOUNT_OPTIONAL", "cgroup2-mount-absent", "cgroup_mount_root", "relative=${cgroup_path#\"$cgroup_mount_root\"}", "grep -Fxq \"$self_pid\"", "mount-root-relative", "hugetlb.*.max"} {
+	for _, marker := range []string{"cgroup_count=0", "if test \"$cgroup_count\" != 0; then exit 1; fi", "if test \"$cgroup_count\" != 1 || test -z \"$cgroup_path\"; then exit 1; fi", "cgroup_path=${cgroup_line#0::}", "read -r self_pid _ </proc/self/stat", "S34_CGROUP2_MOUNT_OPTIONAL", "cgroup2-mount-absent", "cgroup_mount_root", "relative=${cgroup_path#\"$cgroup_mount_root\"}", "grep -Fxq \"$self_pid\"", "cube-agent-parent", "agent-parent-with-runtime-leaf", "/runtime) resource_relative=/", "resource_relative=${relative%/runtime}", "resource_pid_match=$?", "case \"$resource_pid_match\" in 0) exit 1 ;; 1) ;; *) exit 1 ;; esac", "cgroup_process_dir", "cgroup_resource_dir", "process.%s", "mount-root-relative", "hugetlb.*.max"} {
 		if !strings.Contains(process.Args[2], marker) {
 			t.Fatalf("cgroup probe script does not contain %q", marker)
 		}
 	}
-	if strings.Contains(strings.Join(process.Env, "\n"), "S34_CGROUP2_MOUNT_OPTIONAL=") {
+	cubeEnv := strings.Join(process.Env, "\n")
+	if strings.Contains(cubeEnv, "S34_CGROUP2_MOUNT_OPTIONAL=") {
 		t.Fatalf("Cube cgroup probe unexpectedly permits a missing cgroup2 mount: %q", process.Env)
 	}
+	if !strings.Contains(cubeEnv, "S34_CGROUP_LAYOUT=cube-agent-parent") {
+		t.Fatalf("Cube cgroup probe does not select the Agent parent layout: %q", process.Env)
+	}
 	runcProcess := cgroupProbeProcess(runcRuntimeName)
-	if !strings.Contains(strings.Join(runcProcess.Env, "\n"), "S34_CGROUP2_MOUNT_OPTIONAL=runc-lowlevel") {
+	runcEnv := strings.Join(runcProcess.Env, "\n")
+	if !strings.Contains(runcEnv, "S34_CGROUP2_MOUNT_OPTIONAL=runc-lowlevel") {
 		t.Fatalf("runc low-level cgroup probe does not declare its mount exception: %q", runcProcess.Env)
+	}
+	if !strings.Contains(runcEnv, "S34_CGROUP_LAYOUT=runc-process-leaf") {
+		t.Fatalf("runc cgroup probe does not select the process leaf layout: %q", runcProcess.Env)
 	}
 }
 

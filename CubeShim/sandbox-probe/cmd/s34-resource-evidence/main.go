@@ -511,7 +511,12 @@ func cgroupProbeProcess(runtimeName string) *specs.Process {
 		User: specs.User{UID: 0, GID: 0},
 	}
 	if runtimeName == runcRuntimeName {
-		process.Env = append(process.Env, "S34_CGROUP2_MOUNT_OPTIONAL=runc-lowlevel")
+		process.Env = append(process.Env,
+			"S34_CGROUP2_MOUNT_OPTIONAL=runc-lowlevel",
+			"S34_CGROUP_LAYOUT=runc-process-leaf",
+		)
+	} else {
+		process.Env = append(process.Env, "S34_CGROUP_LAYOUT=cube-agent-parent")
 	}
 	return process
 }
@@ -576,7 +581,14 @@ func dumpLoadedContainer(ctx context.Context, container containerd.Container, ou
 	if err != nil {
 		return err
 	}
-	return dumpAny(filepath.Join(outputDir, "container-spec"), info.Spec, ociSpecTypeURL, decodeSpec)
+	return dumpLoadedContainerInfo(outputDir, info)
+}
+
+func dumpLoadedContainerInfo(outputDir string, info containers.Container) error {
+	if err := dumpAny(filepath.Join(outputDir, "container-spec"), info.Spec, ociSpecTypeURL, decodeSpec); err != nil {
+		return err
+	}
+	return writeJSON(filepath.Join(outputDir, "container-info.json"), info)
 }
 
 func captureBundleConfigs(id, outputDir string, required bool) error {
@@ -885,22 +897,62 @@ else
   case "$cgroup_path" in "$cgroup_mount_root"/*) relative=${cgroup_path#"$cgroup_mount_root"} ;; *) exit 1 ;; esac
 fi
 case "$relative" in /*) ;; *) exit 1 ;; esac
-if test "$relative" = /; then dir=$cgroup_mount_point; else dir=$cgroup_mount_point$relative; fi
-test -f "$dir/cgroup.procs"
-grep -Fxq "$self_pid" "$dir/cgroup.procs"
+if test "$relative" = /; then process_dir=$cgroup_mount_point; else process_dir=$cgroup_mount_point$relative; fi
+test -f "$process_dir/cgroup.procs"
+grep -Fxq "$self_pid" "$process_dir/cgroup.procs"
+case "${S34_CGROUP_LAYOUT:-}" in
+  runc-process-leaf)
+    layout=process-leaf
+    resource_relative=$relative
+    resource_dir=$process_dir
+    resource_pid_membership=self
+    ;;
+  cube-agent-parent)
+    layout=agent-parent-with-runtime-leaf
+    case "$relative" in
+      /runtime) resource_relative=/ ;;
+      */runtime) resource_relative=${relative%/runtime} ;;
+      *) exit 1 ;;
+    esac
+    case "$resource_relative" in /*) ;; *) exit 1 ;; esac
+    resource_dir=${process_dir%/runtime}
+    test -n "$resource_dir"
+    test "$resource_dir/runtime" = "$process_dir"
+    test -f "$resource_dir/cgroup.procs"
+    resource_pid_match=0
+    grep -Fxq "$self_pid" "$resource_dir/cgroup.procs" || resource_pid_match=$?
+    case "$resource_pid_match" in 0) exit 1 ;; 1) ;; *) exit 1 ;; esac
+    resource_pid_membership=delegated-child
+    ;;
+  *) exit 1 ;;
+esac
 resolution=mount-root-relative
-printf 'cgroup_dir=%s\n' "$dir"
+printf 'cgroup_dir=%s\n' "$resource_dir"
 printf 'cgroup_path_resolution=%s\n' "$resolution"
 printf 'cgroup_mount_count=1\n'
 printf 'cgroup_mount_root=%s\n' "$cgroup_mount_root"
 printf 'cgroup_mount_point=%s\n' "$cgroup_mount_point"
 printf 'cgroup_mount_relative=%s\n' "$relative"
+printf 'cgroup_layout=%s\n' "$layout"
+printf 'cgroup_process_dir=%s\n' "$process_dir"
+printf 'cgroup_process_relative=%s\n' "$relative"
+printf 'cgroup_process_pid_membership=self\n'
+printf 'cgroup_resource_dir=%s\n' "$resource_dir"
+printf 'cgroup_resource_relative=%s\n' "$resource_relative"
+printf 'cgroup_resource_pid_membership=%s\n' "$resource_pid_membership"
 printf 'cgroup2_mountinfo='; grep ' - cgroup2 ' /proc/self/mountinfo
 for name in cgroup.controllers cgroup.subtree_control cpu.max cpu.weight cpuset.cpus cpuset.cpus.effective cpuset.mems cpuset.mems.effective memory.max memory.low memory.swap.max memory.oom.group pids.max; do
-  if test -f "$dir/$name"; then value=$(cat "$dir/$name"); printf '%s=%s\n' "$name" "$value"; else printf '%s=ABSENT\n' "$name"; fi
+  if test -f "$resource_dir/$name"; then value=$(cat "$resource_dir/$name"); printf '%s=%s\n' "$name" "$value"; else printf '%s=ABSENT\n' "$name"; fi
 done
-for file in "$dir"/hugetlb.*.max; do
+for file in "$resource_dir"/hugetlb.*.max; do
   test -e "$file" || continue
   printf '%s=' "${file##*/}"; cat "$file"
+done
+for name in cgroup.controllers cgroup.subtree_control cpu.max cpu.weight cpuset.cpus cpuset.cpus.effective cpuset.mems cpuset.mems.effective memory.max memory.low memory.swap.max memory.oom.group pids.max; do
+  if test -f "$process_dir/$name"; then value=$(cat "$process_dir/$name"); printf 'process.%s=%s\n' "$name" "$value"; else printf 'process.%s=ABSENT\n' "$name"; fi
+done
+for file in "$process_dir"/hugetlb.*.max; do
+  test -e "$file" || continue
+  printf 'process.%s=' "${file##*/}"; cat "$file"
 done
 `
