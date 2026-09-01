@@ -183,8 +183,8 @@ fn instructions(emulator: &Emulator) -> Result<Vec<BpfInsn>> {
         BpfInsn::new(0x54, 2, 0, 0, 0xffff),
         BpfInsn::new(0x61, 3, 1, 0, 0),
         BpfInsn::new(0x74, 3, 0, 0, 16),
-        BpfInsn::new(0x61, 4, 1, 0, 4),
-        BpfInsn::new(0x61, 5, 1, 0, 8),
+        BpfInsn::new(0x61, 4, 1, 4, 0),
+        BpfInsn::new(0x61, 5, 1, 8, 0),
     ];
     for (meta, permissions) in &emulator.rules {
         let device_kind = match meta.kind {
@@ -427,7 +427,7 @@ mod tests {
             let dst = (instruction.dst_src & 0xf) as usize;
             let src = (instruction.dst_src >> 4) as usize;
             match instruction.code {
-                0x61 => registers[dst] = context[(instruction.imm / 4) as usize] as u64,
+                0x61 => registers[dst] = context[(instruction.off / 4) as usize] as u64,
                 0x54 => registers[dst] = (registers[dst] as u32 & instruction.imm as u32) as u64,
                 0x74 => registers[dst] = (registers[dst] as u32 >> instruction.imm) as u64,
                 0xbc => registers[dst] = registers[src] as u32 as u64,
@@ -531,5 +531,34 @@ mod tests {
             9,
             BPF_DEVCG_ACC_READ
         ));
+    }
+
+    #[test]
+    fn context_loads_use_kernel_bpf_insn_fields() {
+        let program = instructions(&Emulator::default()).unwrap();
+        let loads: Vec<_> = program
+            .iter()
+            .filter(|instruction| instruction.code == 0x61)
+            .copied()
+            .collect();
+        assert_eq!(loads.len(), 4);
+        assert_eq!(loads[0], BpfInsn::new(0x61, 2, 1, 0, 0));
+        assert_eq!(loads[1], BpfInsn::new(0x61, 3, 1, 0, 0));
+        assert_eq!(loads[2], BpfInsn::new(0x61, 4, 1, 4, 0));
+        assert_eq!(loads[3], BpfInsn::new(0x61, 5, 1, 8, 0));
+        assert!(loads.iter().all(|instruction| instruction.imm == 0));
+    }
+
+    #[test]
+    fn kernel_accepts_generated_program_when_cgroup_is_provided() {
+        let Some(root) = std::env::var_os("CUBE_TEST_DEVICE_BPF_CGROUP") else {
+            return;
+        };
+        let filter = attach(
+            Path::new(&root),
+            &[rule(true, "c", Some(1), Some(3), "rwm")],
+        )
+        .unwrap();
+        filter.rollback().unwrap();
     }
 }
