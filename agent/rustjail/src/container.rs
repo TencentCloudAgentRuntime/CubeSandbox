@@ -4,14 +4,12 @@
 //
 
 use std::clone::Clone;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::CString;
-use std::fmt::Display;
+use std::fmt::{self, Display};
 use std::fs;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::io::AsRawFd;
-use std::os::unix::io::FromRawFd;
-use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -75,6 +73,7 @@ const PARENT_READY_SYNC_TIMEOUT_SECS: u64 = 10;
 const HOME_ENV_KEY: &str = "HOME";
 const PIDNS_FD: &str = "PIDNS_FD";
 const CONSOLE_SOCKET_FD: &str = "CONSOLE_SOCKET_FD";
+const EARLY_PROCESS_ATTACH_PATHS: &str = "EARLY_PROCESS_ATTACH_PATHS";
 
 #[derive(Debug)]
 pub struct ContainerStatus {
@@ -198,6 +197,78 @@ lazy_static! {
     };
 }
 
+struct ProcessLaunchGuard {
+    pid: Pid,
+    armed: bool,
+}
+
+struct LaunchLogGuard {
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl LaunchLogGuard {
+    fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    fn take(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        self.handle.take()
+    }
+}
+
+impl Drop for LaunchLogGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+fn own_fd(fd: RawFd) -> OwnedFd {
+    // SAFETY: callers pass a newly opened descriptor and transfer its sole
+    // ownership to the returned guard immediately.
+    unsafe { OwnedFd::from_raw_fd(fd) }
+}
+
+fn owned_pipe() -> Result<(OwnedFd, OwnedFd)> {
+    let (read_fd, write_fd) = unistd::pipe().context("failed to create pipe")?;
+    Ok((own_fd(read_fd), own_fd(write_fd)))
+}
+
+impl ProcessLaunchGuard {
+    fn new(pid: pid_t) -> Self {
+        Self {
+            pid: Pid::from_raw(pid),
+            armed: true,
+        }
+    }
+
+    fn reap(&mut self) -> Result<()> {
+        loop {
+            match nix::sys::wait::waitpid(self.pid, None) {
+                Ok(_) | Err(Errno::ECHILD) => {
+                    self.armed = false;
+                    return Ok(());
+                }
+                Err(Errno::EINTR) => continue,
+                Err(error) => return Err(anyhow!(error)),
+            }
+        }
+    }
+}
+
+impl Drop for ProcessLaunchGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _ = signal::kill(self.pid, Some(Signal::SIGKILL));
+        let _ = self.reap();
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct BaseState {
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -236,6 +307,7 @@ pub struct LinuxContainer {
     pub config: Config,
     pub cgroup_manager: Option<FsManager>,
     pub init_process_pid: pid_t,
+    pending_process_pid: Option<pid_t>,
     pub init_process_start_time: u64,
     pub uid_map_path: String,
     pub gid_map_path: String,
@@ -243,9 +315,62 @@ pub struct LinuxContainer {
     pub status: ContainerStatus,
     pub created: SystemTime,
     pub logger: Logger,
+    pub resource_degraded: Option<ResourceDegraded>,
+    #[cfg(test)]
+    pre_spawn_hook: Option<fn(&[RawFd]) -> Result<()>>,
     #[cfg(feature = "standard-oci-runtime")]
     pub console_socket: PathBuf,
 }
+
+pub struct LinuxContainerCreateOutcome {
+    pub container: LinuxContainer,
+    pub initialization_error: Option<anyhow::Error>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceDegraded {
+    pub cause: String,
+    pub rollback_error: Option<String>,
+    pub journal_path: PathBuf,
+    pub current_values: std::collections::BTreeMap<PathBuf, String>,
+    pub latest_recovery_error: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct ResourcePreconditionError {
+    pub container_id: String,
+    pub operation: String,
+    pub degraded: ResourceDegraded,
+}
+
+impl fmt::Display for ResourcePreconditionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "container {} cannot {} while resources are degraded: {}; journal: {}",
+            self.container_id,
+            self.operation,
+            self.degraded.cause,
+            self.degraded.journal_path.display()
+        )?;
+        if let Some(error) = self.degraded.rollback_error.as_deref() {
+            write!(formatter, "; rollback error: {error}")?;
+        }
+        if !self.degraded.current_values.is_empty() {
+            write!(
+                formatter,
+                "; current values: {:?}",
+                self.degraded.current_values
+            )?;
+        }
+        if let Some(error) = self.degraded.latest_recovery_error.as_deref() {
+            write!(formatter, "; latest recovery error: {error}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ResourcePreconditionError {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct State {
@@ -327,6 +452,50 @@ pub fn init_child() {
     }
 }
 
+fn attach_fork_child_before_report<Attach, Cleanup>(
+    targets: &[PathBuf],
+    pid: pid_t,
+    mut attach: Attach,
+    cleanup: Cleanup,
+) -> Result<()>
+where
+    Attach: FnMut(&Path, pid_t) -> Result<()>,
+    Cleanup: FnOnce(pid_t) -> Result<()>,
+{
+    let attach_result = (|| {
+        if targets.is_empty() {
+            return Err(anyhow!("no cgroup targets for early process attach"));
+        }
+        for target in targets {
+            attach(target, pid)?;
+        }
+        Ok(())
+    })();
+    if let Err(attach_error) = attach_result {
+        return match cleanup(pid) {
+            Ok(()) => Err(anyhow!(attach_error).context("attach fork child to cgroup")),
+            Err(cleanup_error) => Err(anyhow!(
+                "attach fork child to cgroup: {attach_error:#}; cleanup child: {cleanup_error:#}"
+            )),
+        };
+    }
+    Ok(())
+}
+
+fn kill_and_reap_fork_child(pid: pid_t) -> Result<()> {
+    match signal::kill(Pid::from_raw(pid), Some(Signal::SIGKILL)) {
+        Ok(()) | Err(Errno::ESRCH) => {}
+        Err(error) => return Err(anyhow!(error).context("kill unattached fork child")),
+    }
+    loop {
+        match nix::sys::wait::waitpid(Pid::from_raw(pid), None) {
+            Ok(_) | Err(Errno::ECHILD) => return Ok(()),
+            Err(Errno::EINTR) => continue,
+            Err(error) => return Err(anyhow!(error).context("reap unattached fork child")),
+        }
+    }
+}
+
 fn do_init_child(cwfd: RawFd) -> Result<()> {
     lazy_static::initialize(&NAMESPACES);
     lazy_static::initialize(&DEFAULT_DEVICES);
@@ -336,6 +505,9 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
     let no_pivot = std::env::var(NO_PIVOT)?.eq(format!("{}", true).as_str());
     let crfd = std::env::var(CRFD_FD)?.parse::<i32>().unwrap();
     let cfd_log = std::env::var(CLOG_FD)?.parse::<i32>().unwrap();
+    let early_process_attach_paths: Vec<PathBuf> =
+        serde_json::from_str(&std::env::var(EARLY_PROCESS_ATTACH_PATHS)?)
+            .context("decode early process cgroup attach paths")?;
     let mut start = Instant::now();
     // get the pidns fd from parent, if parent had passed the pidns fd,
     // then get it and join in this pidns; otherwise, create a new pidns
@@ -351,7 +523,17 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
 
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child, .. }) => {
-            let _ = write_sync(cwfd, SYNC_DATA, format!("{}", pid_t::from(child)).as_str());
+            attach_fork_child_before_report(
+                &early_process_attach_paths,
+                pid_t::from(child),
+                |target, pid| {
+                    fs::write(target, pid.to_string()).with_context(|| {
+                        format!("attach fork child {pid} to cgroup {}", target.display())
+                    })
+                },
+                kill_and_reap_fork_child,
+            )?;
+            write_sync(cwfd, SYNC_DATA, format!("{}", pid_t::from(child)).as_str())?;
             // parent return
             return Ok(());
         }
@@ -883,25 +1065,26 @@ impl BaseContainer for LinuxContainer {
         let logger = self.logger.new(o!("eid" => p.exec_id.clone()));
         //let tty = p.tty;
         let fifo_file = format!("{}/{}", &self.root, EXEC_FIFO_FILENAME);
-        let mut fifofd: RawFd = -1;
-        if p.init {
+        let fifofd = if p.init {
             if stat::stat(fifo_file.as_str()).is_ok() {
                 return Err(anyhow!("exec fifo exists"));
             }
             unistd::mkfifo(fifo_file.as_str(), Mode::from_bits(0o644).unwrap())?;
 
-            fifofd = fcntl::open(
+            Some(own_fd(fcntl::open(
                 fifo_file.as_str(),
                 OFlag::O_PATH,
                 Mode::from_bits(0).unwrap(),
-            )?;
-        }
+            )?))
+        } else {
+            None
+        };
 
         if self.config.spec.is_none() {
             return Err(anyhow!("no spec"));
         }
 
-        let spec = self.config.spec.as_ref().unwrap();
+        let spec = self.config.spec.as_ref().unwrap().clone();
         if spec.linux.is_none() {
             return Err(anyhow!("no linux config"));
         }
@@ -921,25 +1104,26 @@ impl BaseContainer for LinuxContainer {
             );
         }
 
-        let (pfd_log, cfd_log) = unistd::pipe().context("failed to create pipe")?;
+        let (pfd_log, cfd_log) = owned_pipe()?;
 
-        let _ = fcntl::fcntl(pfd_log, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
+        let _ = fcntl::fcntl(pfd_log.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
             .map_err(|e| warn!(logger, "fcntl pfd log FD_CLOEXEC {:?}", e));
 
         let child_logger = logger.new(o!("action" => "child process log"));
-        let log_handler = setup_child_logger(pfd_log, child_logger);
+        let mut log_handler =
+            LaunchLogGuard::new(setup_child_logger(pfd_log.into_raw_fd(), child_logger));
 
-        let (prfd, cwfd) = unistd::pipe().context("failed to create pipe")?;
-        let (crfd, pwfd) = unistd::pipe().context("failed to create pipe")?;
+        let (prfd, cwfd) = owned_pipe()?;
+        let (crfd, pwfd) = owned_pipe()?;
 
-        let _ = fcntl::fcntl(prfd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
+        let _ = fcntl::fcntl(prfd.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
             .map_err(|e| warn!(logger, "fcntl prfd FD_CLOEXEC {:?}", e));
 
-        let _ = fcntl::fcntl(pwfd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
+        let _ = fcntl::fcntl(pwfd.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
             .map_err(|e| warn!(logger, "fcntl pwfd FD_COLEXEC {:?}", e));
 
-        let mut pipe_r = PipeStream::from_fd(prfd);
-        let mut pipe_w = PipeStream::from_fd(pwfd);
+        let mut pipe_r = PipeStream::from_fd(prfd.into_raw_fd());
+        let mut pipe_w = PipeStream::from_fd(pwfd.into_raw_fd());
 
         let mut child_stdin = std::process::Stdio::null();
         let mut child_stdout = std::process::Stdio::null();
@@ -957,11 +1141,7 @@ impl BaseContainer for LinuxContainer {
             child_stderr = unsafe { std::process::Stdio::from_raw_fd(unistd::dup(stderr)?) };
         }
 
-        let pidns = get_pid_namespace(&self.logger, linux)?;
-
-        defer!(if let Some(pid) = pidns {
-            let _ = unistd::close(pid);
-        });
+        let pidns = get_pid_namespace(&self.logger, linux)?.map(own_fd);
 
         let exec_path = std::env::current_exe()?;
         let mut child = std::process::Command::new(exec_path);
@@ -980,28 +1160,58 @@ impl BaseContainer for LinuxContainer {
             .stderr(child_stderr)
             .env(INIT, format!("{}", p.init))
             .env(NO_PIVOT, format!("{}", self.config.no_pivot_root))
-            .env(CRFD_FD, format!("{}", crfd))
-            .env(CWFD_FD, format!("{}", cwfd))
-            .env(CLOG_FD, format!("{}", cfd_log))
+            .env(CRFD_FD, format!("{}", crfd.as_raw_fd()))
+            .env(CWFD_FD, format!("{}", cwfd.as_raw_fd()))
+            .env(CLOG_FD, format!("{}", cfd_log.as_raw_fd()))
             .env(CONSOLE_SOCKET_FD, console_name);
 
         if p.init {
-            child = child.env(FIFO_FD, format!("{}", fifofd));
+            child = child.env(FIFO_FD, format!("{}", fifofd.as_ref().unwrap().as_raw_fd()));
         }
 
-        if pidns.is_some() {
-            child = child.env(PIDNS_FD, format!("{}", pidns.unwrap()));
+        if let Some(pidns) = pidns.as_ref() {
+            child = child.env(PIDNS_FD, format!("{}", pidns.as_raw_fd()));
         }
 
-        child.spawn()?;
+        let process_attach_paths = self
+            .cgroup_manager
+            .as_ref()
+            .ok_or_else(|| anyhow!("cgroup manager does not exist"))?;
+        let process_attach_paths = process_attach_paths.early_process_attach_paths()?;
+        child.env(
+            EARLY_PROCESS_ATTACH_PATHS,
+            serde_json::to_string(&process_attach_paths)
+                .context("encode early process cgroup attach paths")?,
+        );
+
+        #[cfg(test)]
+        if let Some(hook) = self.pre_spawn_hook {
+            let mut launch_fds = vec![crfd.as_raw_fd(), cwfd.as_raw_fd(), cfd_log.as_raw_fd()];
+            if let Some(fifofd) = fifofd.as_ref() {
+                launch_fds.push(fifofd.as_raw_fd());
+            }
+            hook(&launch_fds)?;
+        }
+
+        // Keep the global reaper out from spawn through the successful
+        // handshake/reap. ProcessLaunchGuard is declared after this lock, so
+        // cancellation kills and reaps the helper before releasing the lock.
+        let _wait_locker = WAIT_PID_LOCKER.lock().await;
+        let helper = child.spawn()?;
+        let helper_pid = helper.id() as pid_t;
+        drop(helper);
+        let mut launch_guard = ProcessLaunchGuard::new(helper_pid);
+
+        // The child inherited these descriptors at spawn. The parent copies
+        // are now released together without fallible, short-circuiting closes.
+        drop(crfd);
+        drop(cwfd);
+        drop(cfd_log);
+        drop(fifofd);
 
         // Drop the agent's copy of child-side stdio fds so EOF on the parent
         // side reflects the real container process lifetime.
         p.close_inherited_write_ends();
-
-        unistd::close(crfd)?;
-        unistd::close(cwfd)?;
-        unistd::close(cfd_log)?;
 
         // get container process's pid
         let pid_buf = read_async(&mut pipe_r).await?;
@@ -1017,20 +1227,20 @@ impl BaseContainer for LinuxContainer {
         };
 
         p.pid = pid;
+        self.pending_process_pid = Some(p.pid);
 
         if p.init {
             self.init_process_pid = p.pid;
         }
 
-        if p.init {
-            let _ = unistd::close(fifofd).map_err(|e| warn!(logger, "close fifofd {:?}", e));
-        }
+        launch_guard.reap()?;
+        drop(_wait_locker);
 
         let st = self.oci_state()?;
 
         join_namespaces(
             &logger,
-            spec,
+            &spec,
             &p,
             self.cgroup_manager.as_ref().unwrap(),
             &st,
@@ -1052,12 +1262,12 @@ impl BaseContainer for LinuxContainer {
             let spec = self.config.spec.as_mut().unwrap();
             update_namespaces(&self.logger, spec, p.pid)?;
         }
-        let init = p.init;
         p.setup_passfd_io().await;
         self.processes.insert(p.pid, p);
+        self.pending_process_pid = None;
         write_async(&mut pipe_w, SYNC_SUCCESS, "").await?;
 
-        if init {
+        if let Some(log_handler) = log_handler.take() {
             let _ = log_handler
                 .await
                 .map_err(|e| warn!(logger, "joining log handler {:?}", e));
@@ -1079,53 +1289,34 @@ impl BaseContainer for LinuxContainer {
     }
 
     async fn destroy(&mut self) -> Result<()> {
-        let spec = self.config.spec.as_ref().unwrap();
-        let st = self.oci_state()?;
-
-        for pid in self.processes.keys() {
-            match signal::kill(Pid::from_raw(*pid), Some(Signal::SIGKILL)) {
-                Err(Errno::ESRCH) => {
-                    info!(
-                        self.logger,
-                        "kill encounters ESRCH, pid: {}, container: {}",
-                        pid,
-                        self.id.clone()
-                    );
-                    continue;
+        let mut errors = self.kill_owned_processes();
+        if self.status() != ContainerState::Stopped {
+            match self.oci_state() {
+                Ok(state) => {
+                    if let Some(hooks) = self
+                        .config
+                        .spec
+                        .as_ref()
+                        .and_then(|spec| spec.hooks.as_ref())
+                    {
+                        for hook in &hooks.poststop {
+                            if let Err(error) = execute_hook(&self.logger, hook, &state).await {
+                                errors.push(format!("poststop hook: {error:#}"));
+                            }
+                        }
+                    }
                 }
-                Err(err) => return Err(anyhow!(err)),
-                Ok(_) => continue,
+                Err(error) => errors.push(format!("load OCI state for poststop hooks: {error:#}")),
             }
+            self.status.transition(ContainerState::Stopped);
         }
 
-        if spec.hooks.is_some() {
-            let hooks = spec.hooks.as_ref().unwrap();
-            for h in hooks.poststop.iter() {
-                execute_hook(&self.logger, h, &st).await?;
-            }
+        errors.extend(self.cleanup_owned_resources());
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(errors.join("; ")))
         }
-
-        self.status.transition(ContainerState::Stopped);
-        mount::umount2(
-            spec.root.as_ref().unwrap().path.as_str(),
-            MntFlags::MNT_DETACH,
-        )?;
-        fs::remove_dir_all(&self.root)?;
-
-        if let Some(cgm) = self.cgroup_manager.as_mut() {
-            // Kill all of the processes created in this container to prevent
-            // the leak of some daemon process when this container shared pidns
-            // with the sandbox.
-            let pids = cgm.get_pids().context("get cgroup pids")?;
-            for i in pids {
-                if let Err(e) = signal::kill(Pid::from_raw(i), Signal::SIGKILL) {
-                    warn!(self.logger, "kill the process {} error: {:?}", i, e);
-                }
-            }
-
-            cgm.destroy().context("destroy cgroups")?;
-        }
-        Ok(())
     }
 
     async fn exec(&mut self) -> Result<()> {
@@ -1427,6 +1618,120 @@ impl LinuxContainer {
         Path::new(&self.root).join(RESOURCE_V2_JOURNAL_FILENAME)
     }
 
+    fn remember_resource_degraded(
+        &mut self,
+        error: &crate::cgroups::fs::resources_v2::TransactionError,
+    ) {
+        if error.kind == crate::cgroups::fs::resources_v2::TransactionFailureKind::Degraded {
+            if let Some(degraded) = self.resource_degraded.as_mut() {
+                degraded.latest_recovery_error = Some(error.to_string());
+                if !error.current_values.is_empty() {
+                    degraded.current_values = error.current_values.clone();
+                }
+                return;
+            }
+            self.resource_degraded = Some(ResourceDegraded {
+                cause: error.cause.clone(),
+                rollback_error: error.rollback_error.clone(),
+                journal_path: error.journal_path.clone(),
+                current_values: error.current_values.clone(),
+                latest_recovery_error: None,
+            });
+        }
+    }
+
+    pub fn ensure_resources_healthy(&self, operation: &str) -> Result<()> {
+        match self.resource_degraded.as_ref() {
+            Some(degraded) => Err(anyhow!(ResourcePreconditionError {
+                container_id: self.id.clone(),
+                operation: operation.to_string(),
+                degraded: degraded.clone(),
+            })),
+            None => Ok(()),
+        }
+    }
+
+    pub fn abort_create(&mut self) -> Result<()> {
+        let mut errors = self.kill_owned_processes();
+        errors.extend(self.cleanup_owned_resources());
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(errors.join("; ")))
+        }
+    }
+
+    fn kill_owned_processes(&mut self) -> Vec<String> {
+        let (pids, mut errors) = self.owned_process_ids();
+        let pending_pid = self.pending_process_pid;
+        let mut released_pids = BTreeSet::new();
+        for pid in pids {
+            match signal::kill(Pid::from_raw(pid), Some(Signal::SIGKILL)) {
+                Ok(()) | Err(Errno::ESRCH) => {
+                    released_pids.insert(pid);
+                    if pending_pid == Some(pid) {
+                        self.pending_process_pid = None;
+                    }
+                }
+                Err(error) => errors.push(format!("kill pid {pid}: {error}")),
+            }
+        }
+        self.processes.retain(|pid, _| !released_pids.contains(pid));
+        errors
+    }
+
+    fn owned_process_ids(&self) -> (BTreeSet<pid_t>, Vec<String>) {
+        let mut errors = Vec::new();
+        let mut pids = self.processes.keys().copied().collect::<BTreeSet<_>>();
+        if let Some(pid) = self.pending_process_pid.filter(|pid| *pid > 0) {
+            pids.insert(pid);
+        }
+        if let Some(manager) = self.cgroup_manager.as_ref() {
+            match manager.get_pids() {
+                Ok(cgroup_pids) => pids.extend(cgroup_pids),
+                Err(error) => errors.push(format!("get cgroup pids: {error:#}")),
+            }
+        }
+        (pids, errors)
+    }
+
+    fn cleanup_owned_resources(&mut self) -> Vec<String> {
+        let mut errors = Vec::new();
+        let rootfs = Path::new(&self.root).join("rootfs");
+        let rootfs_detached = match mount::umount2(rootfs.as_path(), MntFlags::MNT_DETACH) {
+            Ok(()) | Err(Errno::EINVAL) | Err(Errno::ENOENT) => true,
+            Err(error) => {
+                errors.push(format!("detach rootfs {}: {error}", rootfs.display()));
+                false
+            }
+        };
+
+        let cgroup_removed = match self.cgroup_manager.as_mut() {
+            Some(manager) => match manager.destroy() {
+                Ok(()) => {
+                    self.cgroup_manager = None;
+                    self.pending_process_pid = None;
+                    self.processes.clear();
+                    true
+                }
+                Err(error) => {
+                    errors.push(format!("destroy cgroups: {error:#}"));
+                    false
+                }
+            },
+            None => true,
+        };
+        if rootfs_detached && cgroup_removed {
+            match fs::remove_dir_all(&self.root) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => errors.push(format!("remove bundle {}: {error}", self.root)),
+            }
+        }
+
+        errors
+    }
+
     pub fn apply_resources_v2_create(
         &mut self,
     ) -> std::result::Result<(), crate::cgroups::fs::resources_v2::TransactionError> {
@@ -1443,6 +1748,7 @@ impl LinuxContainer {
                 cause: "resources-v2 create has no Linux resources".to_string(),
                 rollback_error: None,
                 journal_path: journal_path.clone(),
+                current_values: Default::default(),
             })?;
         let manager = self.cgroup_manager.as_ref().ok_or_else(|| {
             crate::cgroups::fs::resources_v2::TransactionError {
@@ -1450,9 +1756,14 @@ impl LinuxContainer {
                 cause: "resources-v2 create has no cgroup manager".to_string(),
                 rollback_error: None,
                 journal_path: journal_path.clone(),
+                current_values: Default::default(),
             }
         })?;
-        manager.set_resources_v2_create(&resources, &journal_path)
+        let result = manager.set_resources_v2_create(&resources, &journal_path);
+        if let Err(error) = result.as_ref() {
+            self.remember_resource_degraded(error);
+        }
+        result
     }
 
     pub fn set_resources_v2(
@@ -1460,6 +1771,7 @@ impl LinuxContainer {
         incoming: LinuxResources,
     ) -> std::result::Result<(), crate::cgroups::fs::resources_v2::TransactionError> {
         let journal_path = self.resources_v2_journal_path();
+        self.recover_resources_v2()?;
         let mut effective = self
             .config
             .spec
@@ -1474,6 +1786,7 @@ impl LinuxContainer {
                 cause: format!("merge resources-v2 update: {error:#}"),
                 rollback_error: None,
                 journal_path: journal_path.clone(),
+                current_values: Default::default(),
             }
         })?;
         let canonical = crate::resources::canonical_resources(&effective).map_err(|error| {
@@ -1482,6 +1795,7 @@ impl LinuxContainer {
                 cause: format!("persist resources-v2 update: {error:#}"),
                 rollback_error: None,
                 journal_path: journal_path.clone(),
+                current_values: Default::default(),
             }
         })?;
         let manager = self.cgroup_manager.as_ref().ok_or_else(|| {
@@ -1490,9 +1804,14 @@ impl LinuxContainer {
                 cause: "resources-v2 update has no cgroup manager".to_string(),
                 rollback_error: None,
                 journal_path: journal_path.clone(),
+                current_values: Default::default(),
             }
         })?;
-        manager.set_resources_v2(&incoming, true, &journal_path)?;
+        let result = manager.set_resources_v2(&incoming, true, &journal_path);
+        if let Err(error) = result.as_ref() {
+            self.remember_resource_degraded(error);
+        }
+        result?;
 
         self.config
             .spec
@@ -1509,14 +1828,85 @@ impl LinuxContainer {
         Ok(())
     }
 
+    pub fn recover_resources_v2(
+        &mut self,
+    ) -> std::result::Result<(), crate::cgroups::fs::resources_v2::TransactionError> {
+        let degraded = match self.resource_degraded.as_ref() {
+            Some(degraded) => degraded.clone(),
+            None => return Ok(()),
+        };
+        let manager = match self.cgroup_manager.as_ref() {
+            Some(manager) => manager,
+            None => {
+                let error = crate::cgroups::fs::resources_v2::TransactionError {
+                    kind: crate::cgroups::fs::resources_v2::TransactionFailureKind::Degraded,
+                    cause: "resources-v2 recovery has no cgroup manager".to_string(),
+                    rollback_error: Some("cannot replay undo journal".to_string()),
+                    journal_path: degraded.journal_path.clone(),
+                    current_values: degraded.current_values.clone(),
+                };
+                self.remember_resource_degraded(&error);
+                return Err(error);
+            }
+        };
+        match manager.replay_resources_v2(&degraded.journal_path) {
+            Ok(()) => {
+                self.resource_degraded = None;
+                Err(crate::cgroups::fs::resources_v2::TransactionError {
+                    kind: crate::cgroups::fs::resources_v2::TransactionFailureKind::Recovered,
+                    cause: "resources-v2 recovered the previous transaction".to_string(),
+                    rollback_error: None,
+                    journal_path: degraded.journal_path,
+                    current_values: Default::default(),
+                })
+            }
+            Err(error) => {
+                self.remember_resource_degraded(&error);
+                Err(error)
+            }
+        }
+    }
+
     pub fn new<T: Into<String> + Display + Clone>(
         id: T,
         base: T,
         config: Config,
         logger: &Logger,
     ) -> Result<Self> {
-        let base = base.into();
-        let id = id.into();
+        let outcome = Self::new_owned(id, base, config, logger)?;
+        if let Some(initialization_error) = outcome.initialization_error {
+            let mut container = outcome.container;
+            return match container.abort_create() {
+                Ok(()) => Err(initialization_error),
+                Err(cleanup_error) => Err(anyhow!(
+                    "{initialization_error:#}; cleanup partially initialized container: {cleanup_error:#}"
+                )),
+            };
+        }
+        Ok(outcome.container)
+    }
+
+    pub fn new_owned<T: Into<String> + Display + Clone>(
+        id: T,
+        base: T,
+        config: Config,
+        logger: &Logger,
+    ) -> Result<LinuxContainerCreateOutcome> {
+        Self::new_with_manager(id.into(), base.into(), config, logger, |cpath| {
+            FsManager::new_owned(cpath)
+        })
+    }
+
+    fn new_with_manager<CreateManager>(
+        id: String,
+        base: String,
+        config: Config,
+        logger: &Logger,
+        create_manager: CreateManager,
+    ) -> Result<LinuxContainerCreateOutcome>
+    where
+        CreateManager: FnOnce(&str) -> Result<crate::cgroups::ManagerCreateOutcome<FsManager>>,
+    {
         let root = format!("{}/{}", base.as_str(), id.as_str());
 
         // validate oci spec
@@ -1556,7 +1946,7 @@ impl LinuxContainer {
         };
 
         let start = Instant::now();
-        let cgroup_manager = FsManager::new(cpath.as_str())?;
+        let cgroup_outcome = create_manager(cpath.as_str())?;
         let duration = start.elapsed().as_millis();
         info!(
             logger,
@@ -1565,24 +1955,32 @@ impl LinuxContainer {
             duration
         );
 
-        Ok(LinuxContainer {
-            id: id.clone(),
-            root,
-            cgroup_manager: Some(cgroup_manager),
-            status: ContainerStatus::new(),
-            uid_map_path: String::from(""),
-            gid_map_path: "".to_string(),
-            config,
-            processes: HashMap::new(),
-            created: SystemTime::now(),
-            init_process_pid: -1,
-            init_process_start_time: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            logger: logger.new(o!("module" => "rustjail", "subsystem" => "container", "cid" => id)),
-            #[cfg(feature = "standard-oci-runtime")]
-            console_socket: Path::new("").to_path_buf(),
+        Ok(LinuxContainerCreateOutcome {
+            container: LinuxContainer {
+                id: id.clone(),
+                root,
+                cgroup_manager: Some(cgroup_outcome.manager),
+                status: ContainerStatus::new(),
+                uid_map_path: String::from(""),
+                gid_map_path: "".to_string(),
+                config,
+                processes: HashMap::new(),
+                created: SystemTime::now(),
+                init_process_pid: -1,
+                pending_process_pid: None,
+                init_process_start_time: SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                logger: logger
+                    .new(o!("module" => "rustjail", "subsystem" => "container", "cid" => id)),
+                resource_degraded: None,
+                #[cfg(test)]
+                pre_spawn_hook: None,
+                #[cfg(feature = "standard-oci-runtime")]
+                console_socket: Path::new("").to_path_buf(),
+            },
+            initialization_error: cgroup_outcome.initialization_error,
         })
     }
 
@@ -1856,6 +2254,37 @@ mod tests {
         () => {
             slog_scope::logger()
         };
+    }
+
+    static PRE_SPAWN_FDS: std::sync::Mutex<Vec<(RawFd, PathBuf)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    fn reject_before_spawn(fds: &[RawFd]) -> Result<()> {
+        *PRE_SPAWN_FDS.lock().unwrap() = fds
+            .iter()
+            .map(|fd| {
+                (
+                    *fd,
+                    fs::read_link(format!("/proc/self/fd/{fd}"))
+                        .expect("launch fd must exist before injected failure"),
+                )
+            })
+            .collect();
+        Err(anyhow!("injected pre-spawn failure"))
+    }
+
+    fn assert_pipe_writer_closed(observer: RawFd) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let mut byte = [0u8; 1];
+            match unistd::read(observer, &mut byte) {
+                Ok(0) => return,
+                Err(Errno::EAGAIN) | Err(Errno::EINTR) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                result => panic!("process-owned pipe writer remained open: {result:?}"),
+            }
+        }
     }
 
     async fn which(cmd: &str) -> String {
@@ -2266,6 +2695,417 @@ mod tests {
             c.set(oci::LinuxResources::default())
         });
         assert!(ret.is_ok(), "Expecting Ok, Got {:?}", ret);
+    }
+
+    #[test]
+    fn resource_degraded_blocks_new_work() {
+        let (container, _dir) = new_linux_container();
+        let mut container = container.unwrap();
+        container.resource_degraded = Some(ResourceDegraded {
+            cause: "injected rollback failure".to_string(),
+            rollback_error: Some("restore cpu.max".to_string()),
+            journal_path: PathBuf::from("/tmp/resources-v2.undo.json"),
+            current_values: Default::default(),
+            latest_recovery_error: None,
+        });
+
+        let error = container.ensure_resources_healthy("exec").unwrap_err();
+        let error = error.downcast_ref::<ResourcePreconditionError>().unwrap();
+        assert_eq!(error.container_id, "some_id");
+        assert_eq!(error.operation, "exec");
+        assert_eq!(error.degraded.cause, "injected rollback failure");
+    }
+
+    #[test]
+    fn degraded_update_replays_only_and_requires_retry() {
+        let (container, _dir) = new_linux_container();
+        let mut container = container.unwrap();
+        let journal_path = container.resources_v2_journal_path();
+        fs::write(&journal_path, br#"{"version":1,"entries":[]}"#).unwrap();
+        container.resource_degraded = Some(ResourceDegraded {
+            cause: "injected rollback failure".to_string(),
+            rollback_error: Some("restore cpu.max".to_string()),
+            journal_path: journal_path.clone(),
+            current_values: Default::default(),
+            latest_recovery_error: None,
+        });
+
+        let error = container
+            .set_resources_v2(LinuxResources::default())
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            crate::cgroups::fs::resources_v2::TransactionFailureKind::Recovered
+        );
+        assert!(container.resource_degraded.is_none());
+        assert!(!journal_path.exists());
+    }
+
+    #[test]
+    fn failed_degraded_replay_remains_fail_stopped() {
+        let (container, _dir) = new_linux_container();
+        let mut container = container.unwrap();
+        let journal_path = container.resources_v2_journal_path();
+        fs::write(&journal_path, b"not-json").unwrap();
+        container.resource_degraded = Some(ResourceDegraded {
+            cause: "injected rollback failure".to_string(),
+            rollback_error: None,
+            journal_path: journal_path.clone(),
+            current_values: Default::default(),
+            latest_recovery_error: None,
+        });
+
+        let error = container
+            .set_resources_v2(LinuxResources::default())
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            crate::cgroups::fs::resources_v2::TransactionFailureKind::Degraded
+        );
+        let degraded = container.resource_degraded.as_ref().unwrap();
+        assert_eq!(degraded.journal_path, journal_path);
+        assert_eq!(degraded.cause, "injected rollback failure");
+        assert!(degraded
+            .latest_recovery_error
+            .as_deref()
+            .unwrap()
+            .contains("load undo journal"));
+    }
+
+    #[test]
+    fn missing_cgroup_recovery_preserves_original_diagnosis() {
+        let (container, _dir) = new_linux_container();
+        let mut container = container.unwrap();
+        container.cgroup_manager = None;
+        container.resource_degraded = Some(ResourceDegraded {
+            cause: "original transaction failed".to_string(),
+            rollback_error: Some("restore cpu.max".to_string()),
+            journal_path: container.resources_v2_journal_path(),
+            current_values: Default::default(),
+            latest_recovery_error: None,
+        });
+
+        let error = container.recover_resources_v2().unwrap_err();
+        assert_eq!(
+            error.kind,
+            crate::cgroups::fs::resources_v2::TransactionFailureKind::Degraded
+        );
+        let degraded = container.resource_degraded.as_ref().unwrap();
+        assert_eq!(degraded.cause, "original transaction failed");
+        assert_eq!(degraded.rollback_error.as_deref(), Some("restore cpu.max"));
+        assert!(degraded
+            .latest_recovery_error
+            .as_deref()
+            .unwrap()
+            .contains("no cgroup manager"));
+    }
+
+    #[test]
+    fn abort_create_is_idempotent() {
+        let (container, _dir) = new_linux_container();
+        let mut container = container.unwrap();
+        assert!(container.abort_create().is_ok());
+        assert!(container.cgroup_manager.is_none());
+        assert!(container.abort_create().is_ok());
+    }
+
+    #[test]
+    fn owned_process_candidates_cover_transient_process_not_stale_init() {
+        let (container, _dir) = new_linux_container();
+        let mut container = container.unwrap();
+        container.init_process_pid = 424_242;
+
+        let (pids, errors) = container.owned_process_ids();
+        assert!(errors.is_empty());
+        assert!(pids.is_empty(), "stale long-term init PID may be reused");
+
+        container.pending_process_pid = Some(222_222);
+        let (pids, errors) = container.owned_process_ids();
+        assert!(errors.is_empty());
+        assert_eq!(pids, BTreeSet::from([222_222]));
+
+        container.pending_process_pid = None;
+        let (pids, errors) = container.owned_process_ids();
+        assert!(errors.is_empty());
+        assert!(pids.is_empty());
+    }
+
+    #[test]
+    fn fork_child_attach_preserves_exact_pids_limit_and_cleans_rejection() {
+        let target = crate::cgroups::fs::process_cgroup_procs_path("/pod/container").unwrap();
+        assert_eq!(
+            target,
+            PathBuf::from("/sys/fs/cgroup/pod/container/runtime/cgroup.procs")
+        );
+        let pids_one_occupancy = std::cell::Cell::new(0usize);
+        let cleaned = std::cell::Cell::new(false);
+        attach_fork_child_before_report(
+            std::slice::from_ref(&target),
+            101,
+            |actual_target, _| {
+                assert_eq!(actual_target, target);
+                if pids_one_occupancy.get() >= 1 {
+                    return Err(anyhow!("pids.max rejected child"));
+                }
+                pids_one_occupancy.set(pids_one_occupancy.get() + 1);
+                Ok(())
+            },
+            |_| {
+                cleaned.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(!cleaned.get());
+        assert_eq!(pids_one_occupancy.get(), 1);
+
+        let cleaned = std::cell::Cell::new(false);
+        let error = attach_fork_child_before_report(
+            std::slice::from_ref(&target),
+            202,
+            |_, _| Err(anyhow!("pids.max=0 rejected child")),
+            |_| {
+                cleaned.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("attach fork child to cgroup"));
+        assert!(cleaned.get());
+    }
+
+    #[test]
+    fn fork_child_attach_writes_every_v1_controller_before_report() {
+        let targets = vec![
+            PathBuf::from("/sys/fs/cgroup/cpu/pod/container/tasks"),
+            PathBuf::from("/sys/fs/cgroup/memory/pod/container/tasks"),
+        ];
+        let attached = std::cell::RefCell::new(Vec::new());
+        attach_fork_child_before_report(
+            &targets,
+            303,
+            |target, pid| {
+                attached.borrow_mut().push((target.to_path_buf(), pid));
+                Ok(())
+            },
+            |_| panic!("successful cgroup v1 attach must not clean the child"),
+        )
+        .unwrap();
+        assert_eq!(
+            attached.into_inner(),
+            vec![(targets[0].clone(), 303), (targets[1].clone(), 303)]
+        );
+    }
+
+    #[test]
+    fn successful_process_launch_guard_reaps_helper_immediately() {
+        let child = std::process::Command::new("/bin/true").spawn().unwrap();
+        let pid = child.id() as pid_t;
+        drop(child);
+        let mut guard = ProcessLaunchGuard::new(pid);
+        guard.reap().unwrap();
+        assert!(!guard.armed);
+        assert_eq!(
+            nix::sys::wait::waitpid(
+                Pid::from_raw(pid),
+                Some(nix::sys::wait::WaitPidFlag::WNOHANG)
+            ),
+            Err(Errno::ECHILD)
+        );
+    }
+
+    #[test]
+    fn cancelled_process_launch_guard_kills_and_reaps_helper() {
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as pid_t;
+        drop(child);
+        drop(ProcessLaunchGuard::new(pid));
+        assert_eq!(
+            nix::sys::wait::waitpid(
+                Pid::from_raw(pid),
+                Some(nix::sys::wait::WaitPidFlag::WNOHANG)
+            ),
+            Err(Errno::ECHILD)
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_spawn_failure_closes_launch_fds_and_aborts_log_handler() {
+        struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let signal = DropSignal(Some(dropped_tx));
+        let handler = tokio::spawn(async move {
+            let _signal = signal;
+            std::future::pending::<()>().await;
+        });
+        drop(LaunchLogGuard::new(handler));
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .unwrap()
+            .unwrap();
+
+        PRE_SPAWN_FDS.lock().unwrap().clear();
+        let (container, _dir) = new_linux_container();
+        let mut container = container.unwrap();
+        container.pre_spawn_hook = Some(reject_before_spawn);
+        container
+            .config
+            .spec
+            .as_mut()
+            .unwrap()
+            .linux
+            .as_mut()
+            .unwrap()
+            .namespaces
+            .push(LinuxNamespace {
+                r#type: oci::PIDNAMESPACE.to_string(),
+                path: String::new(),
+            });
+        let mut process =
+            Process::new(&sl!(), &oci::Process::default(), "pre-spawn", false, 1).unwrap();
+        process.oci.capabilities = Some(Default::default());
+
+        let error = container.start(process).await.unwrap_err();
+        assert!(
+            error.to_string().contains("injected pre-spawn failure"),
+            "unexpected start error: {error:#}"
+        );
+        let fds = PRE_SPAWN_FDS.lock().unwrap().clone();
+        assert_eq!(fds.len(), 3, "sync read/write and child-log fds");
+        for (fd, identity) in fds {
+            assert_ne!(
+                fs::read_link(format!("/proc/self/fd/{fd}")).ok(),
+                Some(identity),
+                "pre-spawn failure retained its original launch fd"
+            );
+        }
+    }
+
+    #[test]
+    fn abort_create_retries_cgroup_cleanup_before_removing_bundle() {
+        let (container, _dir) = new_linux_container();
+        let mut container = container.unwrap();
+        let bundle = PathBuf::from(&container.root);
+        fs::create_dir_all(bundle.join("rootfs")).unwrap();
+        container.cgroup_manager.as_mut().unwrap().fail_destroy_once = true;
+
+        let first = container.abort_create().unwrap_err();
+        assert!(first
+            .to_string()
+            .contains("injected cgroup destroy failure"));
+        assert!(container.cgroup_manager.is_some());
+        assert!(
+            bundle.exists(),
+            "bundle must remain while cgroup cleanup is pending"
+        );
+
+        container.abort_create().unwrap();
+        assert!(container.cgroup_manager.is_none());
+        assert!(!bundle.exists());
+    }
+
+    #[test]
+    fn partial_cgroup_initialization_retains_owner_across_delete_failure() {
+        let dir = tempdir().unwrap();
+        let creation = LinuxContainer::new_with_manager(
+            "partial-cgroup".to_string(),
+            dir.path().to_str().unwrap().to_string(),
+            create_dummy_opts(),
+            &slog_scope::logger(),
+            |cpath| {
+                let mut manager = FsManager::new(cpath)?;
+                manager.fail_destroy_once = true;
+                Ok(crate::cgroups::ManagerCreateOutcome {
+                    manager,
+                    initialization_error: Some(anyhow!(
+                        "injected process leaf initialization failure"
+                    )),
+                })
+            },
+        )
+        .unwrap();
+        assert!(creation
+            .initialization_error
+            .as_ref()
+            .unwrap()
+            .to_string()
+            .contains("process leaf"));
+        let mut container = creation.container;
+        let bundle = PathBuf::from(&container.root);
+
+        let first = container.abort_create().unwrap_err();
+        assert!(first
+            .to_string()
+            .contains("injected cgroup destroy failure"));
+        assert!(container.cgroup_manager.is_some());
+        assert!(bundle.exists());
+
+        container.abort_create().unwrap();
+        assert!(container.cgroup_manager.is_none());
+        assert!(!bundle.exists());
+    }
+
+    #[test]
+    fn abort_create_drops_removed_process_and_closes_its_fds() {
+        let (container, _dir) = new_linux_container();
+        let mut container = container.unwrap();
+        let first = unistd::pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).unwrap();
+        let second = unistd::pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).unwrap();
+        let mut process =
+            Process::new(&sl!(), &oci::Process::default(), "pending-io", true, 1).unwrap();
+        process.parent_stdout = Some(first.1);
+        process.stdout = Some(second.1);
+        container.processes.insert(i32::MAX, process);
+
+        container.abort_create().unwrap();
+
+        assert!(container.processes.is_empty());
+        assert_pipe_writer_closed(first.0);
+        assert_pipe_writer_closed(second.0);
+        let _ = unistd::close(first.0);
+        let _ = unistd::close(second.0);
+    }
+
+    #[tokio::test]
+    async fn destroy_failure_does_not_retain_released_process_ids_for_retry() {
+        let (container, _dir) = new_linux_container();
+        let mut container = container.unwrap();
+        let stale_candidate = i32::MAX;
+        container.processes.insert(
+            stale_candidate,
+            Process::new(&sl!(), &oci::Process::default(), "stale-candidate", true, 1).unwrap(),
+        );
+        container.config.spec.as_mut().unwrap().hooks = Some(oci::Hooks {
+            poststop: vec![Hook {
+                path: "/bin/false".to_string(),
+                args: vec!["false".to_string()],
+                env: Vec::new(),
+                timeout: None,
+            }],
+            ..Default::default()
+        });
+
+        let first = container.destroy().await.unwrap_err();
+        assert!(first.to_string().contains("poststop hook"));
+        assert!(container.cgroup_manager.is_none());
+        assert!(container.processes.is_empty());
+        let (pids, errors) = container.owned_process_ids();
+        assert!(errors.is_empty());
+        assert!(pids.is_empty(), "retry must not signal a reused PID");
+
+        container.destroy().await.unwrap();
+        assert!(container.processes.is_empty());
     }
 
     #[tokio::test]

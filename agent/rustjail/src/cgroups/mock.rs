@@ -5,13 +5,13 @@
 
 use protobuf::MessageField;
 
-use crate::cgroups::{Manager as CgroupManager, RESOURCE_METRICS_VERSION_V1};
+use crate::cgroups::{Manager as CgroupManager, ManagerCreateOutcome, RESOURCE_METRICS_VERSION_V1};
 use crate::protocols::agent::{BlkioStats, CgroupStats, CpuStats, MemoryStats, PidsStats};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use cgroups::freezer::FreezerState;
 use libc::{self, pid_t};
 use oci::LinuxResources;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cgroups::fs::resources_v2::{TransactionError, TransactionFailureKind};
 use std::collections::HashMap;
@@ -22,6 +22,7 @@ pub struct Manager {
     pub paths: HashMap<String, String>,
     pub mounts: HashMap<String, String>,
     pub cpath: String,
+    pub fail_destroy_once: bool,
 }
 
 impl CgroupManager for Manager {
@@ -53,6 +54,10 @@ impl CgroupManager for Manager {
     }
 
     fn destroy(&mut self) -> Result<()> {
+        if self.fail_destroy_once {
+            self.fail_destroy_once = false;
+            return Err(anyhow!("injected cgroup destroy failure"));
+        }
         Ok(())
     }
 
@@ -73,6 +78,7 @@ impl Manager {
             cause: "mock cgroup manager does not apply resources-v2".to_string(),
             rollback_error: None,
             journal_path: journal_path.to_path_buf(),
+            current_values: Default::default(),
         })
     }
 
@@ -86,13 +92,34 @@ impl Manager {
             cause: "mock cgroup manager does not apply resources-v2".to_string(),
             rollback_error: None,
             journal_path: journal_path.to_path_buf(),
+            current_values: Default::default(),
         })
     }
+
+    pub fn replay_resources_v2(
+        &self,
+        journal_path: &Path,
+    ) -> std::result::Result<(), TransactionError> {
+        crate::cgroups::fs::resources_v2::replay(journal_path)
+    }
+
+    pub fn early_process_attach_paths(&self) -> Result<Vec<PathBuf>> {
+        crate::cgroups::fs::early_process_attach_paths_for_layout(true, &self.cpath, &[])
+    }
+
     pub fn new(cpath: &str) -> Result<Self> {
         Ok(Self {
             paths: HashMap::new(),
             mounts: HashMap::new(),
             cpath: cpath.to_string(),
+            fail_destroy_once: false,
+        })
+    }
+
+    pub fn new_owned(cpath: &str) -> Result<ManagerCreateOutcome<Self>> {
+        Ok(ManagerCreateOutcome {
+            manager: Self::new(cpath)?,
+            initialization_error: None,
         })
     }
 

@@ -23,15 +23,113 @@ use rustjail::process::Process;
 use slog::Logger;
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::{thread, time};
 use tokio::sync::broadcast::{channel, Sender as BroadcastSender};
 use tokio::sync::mpsc::Receiver;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Notify};
 use tracing::instrument;
 
 pub const ERR_INVALID_CONTAINER_ID: &str = "Invalid container id";
 
 type UeventWatcher = (Box<dyn UeventMatcher>, oneshot::Sender<Uevent>);
+
+fn acquire_storage_reference(storages: &mut HashMap<String, u32>, path: &str) -> Result<bool> {
+    match storages.get_mut(path) {
+        None => {
+            storages.insert(path.to_string(), 1);
+            Ok(true)
+        }
+        Some(0) => Err(anyhow!(
+            "sandbox storage {path} is reserved by pending cleanup"
+        )),
+        Some(count) => {
+            *count += 1;
+            Ok(false)
+        }
+    }
+}
+
+fn begin_storage_reference_release(storages: &mut HashMap<String, u32>, path: &str) -> bool {
+    match storages.get(path).copied() {
+        Some(0) => true,
+        Some(1) => {
+            storages.insert(path.to_string(), 0);
+            true
+        }
+        Some(count) => {
+            storages.insert(path.to_string(), count - 1);
+            false
+        }
+        None => {
+            storages.insert(path.to_string(), 0);
+            true
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct PendingCreate {
+    pub storage_refs: Vec<String>,
+    pub bundle_path: PathBuf,
+    pub container: Option<Arc<tokio::sync::Mutex<LinuxContainer>>>,
+    pub last_cleanup_error: Option<String>,
+    pub activity: Arc<PendingCreateActivity>,
+}
+
+pub(crate) fn take_pending_storage_refs(pending: &mut PendingCreate) -> Vec<String> {
+    std::mem::take(&mut pending.storage_refs)
+}
+
+#[derive(Debug)]
+pub struct PendingCreateActivity {
+    active: AtomicBool,
+    cancel_requested: AtomicBool,
+    notify: Notify,
+}
+
+impl PendingCreateActivity {
+    pub(crate) fn new() -> Self {
+        Self {
+            active: AtomicBool::new(true),
+            cancel_requested: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    pub fn request_cancel(&self) {
+        self.cancel_requested.store(true, Ordering::Release);
+    }
+
+    pub fn check_cancelled(&self) -> Result<()> {
+        if self.cancel_requested.load(Ordering::Acquire) {
+            Err(anyhow!("container create cleanup was requested"))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn finish(&self) {
+        self.active.store(false, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire)
+    }
+
+    pub async fn wait_inactive(&self) {
+        while self.is_active() {
+            let notified = self.notify.notified();
+            if !self.is_active() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct Sandbox {
@@ -39,6 +137,7 @@ pub struct Sandbox {
     pub id: String,
     pub hostname: String,
     pub containers: HashMap<String, LinuxContainer>,
+    pub pending_creates: HashMap<String, PendingCreate>,
     pub network: Network,
     pub mounts: Vec<String>,
     pub container_mounts: HashMap<String, Vec<String>>,
@@ -73,6 +172,7 @@ impl Sandbox {
             hostname: String::new(),
             network: Network::new(),
             containers: HashMap::new(),
+            pending_creates: HashMap::new(),
             mounts: Vec::new(),
             container_mounts: HashMap::new(),
             uevent_map: HashMap::new(),
@@ -101,18 +201,14 @@ impl Sandbox {
     //
     // It's assumed that caller is calling this method after
     // acquiring a lock on sandbox.
+    #[cfg(test)]
     #[instrument]
     pub fn set_sandbox_storage(&mut self, path: &str) -> bool {
-        match self.storages.get_mut(path) {
-            None => {
-                self.storages.insert(path.to_string(), 1);
-                true
-            }
-            Some(count) => {
-                *count += 1;
-                false
-            }
-        }
+        self.acquire_sandbox_storage(path).unwrap_or(false)
+    }
+
+    pub fn acquire_sandbox_storage(&mut self, path: &str) -> Result<bool> {
+        acquire_storage_reference(&mut self.storages, path)
     }
 
     // unset_sandbox_storage will decrement the sandbox storage
@@ -124,10 +220,14 @@ impl Sandbox {
     //
     // It's assumed that caller is calling this method after
     // acquiring a lock on sandbox.
+    #[cfg(test)]
     #[instrument]
     pub fn unset_sandbox_storage(&mut self, path: &str) -> Result<bool> {
         match self.storages.get_mut(path) {
             None => Err(anyhow!("Sandbox storage with path {} not found", path)),
+            Some(0) => Err(anyhow!(
+                "Sandbox storage with path {path} is reserved by pending cleanup"
+            )),
             Some(count) => {
                 *count -= 1;
                 if *count < 1 {
@@ -164,6 +264,7 @@ impl Sandbox {
     // It's assumed that caller is calling this method after
     // acquiring a lock on sandbox.
     #[instrument]
+    #[cfg(test)]
     pub fn unset_and_remove_sandbox_storage(&mut self, path: &str) -> Result<()> {
         if self.unset_sandbox_storage(path)? {
             return self.remove_sandbox_storage(path);
@@ -205,6 +306,62 @@ impl Sandbox {
 
     pub fn add_container(&mut self, c: LinuxContainer) {
         self.containers.insert(c.id.clone(), c);
+    }
+
+    pub fn begin_pending_create(
+        &mut self,
+        cid: &str,
+        bundle_path: PathBuf,
+    ) -> Result<Arc<PendingCreateActivity>> {
+        if self.containers.contains_key(cid) || self.pending_creates.contains_key(cid) {
+            return Err(anyhow!(
+                "container {cid} already exists or has pending cleanup"
+            ));
+        }
+        let activity = Arc::new(PendingCreateActivity::new());
+        self.pending_creates.insert(
+            cid.to_string(),
+            PendingCreate {
+                storage_refs: Vec::new(),
+                bundle_path,
+                container: None,
+                last_cleanup_error: None,
+                activity: activity.clone(),
+            },
+        );
+        Ok(activity)
+    }
+
+    pub fn record_pending_storage(&mut self, cid: &str, path: &str) -> Result<()> {
+        let pending = self
+            .pending_creates
+            .get_mut(cid)
+            .ok_or_else(|| anyhow!("container {cid} has no pending create owner"))?;
+        pending.storage_refs.push(path.to_string());
+        Ok(())
+    }
+
+    pub fn cleanup_pending_storage(&mut self, path: &str) -> Result<()> {
+        let remove = begin_storage_reference_release(&mut self.storages, path);
+        if !remove {
+            return Ok(());
+        }
+        let result = if crate::mount::is_mounted(path)? {
+            self.remove_sandbox_storage(path)
+        } else if let Err(error) = fs::remove_dir(path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                Err(anyhow!(error)
+                    .context(format!("remove unmounted pending storage directory {path}")))
+            } else {
+                Ok(())
+            }
+        } else {
+            Ok(())
+        };
+        if result.is_ok() && self.storages.get(path) == Some(&0) {
+            self.storages.remove(path);
+        }
+        result
     }
 
     #[instrument]
@@ -449,6 +606,87 @@ mod tests {
     }
 
     use serial_test::serial;
+
+    #[tokio::test]
+    async fn pending_create_activity_cancels_and_notifies_waiters() {
+        let activity = Arc::new(PendingCreateActivity::new());
+        let waiter_activity = activity.clone();
+        let waiter = tokio::spawn(async move {
+            waiter_activity.wait_inactive().await;
+        });
+
+        activity.request_cancel();
+        assert!(activity.check_cancelled().is_err());
+        assert!(activity.is_active());
+        activity.finish();
+
+        tokio::time::timeout(time::Duration::from_millis(100), waiter)
+            .await
+            .expect("activity waiter was not notified")
+            .expect("activity waiter panicked");
+        assert!(!activity.is_active());
+    }
+
+    #[test]
+    fn storage_cleanup_tombstone_blocks_reacquire_until_success() {
+        let mut storages = HashMap::new();
+        let path = "/test/pending-storage";
+
+        assert!(acquire_storage_reference(&mut storages, path).unwrap());
+        assert!(!acquire_storage_reference(&mut storages, path).unwrap());
+        assert!(!begin_storage_reference_release(&mut storages, path));
+        assert_eq!(storages.get(path), Some(&1));
+
+        assert!(begin_storage_reference_release(&mut storages, path));
+        assert_eq!(storages.get(path), Some(&0));
+        assert!(acquire_storage_reference(&mut storages, path).is_err());
+        assert!(begin_storage_reference_release(&mut storages, path));
+
+        // Physical cleanup success is the commit point for releasing the
+        // tombstone; only then may a later create acquire the path again.
+        storages.remove(path);
+        assert!(acquire_storage_reference(&mut storages, path).unwrap());
+        assert_eq!(storages.get(path), Some(&1));
+    }
+
+    #[test]
+    fn shared_existing_storage_ownership_transfers_and_releases_exactly() {
+        let path = "/test/shared-storage";
+        let mut storages = HashMap::new();
+        assert!(acquire_storage_reference(&mut storages, path).unwrap());
+        assert!(!acquire_storage_reference(&mut storages, path).unwrap());
+        assert_eq!(storages.get(path), Some(&2));
+
+        let pending = || PendingCreate {
+            storage_refs: vec![path.to_string()],
+            bundle_path: PathBuf::from("/test/bundle"),
+            container: None,
+            last_cleanup_error: None,
+            activity: Arc::new(PendingCreateActivity::new()),
+        };
+        let mut pending_a = pending();
+        let mut pending_b = pending();
+        let mut container_a = take_pending_storage_refs(&mut pending_a);
+        let mut container_b = take_pending_storage_refs(&mut pending_b);
+        assert!(pending_a.storage_refs.is_empty());
+        assert!(pending_b.storage_refs.is_empty());
+
+        assert!(!begin_storage_reference_release(
+            &mut storages,
+            &container_a.remove(0)
+        ));
+        assert_eq!(storages.get(path), Some(&1));
+
+        assert!(begin_storage_reference_release(
+            &mut storages,
+            &container_b.remove(0)
+        ));
+        assert_eq!(storages.get(path), Some(&0));
+        storages.remove(path); // physical cleanup committed
+        assert!(!storages.contains_key(path));
+        assert!(container_a.is_empty());
+        assert!(container_b.is_empty());
+    }
 
     #[tokio::test]
     #[serial]

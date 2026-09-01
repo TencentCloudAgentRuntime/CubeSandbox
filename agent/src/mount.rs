@@ -917,7 +917,10 @@ pub async fn add_storages(
 
         {
             let mut sb = sandbox.lock().await;
-            let new_storage = sb.set_sandbox_storage(&storage.mount_point);
+            let new_storage = sb.acquire_sandbox_storage(&storage.mount_point)?;
+            if let Some(cid) = cid.as_deref() {
+                sb.record_pending_storage(cid, &storage.mount_point)?;
+            }
             if !new_storage {
                 info!(
                     logger,

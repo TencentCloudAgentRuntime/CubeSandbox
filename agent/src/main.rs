@@ -13,6 +13,7 @@ extern crate regex;
 extern crate scan_fmt;
 extern crate serde_json;
 
+#[cfg(test)]
 #[macro_use]
 extern crate scopeguard;
 

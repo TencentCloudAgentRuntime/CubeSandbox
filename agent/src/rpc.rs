@@ -33,7 +33,7 @@ use cube::utils::ANNO_APP_SNAPSHOT_CONTAINER_ID;
 use cube::utils::ANNO_CONTAINER_LOG_FORWARDING;
 use libc::{self, c_char, c_ushort, pid_t, winsize, TIOCSWINSZ};
 use nix::errno::Errno;
-use nix::mount::MsFlags;
+use nix::mount::{MntFlags, MsFlags};
 use nix::sys::{stat, statfs};
 use nix::unistd::{self, Pid};
 use nix::unistd::{Gid, Uid};
@@ -55,7 +55,8 @@ use protocols::types::Interface;
 use rustjail::cgroups::notifier;
 use rustjail::cgroups::Manager;
 use rustjail::container::{
-    start_exec_process, BaseContainer, Container, LinuxContainer, EXEC_FIFO_FILENAME,
+    start_exec_process, BaseContainer, Container, LinuxContainer, ResourcePreconditionError,
+    EXEC_FIFO_FILENAME,
 };
 use rustjail::process::Process;
 use rustjail::process::ProcessOperations;
@@ -84,7 +85,7 @@ use crate::namespace::{NSTYPEIPC, NSTYPEPID, NSTYPEUTS};
 use crate::network::setup_guest_dns;
 use crate::pci;
 use crate::random;
-use crate::sandbox::Sandbox;
+use crate::sandbox::{PendingCreateActivity, Sandbox};
 use crate::time::start_time_sync_task;
 use crate::trace_rpc_call;
 use crate::tracer::extract_carrier_from_ttrpc;
@@ -122,7 +123,7 @@ macro_rules! sl {
 
 // Convenience macro to wrap an error and response to ttrpc client
 macro_rules! ttrpc_error {
-    ($code:path, $err:expr $(,)?) => {
+    ($code:expr, $err:expr $(,)?) => {
         get_rpc_status($code, format!("{:?}", $err))
     };
 }
@@ -145,9 +146,300 @@ macro_rules! is_allowed {
 #[derive(Clone, Debug)]
 pub struct AgentService {
     sandbox: Arc<Mutex<Sandbox>>,
+    create_lock: Arc<Mutex<()>>,
+}
+
+struct ActiveCreateGuard(Arc<PendingCreateActivity>);
+
+impl Drop for ActiveCreateGuard {
+    fn drop(&mut self) {
+        self.0.finish();
+    }
+}
+
+struct WorkingDirectoryGuard(PathBuf);
+
+impl Drop for WorkingDirectoryGuard {
+    fn drop(&mut self) {
+        let _ = unistd::chdir(&self.0);
+    }
+}
+
+async fn request_pending_create_cleanup<State, Lookup>(
+    state: &Arc<Mutex<State>>,
+    timeout: Option<Duration>,
+    lookup: Lookup,
+) -> Result<Option<Arc<PendingCreateActivity>>>
+where
+    Lookup: FnOnce(&State) -> Option<Arc<PendingCreateActivity>>,
+{
+    // Only hold the state lock long enough to clone the activity token.  In
+    // particular, the create path must not hold this lock while it awaits the
+    // guest process start; otherwise RemoveContainer cannot begin its timeout.
+    let activity = {
+        let state = state.lock().await;
+        lookup(&state)
+    };
+    let Some(activity) = activity else {
+        return Ok(None);
+    };
+
+    activity.request_cancel();
+    match timeout {
+        None => activity.wait_inactive().await,
+        Some(timeout) => {
+            tokio::time::timeout(timeout, activity.wait_inactive())
+                .await
+                .map_err(|_| anyhow!(nix::Error::ETIME))?;
+        }
+    }
+
+    Ok(Some(activity))
+}
+
+fn runtime_operation_error_code(error: &anyhow::Error) -> ttrpc::Code {
+    if error.downcast_ref::<ResourcePreconditionError>().is_some() {
+        ttrpc::Code::FAILED_PRECONDITION
+    } else {
+        ttrpc::Code::INTERNAL
+    }
+}
+
+fn update_container_error_code(error: &anyhow::Error) -> ttrpc::Code {
+    error
+        .downcast_ref::<rustjail::cgroups::fs::resources_v2::TransactionError>()
+        .map(|error| error.kind)
+        .filter(|kind| {
+            matches!(
+                kind,
+                rustjail::cgroups::fs::resources_v2::TransactionFailureKind::Degraded
+                    | rustjail::cgroups::fs::resources_v2::TransactionFailureKind::Recovered
+            )
+        })
+        .map(|_| ttrpc::Code::FAILED_PRECONDITION)
+        .unwrap_or(ttrpc::Code::INTERNAL)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContainerResourceOperation {
+    Start,
+    Exec,
+    Stats,
+    Signal,
+    Wait,
+    Remove,
+}
+
+impl ContainerResourceOperation {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Exec => "exec",
+            Self::Stats => "collect stats",
+            Self::Signal => "signal",
+            Self::Wait => "wait",
+            Self::Remove => "remove",
+        }
+    }
+
+    fn blocked_while_degraded(self) -> bool {
+        matches!(self, Self::Start | Self::Exec | Self::Stats)
+    }
+}
+
+fn check_container_resource_operation(
+    container: &LinuxContainer,
+    operation: ContainerResourceOperation,
+) -> Result<()> {
+    check_resource_operation_state(
+        &container.id,
+        container.resource_degraded.as_ref(),
+        operation,
+    )
+}
+
+fn check_resource_operation_state(
+    container_id: &str,
+    degraded: Option<&rustjail::container::ResourceDegraded>,
+    operation: ContainerResourceOperation,
+) -> Result<()> {
+    if operation.blocked_while_degraded() {
+        if let Some(degraded) = degraded {
+            return Err(anyhow!(ResourcePreconditionError {
+                container_id: container_id.to_string(),
+                operation: operation.name().to_string(),
+                degraded: degraded.clone(),
+            }));
+        }
+        Ok(())
+    } else {
+        Ok(())
+    }
+}
+
+fn prepare_container_resource_update<Recover>(
+    resources: &protocols::oci::LinuxResources,
+    recover: Recover,
+) -> ttrpc::Result<(oci::LinuxResources, Option<Vec<u8>>)>
+where
+    Recover:
+        FnOnce() -> std::result::Result<(), rustjail::cgroups::fs::resources_v2::TransactionError>,
+{
+    // Recovery must precede transport selection and decoding.  Otherwise a
+    // legacy request (or an invalid V2 envelope) could bypass the persisted
+    // rollback journal and mutate an already-degraded cgroup.
+    recover().map_err(|error| ttrpc_error!(ttrpc::Code::FAILED_PRECONDITION, anyhow!(error)))?;
+    rustjail::resources::resources_from_grpc(resources, false)
+        .map_err(|error| ttrpc_error!(ttrpc::Code::INVALID_ARGUMENT, error))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SerializedContainerOperation {
+    Update,
+    Remove,
+    Stats,
+}
+
+async fn lock_container_state<State>(
+    state: &Arc<Mutex<State>>,
+    _operation: SerializedContainerOperation,
+) -> tokio::sync::MutexGuard<'_, State> {
+    state.lock().await
 }
 
 impl AgentService {
+    fn new(sandbox: Arc<Mutex<Sandbox>>) -> Self {
+        Self {
+            sandbox,
+            create_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    async fn cleanup_pending_create(&self, cid: &str) -> Result<()> {
+        let sandbox = self.sandbox.clone();
+        let mut sandbox = sandbox.lock().await;
+        Self::cleanup_pending_create_locked(&mut sandbox, cid).await
+    }
+
+    async fn cleanup_pending_create_locked(sandbox: &mut Sandbox, cid: &str) -> Result<()> {
+        if !sandbox.pending_creates.contains_key(cid) {
+            return Ok(());
+        }
+        if sandbox
+            .pending_creates
+            .get(cid)
+            .expect("pending owner disappeared during cleanup")
+            .activity
+            .is_active()
+        {
+            return Err(anyhow!("container {cid} create is still active"));
+        }
+
+        let mut errors = Vec::new();
+        let container = sandbox
+            .pending_creates
+            .get(cid)
+            .and_then(|pending| pending.container.clone());
+        if let Some(container) = container {
+            let mut container = container.lock().await;
+            if let Err(error) = container.abort_create() {
+                errors.push(format!("abort container: {error:#}"));
+            } else {
+                drop(container);
+                sandbox
+                    .pending_creates
+                    .get_mut(cid)
+                    .expect("pending owner disappeared during cleanup")
+                    .container = None;
+            }
+        }
+
+        sandbox.bind_watcher.remove_container(cid).await;
+
+        let storage_refs = sandbox
+            .pending_creates
+            .get(cid)
+            .expect("pending owner disappeared during cleanup")
+            .storage_refs
+            .clone();
+        for storage in storage_refs {
+            match sandbox.cleanup_pending_storage(&storage) {
+                Ok(()) => {
+                    let pending = sandbox
+                        .pending_creates
+                        .get_mut(cid)
+                        .expect("pending owner disappeared during cleanup");
+                    if let Some(index) = pending
+                        .storage_refs
+                        .iter()
+                        .position(|value| value == &storage)
+                    {
+                        pending.storage_refs.remove(index);
+                    }
+                }
+                Err(error) => errors.push(format!("release storage {storage}: {error:#}")),
+            }
+        }
+
+        let bundle_path = sandbox
+            .pending_creates
+            .get(cid)
+            .expect("pending owner disappeared during cleanup")
+            .bundle_path
+            .clone();
+        let has_container = sandbox
+            .pending_creates
+            .get(cid)
+            .and_then(|pending| pending.container.as_ref())
+            .is_some();
+        if !has_container {
+            let rootfs_path = bundle_path.join("rootfs");
+            let rootfs_detached =
+                match nix::mount::umount2(rootfs_path.as_path(), MntFlags::MNT_DETACH) {
+                    Ok(()) | Err(Errno::EINVAL) | Err(Errno::ENOENT) => true,
+                    Err(error) => {
+                        errors.push(format!(
+                            "detach pending rootfs {}: {error}",
+                            rootfs_path.display()
+                        ));
+                        false
+                    }
+                };
+            if rootfs_detached {
+                match fs::remove_dir_all(&bundle_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => errors.push(format!(
+                        "remove pending bundle {}: {error}",
+                        bundle_path.display()
+                    )),
+                }
+            }
+            let custom_file_path = Path::new(CONTAINER_CUSTOM_FILE_BASE).join(cid);
+            match fs::remove_dir_all(&custom_file_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => errors.push(format!(
+                    "remove pending custom files {}: {error}",
+                    custom_file_path.display()
+                )),
+            }
+        }
+
+        if errors.is_empty() {
+            sandbox.pending_creates.remove(cid);
+            Ok(())
+        } else {
+            let summary = errors.join("; ");
+            sandbox
+                .pending_creates
+                .get_mut(cid)
+                .expect("pending owner disappeared during cleanup")
+                .last_cleanup_error = Some(summary.clone());
+            Err(anyhow!(summary))
+        }
+    }
+
     #[instrument]
     async fn do_create_container(
         &self,
@@ -160,8 +452,6 @@ impl AgentService {
         let mut oci_spec = req.OCI.clone();
         let use_sandbox_pidns = req.sandbox_pidns();
 
-        let sandbox;
-        let mut s;
         let mut oci = match oci_spec.as_mut() {
             Some(spec) => rustjail::grpc_to_oci(spec),
             None => {
@@ -214,105 +504,171 @@ impl AgentService {
             return Ok(());
         }
 
-        // Some devices need some extra processing (the ones invoked with
-        // --device for instance), and that's what this call is doing. It
-        // updates the devices listed in the OCI spec, so that they actually
-        // match real devices inside the VM. This step is necessary since we
-        // cannot predict everything from the caller.
-        add_devices(&req.devices.to_vec(), &mut oci, &self.sandbox).await?;
-        let duration_add_devices = start.elapsed().as_millis();
-        start = Instant::now();
-        // Both rootfs and volumes (invoked with --volume for instance) will
-        // be processed the same way. The idea is to always mount any provided
-        // storage to the specified MountPoint, so that it will match what's
-        // inside oci.Mounts.
-        // After all those storages have been processed, no matter the order
-        // here, the agent will rely on rustjail (using the oci.Mounts
-        // list) to bind mount all of them inside the container.
-        let m = add_storages(
-            sl!(),
-            req.storages.to_vec(),
-            self.sandbox.clone(),
-            Some(req.container_id.clone()),
-        )
-        .await?;
-
-        {
-            sandbox = self.sandbox.clone();
-            s = sandbox.lock().await;
-            s.container_mounts.insert(cid.clone(), m);
-        }
-
-        let duration_add_storage = start.elapsed().as_millis();
-        start = Instant::now();
-        update_container_namespaces(&s, &mut oci, use_sandbox_pidns)?;
-
-        // Add the root partition to the device cgroup to prevent access
-        update_device_cgroup(&mut oci)?;
-
-        // Append guest hooks
-        append_guest_hooks(&s, &mut oci)?;
-
-        // write spec to bundle path, hooks might
-        // read ocispec
-        let olddir = setup_bundle(&cid, &mut oci, req.custom_files.to_vec())?;
-        // restore the cwd for kata-agent process.
-        defer!(unistd::chdir(&olddir).unwrap());
-        let opts = CreateOpts {
-            cgroup_name: "".to_string(),
-            use_systemd_cgroup: false,
-            no_pivot_root: s.no_pivot_root,
-            no_new_keyring: false,
-            spec: Some(oci.clone()),
-            rootless_euid: false,
-            rootless_cgroup: false,
-            resources_v2: resources_v2_canonical.map(|canonical| ResourceV2Config {
-                version: rustjail::resources::RESOURCE_V2_VERSION,
-                canonical,
-            }),
+        let activity = {
+            let sandbox = self.sandbox.clone();
+            let mut sandbox = sandbox.lock().await;
+            sandbox.begin_pending_create(&cid, Path::new(CONTAINER_BASE).join(&cid))?
         };
-        let duration_setup_bundle = start.elapsed().as_millis();
-        start = Instant::now();
-        let mut ctr: LinuxContainer =
-            LinuxContainer::new(cid.as_str(), CONTAINER_BASE, opts, &sl!())?;
-        if ctr.config.resources_v2.is_some() {
-            ctr.apply_resources_v2_create()
-                .map_err(|error| anyhow!(error))?;
+        let active_create = ActiveCreateGuard(activity.clone());
+
+        let create_result: Result<()> = async {
+            // Some devices need some extra processing (the ones invoked with
+            // --device for instance), and that's what this call is doing. It
+            // updates the devices listed in the OCI spec, so that they actually
+            // match real devices inside the VM. This step is necessary since we
+            // cannot predict everything from the caller.
+            add_devices(&req.devices.to_vec(), &mut oci, &self.sandbox).await?;
+            activity.check_cancelled()?;
+            let duration_add_devices = start.elapsed().as_millis();
+            start = Instant::now();
+            // Both rootfs and volumes (invoked with --volume for instance) will
+            // be processed the same way. The idea is to always mount any provided
+            // storage to the specified MountPoint, so that it will match what's
+            // inside oci.Mounts.
+            add_storages(
+                sl!(),
+                req.storages.to_vec(),
+                self.sandbox.clone(),
+                Some(cid.clone()),
+            )
+            .await?;
+            activity.check_cancelled()?;
+
+            let duration_add_storage = start.elapsed().as_millis();
+            start = Instant::now();
+            let _serialized_create = self.create_lock.lock().await;
+            activity.check_cancelled()?;
+            let (container, _working_directory, initialization_error) = {
+                let sandbox = self.sandbox.clone();
+                let mut sandbox = sandbox.lock().await;
+                activity.check_cancelled()?;
+                update_container_namespaces(&sandbox, &mut oci, use_sandbox_pidns)?;
+
+                // Add the root partition to the device cgroup to prevent access.
+                update_device_cgroup(&mut oci)?;
+                append_guest_hooks(&sandbox, &mut oci)?;
+
+                let olddir = setup_bundle(&cid, &mut oci, req.custom_files.to_vec())?;
+                let working_directory = WorkingDirectoryGuard(olddir);
+                let opts = CreateOpts {
+                    cgroup_name: "".to_string(),
+                    use_systemd_cgroup: false,
+                    no_pivot_root: sandbox.no_pivot_root,
+                    no_new_keyring: false,
+                    spec: Some(oci.clone()),
+                    rootless_euid: false,
+                    rootless_cgroup: false,
+                    resources_v2: resources_v2_canonical.map(|canonical| ResourceV2Config {
+                        version: rustjail::resources::RESOURCE_V2_VERSION,
+                        canonical,
+                    }),
+                };
+                let creation = LinuxContainer::new_owned(
+                    cid.as_str(),
+                    CONTAINER_BASE,
+                    opts,
+                    &sl!(),
+                )?;
+                let initialization_error = creation.initialization_error;
+                let ctr = Arc::new(Mutex::new(creation.container));
+                sandbox
+                    .pending_creates
+                    .get_mut(&cid)
+                    .ok_or_else(|| anyhow!("container {cid} lost pending create owner"))?
+                    .container = Some(ctr.clone());
+                (ctr, working_directory, initialization_error)
+            };
+            if let Some(error) = initialization_error {
+                return Err(error.context("initialize container cgroup"));
+            }
+            let duration_setup_bundle = start.elapsed().as_millis();
+            start = Instant::now();
+            let mut ctr = container.lock().await;
+            if ctr.config.resources_v2.is_some() {
+                ctr.apply_resources_v2_create()
+                    .map_err(|error| anyhow!(error))?;
+            }
+
+            let pipe_size = AGENT_CONFIG.read().await.container_pipe_size;
+            let mut process = if let Some(process) = oci.process {
+                Process::new(&sl!(), &process, cid.as_str(), true, pipe_size)?
+            } else {
+                info!(sl!(), "no process configurations!");
+                return Err(anyhow!(nix::Error::EINVAL));
+            };
+            process.container_id = cid.clone();
+            let duration_init_container = start.elapsed().as_millis();
+            start = Instant::now();
+            process.log_forwarding = oci
+                .annotations
+                .get(ANNO_CONTAINER_LOG_FORWARDING)
+                .map(|value| value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if crate::passfd_io::has_passfd_ports(
+                req.stdin_port,
+                req.stdout_port,
+                req.stderr_port,
+            ) {
+                process.proc_io = Some(
+                    crate::passfd_io::create_process_io(
+                        req.stdin_port,
+                        req.stdout_port,
+                        req.stderr_port,
+                    )
+                    .await?,
+                );
+            }
+            activity.check_cancelled()?;
+            process.open_io(&sl!(), None).map_err(|error| anyhow!(error))?;
+            ctr.start(process).await?;
+            activity.check_cancelled()?;
+            drop(ctr);
+            drop(container);
+
+            let sandbox = self.sandbox.clone();
+            let mut sandbox = sandbox.lock().await;
+            activity.check_cancelled()?;
+            let mut pending = sandbox
+                .pending_creates
+                .remove(&cid)
+                .ok_or_else(|| anyhow!("container {cid} lost pending create owner at commit"))?;
+            let container = pending
+                .container
+                .take()
+                .ok_or_else(|| anyhow!("container {cid} lost pending container at commit"))?;
+            let ctr = match Arc::try_unwrap(container) {
+                Ok(container) => container.into_inner(),
+                Err(container) => {
+                    pending.container = Some(container);
+                    sandbox.pending_creates.insert(cid.clone(), pending);
+                    return Err(anyhow!(
+                        "container {cid} still has an active create reference at commit"
+                    ));
+                }
+            };
+            if let Err(error) = sandbox.update_shared_pidns(&ctr) {
+                pending.container = Some(Arc::new(Mutex::new(ctr)));
+                sandbox.pending_creates.insert(cid.clone(), pending);
+                return Err(error);
+            }
+            let storage_refs = crate::sandbox::take_pending_storage_refs(&mut pending);
+            sandbox.container_mounts.insert(cid.clone(), storage_refs);
+            sandbox.add_container(ctr);
+            let duration_start_container = start.elapsed().as_millis();
+            info!(sl!(), "created container!, add_devices: {}ms, add storage:{}ms, setup bundle:{}ms, init container:{}ms, start container:{}ms",
+                duration_add_devices, duration_add_storage, duration_setup_bundle, duration_init_container, duration_start_container);
+            Ok(())
+        }
+        .await;
+        drop(active_create);
+
+        if let Err(error) = create_result {
+            return match self.cleanup_pending_create(&cid).await {
+                Ok(()) => Err(anyhow!("{error:#}; cleanup=complete")),
+                Err(cleanup_error) => Err(anyhow!("{error:#}; cleanup=pending: {cleanup_error:#}")),
+            };
         }
 
-        let pipe_size = AGENT_CONFIG.read().await.container_pipe_size;
-
-        let mut p = if let Some(p) = oci.process {
-            Process::new(&sl!(), &p, cid.as_str(), true, pipe_size)?
-        } else {
-            info!(sl!(), "no process configurations!");
-            return Err(anyhow!(nix::Error::EINVAL));
-        };
-        p.container_id = cid.clone();
-        let duration_init_container = start.elapsed().as_millis();
-        start = Instant::now();
-        p.log_forwarding = oci
-            .annotations
-            .get(ANNO_CONTAINER_LOG_FORWARDING)
-            .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        if crate::passfd_io::has_passfd_ports(req.stdin_port, req.stdout_port, req.stderr_port) {
-            p.proc_io = Some(
-                crate::passfd_io::create_process_io(
-                    req.stdin_port,
-                    req.stdout_port,
-                    req.stderr_port,
-                )
-                .await?,
-            );
-        }
-        p.open_io(&sl!(), None).map_err(|e| anyhow!(e))?;
-        ctr.start(p).await?;
-        s.update_shared_pidns(&ctr)?;
-        s.add_container(ctr);
-        let duration_start_container = start.elapsed().as_millis();
-        info!(sl!(), "created container!, add_devices: {}ms, add storage:{}ms, setup bundle:{}ms, init container:{}ms, start container:{}ms",
-            duration_add_devices,  duration_add_storage, duration_setup_bundle, duration_init_container, duration_start_container);
         start_time_sync_task().await;
         Ok(())
     }
@@ -329,6 +685,7 @@ impl AgentService {
             .get_container(&cid)
             .ok_or_else(|| anyhow!("Invalid container id"))?;
 
+        check_container_resource_operation(ctr, ContainerResourceOperation::Start)?;
         ctr.exec().await?;
 
         if sid == cid {
@@ -355,23 +712,55 @@ impl AgentService {
         req: protocols::agent::RemoveContainerRequest,
     ) -> Result<()> {
         let cid = req.container_id.clone();
-        let mut cmounts: Vec<String> = vec![];
-
-        let mut remove_container_resources = |sandbox: &mut Sandbox| -> Result<()> {
-            // Find the sandbox storage used by this container
-            let mounts = sandbox.container_mounts.get(&cid);
-            if let Some(mounts) = mounts {
-                for m in mounts.iter() {
-                    if sandbox.storages.get(m).is_some() {
-                        cmounts.push(m.to_string());
+        let pending_activity = request_pending_create_cleanup(
+            &self.sandbox,
+            (req.timeout != 0).then(|| Duration::from_secs(req.timeout.into())),
+            |sandbox| {
+                sandbox
+                    .pending_creates
+                    .get(&cid)
+                    .map(|pending| pending.activity.clone())
+            },
+        )
+        .await?;
+        if let Some(activity) = pending_activity {
+            debug_assert!(!activity.is_active());
+            let sandbox = self.sandbox.clone();
+            let mut sandbox =
+                lock_container_state(&sandbox, SerializedContainerOperation::Remove).await;
+            if sandbox.pending_creates.contains_key(&cid) {
+                return Self::cleanup_pending_create_locked(&mut sandbox, &cid).await;
+            }
+            if !sandbox.containers.contains_key(&cid) {
+                return Ok(());
+            }
+        }
+        let remove_container_resources = |sandbox: &mut Sandbox| -> Result<()> {
+            let mounts = sandbox
+                .container_mounts
+                .get(&cid)
+                .cloned()
+                .unwrap_or_default();
+            let mut errors = Vec::new();
+            for mount in mounts {
+                match sandbox.cleanup_pending_storage(&mount) {
+                    Ok(()) => {
+                        if let Some(container_mounts) = sandbox.container_mounts.get_mut(&cid) {
+                            if let Some(index) =
+                                container_mounts.iter().position(|value| value == &mount)
+                            {
+                                container_mounts.remove(index);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        errors.push(format!("release container storage {mount}: {error:#}"))
                     }
                 }
             }
-
-            for m in cmounts.iter() {
-                sandbox.unset_and_remove_sandbox_storage(m)?;
+            if !errors.is_empty() {
+                return Err(anyhow!(errors.join("; ")));
             }
-
             sandbox.container_mounts.remove(cid.as_str());
             sandbox.containers.remove(cid.as_str());
             Ok(())
@@ -379,15 +768,15 @@ impl AgentService {
 
         if req.timeout == 0 {
             let s = Arc::clone(&self.sandbox);
-            let mut sandbox = s.lock().await;
+            let mut sandbox = lock_container_state(&s, SerializedContainerOperation::Remove).await;
 
             sandbox.bind_watcher.remove_container(&cid).await;
 
-            sandbox
+            let container = sandbox
                 .get_container(&cid)
-                .ok_or_else(|| anyhow!("Invalid container id"))?
-                .destroy()
-                .await?;
+                .ok_or_else(|| anyhow!("Invalid container id"))?;
+            check_container_resource_operation(container, ContainerResourceOperation::Remove)?;
+            container.destroy().await?;
 
             remove_container_resources(&mut sandbox)?;
 
@@ -396,33 +785,18 @@ impl AgentService {
 
         // timeout != 0
         let s = self.sandbox.clone();
-        let cid2 = cid.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel::<i32>();
-
-        let handle = tokio::spawn(async move {
-            let mut sandbox = s.lock().await;
-            if let Some(ctr) = sandbox.get_container(&cid2) {
-                ctr.destroy().await.unwrap();
-                sandbox.bind_watcher.remove_container(&cid2).await;
-                tx.send(1).unwrap();
-            };
-        });
-
-        if tokio::time::timeout(Duration::from_secs(req.timeout.into()), rx)
-            .await
-            .is_err()
-        {
-            return Err(anyhow!(nix::Error::ETIME));
-        }
-
-        if handle.await.is_err() {
-            return Err(anyhow!(nix::Error::UnknownErrno));
-        }
-
-        let s = self.sandbox.clone();
-        let mut sandbox = s.lock().await;
-
-        remove_container_resources(&mut sandbox)?;
+        tokio::time::timeout(Duration::from_secs(req.timeout.into()), async {
+            let mut sandbox = lock_container_state(&s, SerializedContainerOperation::Remove).await;
+            let container = sandbox
+                .get_container(&cid)
+                .ok_or_else(|| anyhow!("Invalid container id"))?;
+            check_container_resource_operation(container, ContainerResourceOperation::Remove)?;
+            container.destroy().await?;
+            sandbox.bind_watcher.remove_container(&cid).await;
+            remove_container_resources(&mut sandbox)
+        })
+        .await
+        .map_err(|_| anyhow!(nix::Error::ETIME))??;
 
         Ok(())
     }
@@ -462,6 +836,8 @@ impl AgentService {
         let ctr = sandbox
             .get_container(&cid)
             .ok_or_else(|| anyhow!("Invalid container id"))?;
+
+        check_container_resource_operation(ctr, ContainerResourceOperation::Exec)?;
 
         if req.runtime_unix_addr.is_empty() {
             p.open_io(&sl!(), None).map_err(|e| anyhow!(e))?;
@@ -514,6 +890,9 @@ impl AgentService {
         let mut sig: libc::c_int = req.signal as libc::c_int;
         {
             let mut sandbox = s.lock().await;
+            if let Some(container) = sandbox.get_container(&cid) {
+                check_container_resource_operation(container, ContainerResourceOperation::Signal)?;
+            }
             let p = sandbox.find_container_process(cid.as_str(), eid.as_str())?;
             // For container initProcess, if it hasn't installed handler for "SIGTERM" signal,
             // it will ignore the "SIGTERM" signal sent to it, thus send it "SIGKILL" signal
@@ -624,6 +1003,9 @@ impl AgentService {
         let find_start = Instant::now();
         let exit_rx = {
             let mut sandbox = s.lock().await;
+            if let Some(container) = sandbox.get_container(&cid) {
+                check_container_resource_operation(container, ContainerResourceOperation::Wait)?;
+            }
             let p = sandbox.find_container_process(cid.as_str(), eid.as_str())?;
 
             p.exit_watchers.push(exit_send.clone());
@@ -821,7 +1203,7 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
         trace_rpc_call!(ctx, "start_container", req);
         is_allowed!(req);
         match self.do_start_container(req).await {
-            Err(e) => Err(ttrpc_error!(ttrpc::Code::INTERNAL, e)),
+            Err(e) => Err(ttrpc_error!(runtime_operation_error_code(&e), e)),
             Ok(_) => Ok(Empty::new()),
         }
     }
@@ -848,7 +1230,7 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
         trace_rpc_call!(ctx, "exec_process", req);
         is_allowed!(req);
         match self.do_exec_process(req).await {
-            Err(e) => Err(ttrpc_error!(ttrpc::Code::INTERNAL, e)),
+            Err(e) => Err(ttrpc_error!(runtime_operation_error_code(&e), e)),
             Ok(_) => Ok(Empty::new()),
         }
     }
@@ -888,7 +1270,7 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
         let cid = req.container_id.clone();
         let res = req.resources;
         let s = Arc::clone(&self.sandbox);
-        let mut sandbox = s.lock().await;
+        let mut sandbox = lock_container_state(&s, SerializedContainerOperation::Update).await;
 
         let ctr = sandbox.get_container(&cid).ok_or_else(|| {
             ttrpc_error!(
@@ -901,8 +1283,7 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
 
         if let Some(res) = res.as_ref() {
             let (oci_res, resources_v2_canonical) =
-                rustjail::resources::resources_from_grpc(res, false)
-                    .map_err(|error| ttrpc_error!(ttrpc::Code::INVALID_ARGUMENT, error))?;
+                prepare_container_resource_update(res, || ctr.recover_resources_v2())?;
             let result = if resources_v2_canonical.is_some() {
                 ctr.set_resources_v2(oci_res).map_err(anyhow::Error::from)
             } else {
@@ -910,7 +1291,8 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
             };
             match result {
                 Err(e) => {
-                    return Err(ttrpc_error!(ttrpc::Code::INTERNAL, e));
+                    let code = update_container_error_code(&e);
+                    return Err(ttrpc_error!(code, e));
                 }
 
                 Ok(_) => return Ok(resp),
@@ -929,7 +1311,7 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
         is_allowed!(req);
         let cid = req.container_id;
         let s = Arc::clone(&self.sandbox);
-        let mut sandbox = s.lock().await;
+        let mut sandbox = lock_container_state(&s, SerializedContainerOperation::Stats).await;
 
         let ctr = sandbox.get_container(&cid).ok_or_else(|| {
             ttrpc_error!(
@@ -937,6 +1319,9 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
                 "invalid container id".to_string(),
             )
         })?;
+
+        check_container_resource_operation(ctr, ContainerResourceOperation::Stats)
+            .map_err(|error| ttrpc_error!(runtime_operation_error_code(&error), error))?;
 
         ctr.stats()
             .map_err(|e| ttrpc_error!(ttrpc::Code::INTERNAL, e))
@@ -1974,7 +2359,7 @@ async fn read_stream(reader: Arc<Mutex<ReadHalf<PipeStream>>>, l: usize) -> Resu
 }
 
 pub fn start(s: Arc<Mutex<Sandbox>>, server_address: &str) -> Result<TtrpcServer> {
-    let agent_worker = Arc::new(AgentService { sandbox: s });
+    let agent_worker = Arc::new(AgentService::new(s));
 
     let health_worker = Arc::new(HealthService {});
 
@@ -2491,6 +2876,221 @@ mod tests {
     }
 
     #[test]
+    fn resource_failures_map_to_retry_safe_rpc_codes() {
+        let precondition = anyhow!(ResourcePreconditionError {
+            container_id: "test".to_string(),
+            operation: "start".to_string(),
+            degraded: rustjail::container::ResourceDegraded {
+                cause: "rollback failed".to_string(),
+                rollback_error: Some("write failed".to_string()),
+                journal_path: PathBuf::from("/tmp/resources-v2.undo.json"),
+                current_values: Default::default(),
+                latest_recovery_error: None,
+            },
+        });
+        assert_eq!(
+            runtime_operation_error_code(&precondition),
+            ttrpc::Code::FAILED_PRECONDITION
+        );
+        assert_eq!(
+            runtime_operation_error_code(&anyhow!("ordinary failure")),
+            ttrpc::Code::INTERNAL
+        );
+
+        for kind in [
+            rustjail::cgroups::fs::resources_v2::TransactionFailureKind::Degraded,
+            rustjail::cgroups::fs::resources_v2::TransactionFailureKind::Recovered,
+        ] {
+            let error = anyhow!(rustjail::cgroups::fs::resources_v2::TransactionError {
+                kind,
+                cause: "test".to_string(),
+                rollback_error: None,
+                journal_path: PathBuf::from("/tmp/resources-v2.undo.json"),
+                current_values: Default::default(),
+            });
+            assert_eq!(
+                update_container_error_code(&error),
+                ttrpc::Code::FAILED_PRECONDITION
+            );
+        }
+
+        let unchanged = anyhow!(rustjail::cgroups::fs::resources_v2::TransactionError {
+            kind: rustjail::cgroups::fs::resources_v2::TransactionFailureKind::Unchanged,
+            cause: "test".to_string(),
+            rollback_error: None,
+            journal_path: PathBuf::from("/tmp/resources-v2.undo.json"),
+            current_values: Default::default(),
+        });
+        assert_eq!(
+            update_container_error_code(&unchanged),
+            ttrpc::Code::INTERNAL
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_pending_create_starts_timeout_while_create_phase_is_active() {
+        #[derive(Default)]
+        struct PendingState {
+            activity: Option<Arc<PendingCreateActivity>>,
+        }
+
+        let activity = Arc::new(PendingCreateActivity::new());
+        let state = Arc::new(Mutex::new(PendingState {
+            activity: Some(activity.clone()),
+        }));
+        let create_lock = Arc::new(Mutex::new(()));
+        let create_lock_for_task = create_lock.clone();
+        let activity_for_task = activity.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let create_phase = tokio::spawn(async move {
+            let _serialized_create = create_lock_for_task.lock().await;
+            entered_tx.send(()).unwrap();
+            let _ = release_rx.await;
+            activity_for_task.finish();
+        });
+        entered_rx.await.unwrap();
+
+        let error =
+            request_pending_create_cleanup(&state, Some(Duration::from_millis(10)), |state| {
+                state.activity.clone()
+            })
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<nix::Error>() == Some(&nix::Error::ETIME));
+        assert!(activity.check_cancelled().is_err());
+        assert!(activity.is_active());
+
+        release_tx.send(()).unwrap();
+        create_phase.await.unwrap();
+        assert!(request_pending_create_cleanup(
+            &state,
+            Some(Duration::from_millis(100)),
+            |state| state.activity.clone(),
+        )
+        .await
+        .unwrap()
+        .is_some());
+    }
+
+    #[tokio::test]
+    async fn update_remove_and_stats_share_one_serialized_state_lock() {
+        let state = Arc::new(Mutex::new(Vec::new()));
+        let mut update = lock_container_state(&state, SerializedContainerOperation::Update).await;
+        update.push(SerializedContainerOperation::Update);
+
+        let remove_state = state.clone();
+        let (remove_tx, mut remove_rx) = tokio::sync::oneshot::channel();
+        let remove = tokio::spawn(async move {
+            let mut state =
+                lock_container_state(&remove_state, SerializedContainerOperation::Remove).await;
+            state.push(SerializedContainerOperation::Remove);
+            remove_tx.send(()).unwrap();
+        });
+        let stats_state = state.clone();
+        let (stats_tx, mut stats_rx) = tokio::sync::oneshot::channel();
+        let stats = tokio::spawn(async move {
+            let mut state =
+                lock_container_state(&stats_state, SerializedContainerOperation::Stats).await;
+            state.push(SerializedContainerOperation::Stats);
+            stats_tx.send(()).unwrap();
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut remove_rx)
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut stats_rx)
+                .await
+                .is_err()
+        );
+        update.push(SerializedContainerOperation::Update);
+        drop(update);
+
+        tokio::time::timeout(Duration::from_millis(100), remove_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_millis(100), stats_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        remove.await.unwrap();
+        stats.await.unwrap();
+
+        let operations = state.lock().await;
+        assert_eq!(
+            &operations[..2],
+            &[
+                SerializedContainerOperation::Update,
+                SerializedContainerOperation::Update,
+            ]
+        );
+        assert!(operations.contains(&SerializedContainerOperation::Remove));
+        assert!(operations.contains(&SerializedContainerOperation::Stats));
+    }
+
+    #[tokio::test]
+    async fn pending_create_cleanup_is_retryable_and_exact() {
+        skip_if_no_cap!(Cap::NET_ADMIN);
+        let logger = slog::Logger::root(slog::Discard, o!());
+        let root = tempdir().unwrap();
+        let bundle = root.path().join("bundle");
+        let rootfs = bundle.join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+        let storage = root.path().join("storage");
+        fs::create_dir_all(&storage).unwrap();
+        let blocker = storage.join("still-present");
+        fs::write(&blocker, b"block cleanup").unwrap();
+
+        let mut sandbox = match Sandbox::new(&logger) {
+            Ok(sandbox) => sandbox,
+            Err(error) => {
+                eprintln!("skipping pending-create cleanup test: {error:#}");
+                return;
+            }
+        };
+        let activity = sandbox
+            .begin_pending_create("pending-test", bundle.clone())
+            .unwrap();
+        assert!(sandbox
+            .begin_pending_create("pending-test", bundle.clone())
+            .is_err());
+        assert!(sandbox.set_sandbox_storage(storage.to_str().unwrap()));
+        sandbox
+            .record_pending_storage("pending-test", storage.to_str().unwrap())
+            .unwrap();
+        activity.finish();
+        let service = AgentService::new(Arc::new(Mutex::new(sandbox)));
+
+        let first = service.cleanup_pending_create("pending-test").await;
+        assert!(first.is_err());
+        {
+            let mut sandbox = service.sandbox.lock().await;
+            let pending = sandbox.pending_creates.get("pending-test").unwrap();
+            assert_eq!(pending.storage_refs, vec![storage.display().to_string()]);
+            assert!(pending.last_cleanup_error.is_some());
+            assert!(!bundle.exists());
+            assert_eq!(sandbox.storages.get(storage.to_str().unwrap()), Some(&0));
+            assert!(sandbox
+                .acquire_sandbox_storage(storage.to_str().unwrap())
+                .is_err());
+        }
+
+        fs::remove_file(blocker).unwrap();
+        service
+            .cleanup_pending_create("pending-test")
+            .await
+            .unwrap();
+        let sandbox = service.sandbox.lock().await;
+        assert!(!sandbox.pending_creates.contains_key("pending-test"));
+        assert!(!sandbox.storages.contains_key(storage.to_str().unwrap()));
+        assert!(!storage.exists());
+    }
+
+    #[test]
     fn requested_rootfs_read_only_preserves_oci_intent() {
         let mut spec = Spec::default();
         spec.root = Some(Root {
@@ -2562,6 +3162,99 @@ mod tests {
         )
     }
 
+    fn assert_rpc_code(error: ttrpc::Error, expected: ttrpc::Code) {
+        match error {
+            ttrpc::Error::RpcStatus(status) => assert_eq!(status.code(), expected),
+            other => panic!("expected RPC status {expected:?}, got {other:?}"),
+        }
+    }
+
+    fn test_resource_degraded() -> rustjail::container::ResourceDegraded {
+        rustjail::container::ResourceDegraded {
+            cause: "injected rollback failure".to_string(),
+            rollback_error: Some("restore cpu.max".to_string()),
+            journal_path: PathBuf::from("/tmp/resources-v2.undo.json"),
+            current_values: Default::default(),
+            latest_recovery_error: None,
+        }
+    }
+
+    fn recovered_transaction_error() -> rustjail::cgroups::fs::resources_v2::TransactionError {
+        rustjail::cgroups::fs::resources_v2::TransactionError {
+            kind: rustjail::cgroups::fs::resources_v2::TransactionFailureKind::Recovered,
+            cause: "previous transaction recovered".to_string(),
+            rollback_error: None,
+            journal_path: PathBuf::from("/tmp/resources-v2.undo.json"),
+            current_values: Default::default(),
+        }
+    }
+
+    #[test]
+    fn degraded_operation_policy_blocks_new_work_but_allows_cleanup() {
+        let degraded = test_resource_degraded();
+
+        for operation in [
+            ContainerResourceOperation::Start,
+            ContainerResourceOperation::Exec,
+            ContainerResourceOperation::Stats,
+        ] {
+            let error =
+                check_resource_operation_state("test", Some(&degraded), operation).unwrap_err();
+            assert_eq!(
+                runtime_operation_error_code(&error),
+                ttrpc::Code::FAILED_PRECONDITION,
+                "{operation:?} must fail closed"
+            );
+            assert_eq!(
+                error
+                    .downcast_ref::<ResourcePreconditionError>()
+                    .unwrap()
+                    .operation,
+                operation.name()
+            );
+        }
+
+        for operation in [
+            ContainerResourceOperation::Signal,
+            ContainerResourceOperation::Wait,
+            ContainerResourceOperation::Remove,
+        ] {
+            check_resource_operation_state("test", Some(&degraded), operation)
+                .unwrap_or_else(|error| panic!("{operation:?} must remain available: {error:#}"));
+        }
+    }
+
+    #[test]
+    fn resource_update_invokes_recovery_before_legacy_or_v2_decode() {
+        let legacy = protocols::oci::LinuxResources::default();
+        let invalid_v2 = protocols::oci::LinuxResources {
+            ResourceV2: MessageField::some(protocols::oci::LinuxResourcesV2 {
+                Version: rustjail::resources::RESOURCE_V2_VERSION + 1,
+                MediaType: rustjail::resources::RESOURCE_V2_MEDIA_TYPE.to_string(),
+                Value: b"{}".to_vec(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        for resources in [&legacy, &invalid_v2] {
+            let recovery_called = std::cell::Cell::new(false);
+            let error = prepare_container_resource_update(resources, || {
+                recovery_called.set(true);
+                Err(recovered_transaction_error())
+            })
+            .unwrap_err();
+            assert_rpc_code(error, ttrpc::Code::FAILED_PRECONDITION);
+            assert!(recovery_called.get());
+        }
+
+        // Once the caller retries after recovery, normal transport validation
+        // resumes and the invalid V2 version is reported as an argument error.
+        let error = prepare_container_resource_update(&invalid_v2, || Ok(())).unwrap_err();
+        assert_rpc_code(error, ttrpc::Code::INVALID_ARGUMENT);
+        assert!(prepare_container_resource_update(&legacy, || Ok(())).is_ok());
+    }
+
     #[tokio::test]
     async fn test_append_guest_hooks() {
         let logger = slog::Logger::root(slog::Discard, o!());
@@ -2585,9 +3278,7 @@ mod tests {
         let logger = slog::Logger::root(slog::Discard, o!());
         let sandbox = Sandbox::new(&logger).unwrap();
 
-        let agent_service = Box::new(AgentService {
-            sandbox: Arc::new(Mutex::new(sandbox)),
-        });
+        let agent_service = Box::new(AgentService::new(Arc::new(Mutex::new(sandbox))));
 
         let req = protocols::agent::UpdateInterfaceRequest::default();
         let ctx = mk_ttrpc_context();
@@ -2602,9 +3293,7 @@ mod tests {
         let logger = slog::Logger::root(slog::Discard, o!());
         let sandbox = Sandbox::new(&logger).unwrap();
 
-        let agent_service = Box::new(AgentService {
-            sandbox: Arc::new(Mutex::new(sandbox)),
-        });
+        let agent_service = Box::new(AgentService::new(Arc::new(Mutex::new(sandbox))));
 
         let req = protocols::agent::UpdateRoutesRequest::default();
         let ctx = mk_ttrpc_context();
@@ -2619,9 +3308,7 @@ mod tests {
         let logger = slog::Logger::root(slog::Discard, o!());
         let sandbox = Sandbox::new(&logger).unwrap();
 
-        let agent_service = Box::new(AgentService {
-            sandbox: Arc::new(Mutex::new(sandbox)),
-        });
+        let agent_service = Box::new(AgentService::new(Arc::new(Mutex::new(sandbox))));
 
         let req = protocols::agent::AddARPNeighborsRequest::default();
         let ctx = mk_ttrpc_context();
@@ -2765,9 +3452,7 @@ mod tests {
                 sandbox.add_container(linux_container);
             }
 
-            let agent_service = Box::new(AgentService {
-                sandbox: Arc::new(Mutex::new(sandbox)),
-            });
+            let agent_service = Box::new(AgentService::new(Arc::new(Mutex::new(sandbox))));
 
             let result = agent_service
                 .do_write_stream(protocols::agent::WriteStreamRequest {
@@ -3229,9 +3914,7 @@ OtherField:other
 
         let logger = slog::Logger::root(slog::Discard, o!());
         let sandbox = Sandbox::new(&logger).unwrap();
-        let agent_service = Box::new(AgentService {
-            sandbox: Arc::new(Mutex::new(sandbox)),
-        });
+        let agent_service = Box::new(AgentService::new(Arc::new(Mutex::new(sandbox))));
 
         let ctx = mk_ttrpc_context();
 

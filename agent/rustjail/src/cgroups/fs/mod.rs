@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use crate::cgroups::{Manager as CgroupManager, RESOURCE_METRICS_VERSION_V1};
+use crate::cgroups::{Manager as CgroupManager, ManagerCreateOutcome, RESOURCE_METRICS_VERSION_V1};
 use crate::container::DEFAULT_DEVICES;
 use anyhow::{anyhow, Context, Result};
 use cgroups::blkio::{BlkIoController, BlkIoData, IoService};
@@ -225,8 +225,7 @@ impl CgroupManager for Manager {
             return remove_cgroup_tree(&self.cpath);
         }
 
-        let _ = self.cgroup.delete();
-        Ok(())
+        self.cgroup.delete().context("delete cgroup v1")
     }
 
     fn get_pids(&self) -> Result<Vec<pid_t>> {
@@ -254,6 +253,41 @@ const REQUIRED_DELEGATED_CONTROLLERS: [&str; 3] = ["cpu", "memory", "pids"];
 
 pub fn process_cgroup_path(cpath: &str) -> String {
     format!("{}/{}", cpath.trim_end_matches('/'), PROCESS_CGROUP_NAME)
+}
+
+pub fn process_cgroup_procs_path(cpath: &str) -> Result<PathBuf> {
+    Ok(cgroup_filesystem_path(&process_cgroup_path(cpath))?.join("cgroup.procs"))
+}
+
+pub fn early_process_attach_paths_for_layout(
+    cgroup_v2: bool,
+    cpath: &str,
+    actual_controller_paths: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    if cgroup_v2 {
+        return Ok(vec![process_cgroup_procs_path(cpath)?]);
+    }
+
+    let mut targets = BTreeSet::new();
+    for path in actual_controller_paths {
+        if !path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            })
+        {
+            return Err(anyhow!("invalid cgroup v1 controller path {path:?}"));
+        }
+        targets.insert(path.join("tasks"));
+    }
+    if targets.is_empty() {
+        return Err(anyhow!(
+            "cgroup v1 has no controller paths for early process attach"
+        ));
+    }
+    Ok(targets.into_iter().collect())
 }
 
 pub fn cgroup_filesystem_path(cpath: &str) -> Result<PathBuf> {
@@ -1365,7 +1399,38 @@ fn new_cgroup(h: Box<dyn cgroups::Hierarchy>, path: &str) -> Result<Cgroup> {
 }
 
 impl Manager {
+    pub fn early_process_attach_paths(&self) -> Result<Vec<PathBuf>> {
+        let actual_controller_paths = self
+            .cgroup
+            .subsystems()
+            .iter()
+            .filter_map(|subsystem| {
+                let controller = subsystem.to_controller();
+                controller.exists().then(|| controller.path().to_path_buf())
+            })
+            .collect::<Vec<_>>();
+        early_process_attach_paths_for_layout(
+            self.cgroup.v2(),
+            &self.cpath,
+            &actual_controller_paths,
+        )
+    }
+
     pub fn new(cpath: &str) -> Result<Self> {
+        let outcome = Self::new_owned(cpath)?;
+        if let Some(initialization_error) = outcome.initialization_error {
+            let mut manager = outcome.manager;
+            return match manager.destroy() {
+                Ok(()) => Err(initialization_error),
+                Err(cleanup_error) => Err(anyhow!(
+                    "{initialization_error:#}; cleanup partially created cgroup: {cleanup_error:#}"
+                )),
+            };
+        }
+        Ok(outcome.manager)
+    }
+
+    pub fn new_owned(cpath: &str) -> Result<ManagerCreateOutcome<Self>> {
         let cgroup_path = cgroup_filesystem_path(cpath)?;
         let mut m = HashMap::new();
         let paths = get_paths()?;
@@ -1383,34 +1448,38 @@ impl Manager {
             m.insert(key.to_string(), p);
         }
         let cgroup = new_cgroup(cgroups::hierarchies::auto(), cpath)?;
+        let mut initialization_error = None;
         let process_cgroup = if cgroup.v2() {
             let process_path = process_cgroup_path(cpath);
             match new_cgroup(cgroups::hierarchies::auto(), &process_path) {
                 Ok(process_cgroup) => {
                     if let Err(error) = verify_delegated_controllers_at(&cgroup_path) {
-                        let _ = process_cgroup.delete();
-                        let _ = cgroup.delete();
-                        return Err(error).context("verify runtime cgroup delegation");
+                        initialization_error =
+                            Some(error.context("verify runtime cgroup delegation"));
                     }
                     Some(process_cgroup)
                 }
                 Err(error) => {
-                    let _ = cgroup.delete();
-                    return Err(error)
-                        .with_context(|| format!("create runtime process cgroup {process_path}"));
+                    initialization_error = Some(
+                        error.context(format!("create runtime process cgroup {process_path}")),
+                    );
+                    None
                 }
             }
         } else {
             None
         };
 
-        Ok(Self {
-            paths: m,
-            mounts,
-            // rels: paths,
-            cpath: cpath.to_string(),
-            cgroup,
-            process_cgroup,
+        Ok(ManagerCreateOutcome {
+            manager: Self {
+                paths: m,
+                mounts,
+                // rels: paths,
+                cpath: cpath.to_string(),
+                cgroup,
+                process_cgroup,
+            },
+            initialization_error,
         })
     }
 
@@ -1426,6 +1495,7 @@ impl Manager {
                 cause: "resources-v2 requires a unified cgroup v2 hierarchy".to_string(),
                 rollback_error: None,
                 journal_path: journal_path.to_path_buf(),
+                current_values: Default::default(),
             });
         }
         let root = match cgroup_filesystem_path(&self.cpath) {
@@ -1436,10 +1506,18 @@ impl Manager {
                     cause: format!("resolve cgroup v2 path: {error:#}"),
                     rollback_error: None,
                     journal_path: journal_path.to_path_buf(),
+                    current_values: Default::default(),
                 })
             }
         };
         resources_v2::apply(&root, journal_path, resources, update)
+    }
+
+    pub fn replay_resources_v2(
+        &self,
+        journal_path: &Path,
+    ) -> std::result::Result<(), resources_v2::TransactionError> {
+        resources_v2::replay(journal_path)
     }
 
     pub fn set_resources_v2_create(
@@ -1453,6 +1531,7 @@ impl Manager {
                 cause: "resources-v2 requires a unified cgroup v2 hierarchy".to_string(),
                 rollback_error: None,
                 journal_path: journal_path.to_path_buf(),
+                current_values: Default::default(),
             });
         }
         let root = cgroup_filesystem_path(&self.cpath).map_err(|error| {
@@ -1461,6 +1540,7 @@ impl Manager {
                 cause: format!("resolve cgroup v2 path: {error:#}"),
                 rollback_error: None,
                 journal_path: journal_path.to_path_buf(),
+                current_values: Default::default(),
             }
         })?;
         resources_v2::preflight(&root, journal_path, resources, false)?;
@@ -1480,6 +1560,7 @@ impl Manager {
                 cause: format!("attach resources-v2 device policy: {error:#}"),
                 rollback_error: None,
                 journal_path: journal_path.to_path_buf(),
+                current_values: Default::default(),
             }
         })?;
 
@@ -1676,6 +1757,79 @@ mod tests {
             process_cgroup_path("default/container/"),
             "default/container/runtime"
         );
+        assert_eq!(
+            process_cgroup_procs_path("/default/container").unwrap(),
+            PathBuf::from("/sys/fs/cgroup/default/container/runtime/cgroup.procs")
+        );
+    }
+
+    #[test]
+    fn early_process_attach_paths_cover_v2_leaf_and_v1_controllers() {
+        let actual_controller_paths = vec![
+            PathBuf::from("/sys/fs/cgroup/cpu/pod/container"),
+            PathBuf::from("/sys/fs/cgroup/cpu/pod/container"),
+            PathBuf::from("/sys/fs/cgroup/memory/pod/container"),
+        ];
+
+        assert_eq!(
+            early_process_attach_paths_for_layout(
+                true,
+                "/pod/container",
+                &actual_controller_paths,
+            )
+            .unwrap(),
+            vec![PathBuf::from(
+                "/sys/fs/cgroup/pod/container/runtime/cgroup.procs"
+            )]
+        );
+        assert_eq!(
+            early_process_attach_paths_for_layout(
+                false,
+                "/pod/container",
+                &actual_controller_paths,
+            )
+            .unwrap(),
+            vec![
+                PathBuf::from("/sys/fs/cgroup/cpu/pod/container/tasks"),
+                PathBuf::from("/sys/fs/cgroup/memory/pod/container/tasks"),
+            ]
+        );
+        assert!(early_process_attach_paths_for_layout(
+            false,
+            "/pod/container",
+            &[PathBuf::from("relative/path")],
+        )
+        .is_err());
+        assert!(early_process_attach_paths_for_layout(false, "/pod/container", &[]).is_err());
+    }
+
+    #[test]
+    fn v1_early_attach_ignores_discovered_but_unowned_custom_controllers() {
+        let discovered_paths = HashMap::from([
+            (
+                "cpu".to_string(),
+                "/sys/fs/cgroup/cpu/pod/container".to_string(),
+            ),
+            (
+                "oom".to_string(),
+                "/sys/fs/cgroup/oom/pod/container".to_string(),
+            ),
+        ]);
+        let actual_controller_paths = vec![PathBuf::from(discovered_paths.get("cpu").unwrap())];
+
+        let targets = early_process_attach_paths_for_layout(
+            false,
+            "/pod/container",
+            &actual_controller_paths,
+        )
+        .unwrap();
+        assert_eq!(
+            targets,
+            vec![PathBuf::from("/sys/fs/cgroup/cpu/pod/container/tasks")]
+        );
+        assert!(!targets
+            .iter()
+            .any(|path| path.to_string_lossy().contains("oom")));
     }
 
     #[test]

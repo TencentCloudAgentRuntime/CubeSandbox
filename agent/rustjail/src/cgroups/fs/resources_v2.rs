@@ -18,6 +18,7 @@ pub enum TransactionFailureKind {
     Unchanged,
     RolledBack,
     Degraded,
+    Recovered,
 }
 
 #[derive(Debug)]
@@ -26,6 +27,7 @@ pub struct TransactionError {
     pub cause: String,
     pub rollback_error: Option<String>,
     pub journal_path: PathBuf,
+    pub current_values: BTreeMap<PathBuf, String>,
 }
 
 impl fmt::Display for TransactionError {
@@ -34,11 +36,21 @@ impl fmt::Display for TransactionError {
         match self.kind {
             TransactionFailureKind::Unchanged => write!(formatter, "; no controller changed"),
             TransactionFailureKind::RolledBack => write!(formatter, "; rollback complete"),
-            TransactionFailureKind::Degraded => write!(
+            TransactionFailureKind::Degraded => {
+                write!(
+                    formatter,
+                    "; rollback incomplete: {} (journal: {})",
+                    self.rollback_error.as_deref().unwrap_or("unknown error"),
+                    self.journal_path.display()
+                )?;
+                if !self.current_values.is_empty() {
+                    write!(formatter, "; current values: {:?}", self.current_values)?;
+                }
+                Ok(())
+            }
+            TransactionFailureKind::Recovered => write!(
                 formatter,
-                "; rollback incomplete: {} (journal: {})",
-                self.rollback_error.as_deref().unwrap_or("unknown error"),
-                self.journal_path.display()
+                "; previous rollback replayed; retry the requested update"
             ),
         }
     }
@@ -156,7 +168,23 @@ fn failure(
         cause: cause.to_string(),
         rollback_error: None,
         journal_path: journal.to_path_buf(),
+        current_values: BTreeMap::new(),
     }
+}
+
+fn capture_current_values<I: ResourceIo>(
+    io: &I,
+    entries: &[UndoEntry],
+) -> BTreeMap<PathBuf, String> {
+    entries
+        .iter()
+        .map(|entry| {
+            let value = io
+                .read(&entry.path)
+                .unwrap_or_else(|error| format!("<read-error: {error:#}>"));
+            (entry.path.clone(), value)
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -257,11 +285,15 @@ pub fn cpu_shares_to_weight(shares: u64) -> u64 {
     if shares == 0 {
         return 0;
     }
-    if shares == 1 {
+    if shares <= 2 {
         return 1;
     }
-    let shares = shares.min(262_144);
-    1 + ((shares - 2) * 9_999) / 262_142
+    if shares >= 262_144 {
+        return 10_000;
+    }
+    let logarithm = (shares as f64).log2();
+    let exponent = (logarithm * logarithm + 125.0 * logarithm) / 612.0 - 7.0 / 34.0;
+    10_f64.powf(exponent).ceil() as u64
 }
 
 fn parse_cpu_max(value: &str) -> Result<(String, u64)> {
@@ -677,11 +709,13 @@ fn apply_with_io<I: ResourceIo>(
     match result {
         Ok(()) => {
             if let Err(error) = io.remove_journal(journal_path) {
-                return Err(failure(
+                let mut transaction_error = failure(
                     TransactionFailureKind::Degraded,
                     format!("commit succeeded but journal cleanup failed: {error:#}"),
                     journal_path,
-                ));
+                );
+                transaction_error.current_values = capture_current_values(io, &entries);
+                return Err(transaction_error);
             }
             Ok(())
         }
@@ -695,6 +729,8 @@ fn apply_with_io<I: ResourceIo>(
                         transaction_error.rollback_error = Some(format!(
                             "rollback succeeded but journal cleanup failed: {remove_error:#}"
                         ));
+                        transaction_error.current_values =
+                            capture_current_values(io, &entries[..touched]);
                         return Err(transaction_error);
                     }
                     Err(failure(
@@ -707,6 +743,8 @@ fn apply_with_io<I: ResourceIo>(
                     let mut transaction_error =
                         failure(TransactionFailureKind::Degraded, cause, journal_path);
                     transaction_error.rollback_error = Some(format!("{rollback_error:#}"));
+                    transaction_error.current_values =
+                        capture_current_values(io, &entries[..touched]);
                     Err(transaction_error)
                 }
             }
@@ -779,14 +817,17 @@ fn replay_with_io<I: ResourceIo>(
             journal_path,
         );
         transaction_error.rollback_error = Some(format!("{error:#}"));
+        transaction_error.current_values = capture_current_values(io, &journal.entries);
         transaction_error
     })?;
     io.remove_journal(journal_path).map_err(|error| {
-        failure(
+        let mut transaction_error = failure(
             TransactionFailureKind::Degraded,
             format!("remove replayed undo journal: {error:#}"),
             journal_path,
-        )
+        );
+        transaction_error.current_values = capture_current_values(io, &journal.entries);
+        transaction_error
     })
 }
 
@@ -945,11 +986,11 @@ mod tests {
             (0, 0),
             (1, 1),
             (2, 1),
-            (51, 2),
-            (102, 4),
-            (204, 8),
-            (512, 20),
-            (1024, 39),
+            (51, 11),
+            (102, 17),
+            (204, 29),
+            (512, 59),
+            (1024, 100),
             (262_144, 10_000),
             (262_145, 10_000),
         ];
@@ -1296,6 +1337,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind, TransactionFailureKind::Degraded);
+        assert_eq!(
+            error.current_values[Path::new("/cg/x/cpu.weight")],
+            "corrupt"
+        );
         assert!(io.journal.borrow().is_some());
 
         *io.corrupt_readback.borrow_mut() = None;

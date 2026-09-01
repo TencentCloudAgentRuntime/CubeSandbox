@@ -53,6 +53,12 @@ fn set_log_pipe_size(fd: RawFd, requested: i32, logger: &Logger, label: &str) {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PipeFdConfig {
+    InheritAcrossExec,
+    Nonblocking,
+}
+
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum StreamType {
     Stdin,
@@ -221,6 +227,55 @@ impl Process {
         logger: &Logger,
         target: Option<&String>,
     ) -> result::Result<(), String> {
+        self.open_io_with(
+            logger,
+            target,
+            |name| {
+                unistd::pipe2(OFlag::O_CLOEXEC)
+                    .map_err(|error| format!("create {name} pipe failed: {error:?}"))
+            },
+            |fd, config, name| match config {
+                PipeFdConfig::InheritAcrossExec => {
+                    fcntl::fcntl(fd, FcntlArg::F_SETFD(FdFlag::empty()))
+                        .map(drop)
+                        .map_err(|error| format!("set {name} fd flag failed: {error:?}"))
+                }
+                PipeFdConfig::Nonblocking => fcntl::fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
+                    .map(drop)
+                    .map_err(|error| format!("set {name} nonblock failed: {error:?}")),
+            },
+        )
+    }
+
+    fn open_io_with<OpenPipe, Configure>(
+        &mut self,
+        logger: &Logger,
+        target: Option<&String>,
+        mut open_pipe: OpenPipe,
+        mut configure: Configure,
+    ) -> result::Result<(), String>
+    where
+        OpenPipe: FnMut(&str) -> result::Result<(RawFd, RawFd), String>,
+        Configure: FnMut(RawFd, PipeFdConfig, &str) -> result::Result<(), String>,
+    {
+        let result = self.open_io_inner(logger, target, &mut open_pipe, &mut configure);
+        if result.is_err() {
+            self.cleanup_process_stream();
+        }
+        result
+    }
+
+    fn open_io_inner<OpenPipe, Configure>(
+        &mut self,
+        logger: &Logger,
+        target: Option<&String>,
+        open_pipe: &mut OpenPipe,
+        configure: &mut Configure,
+    ) -> result::Result<(), String>
+    where
+        OpenPipe: FnMut(&str) -> result::Result<(RawFd, RawFd), String>,
+        Configure: FnMut(RawFd, PipeFdConfig, &str) -> result::Result<(), String>,
+    {
         if self.tty {
             debug!(logger, "tty is true");
             let pseudo = pty::openpty(None, None).map_err(|e| format!("openpty failed:{:?}", e))?;
@@ -269,13 +324,11 @@ impl Process {
 
             for (enabled, child_fd, parent_fd, name, is_stdin) in io_configs {
                 if enabled {
-                    let (r, w) = unistd::pipe2(OFlag::O_CLOEXEC)
-                        .map_err(|e| format!("create {} pipe failed: {:?}", name, e))?;
+                    let (r, w) = open_pipe(name)?;
                     let (child, parent) = if is_stdin { (r, w) } else { (w, r) };
-                    fcntl::fcntl(child, FcntlArg::F_SETFD(FdFlag::empty()))
-                        .map_err(|e| format!("set {} fd flag failed: {:?}", name, e))?;
                     *child_fd = Some(child);
                     *parent_fd = Some(parent);
+                    configure(child, PipeFdConfig::InheritAcrossExec, name)?;
                 }
             }
 
@@ -313,28 +366,20 @@ impl Process {
         // so no clamping occurs.
         const LOG_PIPE_SIZE: i32 = 1024 * 1024; // 1 MiB
 
-        let (parent_stdout_r, child_stdout_w) = unistd::pipe2(OFlag::O_CLOEXEC)
-            .map_err(|e| format!("create stdout pipe failed: {:?}", e))?;
+        let (parent_stdout_r, child_stdout_w) = open_pipe("stdout")?;
+        self.stdout = Some(child_stdout_w);
+        self.parent_stdout = Some(parent_stdout_r);
         set_log_pipe_size(child_stdout_w, LOG_PIPE_SIZE, logger, "stdout");
         // Clear O_CLOEXEC on the write end so the container inherits it.
-        fcntl::fcntl(child_stdout_w, FcntlArg::F_SETFD(FdFlag::empty()))
-            .map_err(|e| format!("set stdout fd flag failed: {:?}", e))?;
-        fcntl::fcntl(child_stdout_w, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
-            .map_err(|e| format!("set stdout nonblock failed: {:?}", e))?;
+        configure(child_stdout_w, PipeFdConfig::InheritAcrossExec, "stdout")?;
+        configure(child_stdout_w, PipeFdConfig::Nonblocking, "stdout")?;
 
-        let (parent_stderr_r, child_stderr_w) = match unistd::pipe2(OFlag::O_CLOEXEC) {
-            Ok(fds) => fds,
-            Err(e) => {
-                let _ = unistd::close(parent_stdout_r);
-                let _ = unistd::close(child_stdout_w);
-                return Err(format!("create stderr pipe failed: {:?}", e));
-            }
-        };
+        let (parent_stderr_r, child_stderr_w) = open_pipe("stderr")?;
+        self.stderr = Some(child_stderr_w);
+        self.parent_stderr = Some(parent_stderr_r);
         set_log_pipe_size(child_stderr_w, LOG_PIPE_SIZE, logger, "stderr");
-        fcntl::fcntl(child_stderr_w, FcntlArg::F_SETFD(FdFlag::empty()))
-            .map_err(|e| format!("set stderr fd flag failed: {:?}", e))?;
-        fcntl::fcntl(child_stderr_w, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
-            .map_err(|e| format!("set stderr nonblock failed: {:?}", e))?;
+        configure(child_stderr_w, PipeFdConfig::InheritAcrossExec, "stderr")?;
+        configure(child_stderr_w, PipeFdConfig::Nonblocking, "stderr")?;
 
         debug!(
             logger,
@@ -345,11 +390,6 @@ impl Process {
             child_stderr_w,
             parent_stderr_r,
         );
-
-        self.stdout = Some(child_stdout_w);
-        self.stderr = Some(child_stderr_w);
-        self.parent_stdout = Some(parent_stdout_r);
-        self.parent_stderr = Some(parent_stderr_r);
 
         Ok(())
     }
@@ -615,23 +655,31 @@ impl Process {
     pub fn cleanup_process_stream(&mut self) {
         self.abort_passfd_tasks();
 
-        // In passfd mode, drop VsockStreams and close the agent-owned process fds.
-        // Copy tasks use dup'd fds, so closing these originals here is safe.
-        if let Some(proc_io) = self.proc_io.take() {
-            drop(proc_io);
-            close_process_stream!(self, parent_stdin, ParentStdin);
-            close_process_stream!(self, parent_stdout, ParentStdout);
-            close_process_stream!(self, parent_stderr, ParentStderr);
-            close_process_stream!(self, term_master, TermMaster);
-            return;
+        // A Process owns every raw descriptor stored in these fields until it
+        // explicitly transfers or closes it.  This also covers failures before
+        // start() reaches close_inherited_write_ends().
+        self.proc_io.take();
+        let mut fds = Vec::new();
+        for (fd, stream_type) in [
+            (self.stdin.take(), StreamType::Stdin),
+            (self.stdout.take(), StreamType::Stdout),
+            (self.stderr.take(), StreamType::Stderr),
+            (self.term_master.take(), StreamType::TermMaster),
+            (self.term_slave.take(), StreamType::Stdin),
+            (self.parent_stdin.take(), StreamType::ParentStdin),
+            (self.parent_stdout.take(), StreamType::ParentStdout),
+            (self.parent_stderr.take(), StreamType::ParentStderr),
+        ] {
+            self.close_stream(stream_type);
+            if let Some(fd) = fd {
+                if !fds.contains(&fd) {
+                    fds.push(fd);
+                }
+            }
         }
-
-        // legacy io mode
-        close_process_stream!(self, parent_stdin, ParentStdin);
-        close_process_stream!(self, parent_stdout, ParentStdout);
-        close_process_stream!(self, parent_stderr, ParentStderr);
-        close_process_stream!(self, term_master, TermMaster);
-        self.close_inherited_write_ends();
+        for fd in fds {
+            let _ = unistd::close(fd);
+        }
 
         self.notify_term_close();
     }
@@ -650,7 +698,9 @@ impl Process {
 
     fn get_stream_and_store(&mut self, stream_type: StreamType) -> Option<(Reader, Writer)> {
         let fd = self.get_fd(&stream_type)?;
-        let stream = PipeStream::from_fd(fd);
+        // Process retains and closes the raw field. Async stream halves own a
+        // duplicate so external clones cannot later close a reused fd number.
+        let stream = PipeStream::from_fd(unistd::dup(fd).ok()?);
 
         let (reader, writer) = split(stream);
         let reader = Arc::new(Mutex::new(reader));
@@ -686,6 +736,12 @@ impl Process {
     }
 }
 
+impl Drop for Process {
+    fn drop(&mut self) {
+        self.cleanup_process_stream();
+    }
+}
+
 /*
 fn create_extended_pipe(flags: OFlag, pipe_size: i32) -> Result<(RawFd, RawFd)> {
     let (r, w) = unistd::pipe2(flags)?;
@@ -717,6 +773,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::fs;
     use std::os::unix::io::AsRawFd;
 
     use super::*;
@@ -781,5 +839,132 @@ mod tests {
         assert!(process.parent_stdin.is_none());
         assert!(process.parent_stdout.is_none());
         assert!(process.parent_stderr.is_none());
+    }
+
+    fn assert_pipe_writer_closed(observer: RawFd) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            let mut byte = [0u8; 1];
+            match unistd::read(observer, &mut byte) {
+                Ok(0) => return,
+                Err(Errno::EAGAIN) | Err(Errno::EINTR) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                result => panic!("process-owned pipe writer remained open: {result:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn dropping_process_closes_every_owned_raw_fd() {
+        let logger = Logger::root(slog::Discard, o!("source" => "unit-test"));
+        let mut process =
+            Process::new(&logger, &OCIProcess::default(), "drop-owner", true, 32).unwrap();
+        let pairs = (0..8)
+            .map(|_| unistd::pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).unwrap())
+            .collect::<Vec<_>>();
+        let observers = pairs.iter().map(|pair| pair.0).collect::<Vec<_>>();
+        process.stdin = Some(pairs[0].1);
+        process.stdout = Some(pairs[1].1);
+        process.stderr = Some(pairs[2].1);
+        process.term_master = Some(pairs[3].1);
+        process.term_slave = Some(pairs[4].1);
+        process.parent_stdin = Some(pairs[5].1);
+        process.parent_stdout = Some(pairs[6].1);
+        process.parent_stderr = Some(pairs[7].1);
+
+        drop(process);
+
+        for observer in observers {
+            assert_pipe_writer_closed(observer);
+            let _ = unistd::close(observer);
+        }
+    }
+
+    #[test]
+    fn explicit_process_stream_cleanup_then_drop_is_idempotent() {
+        let logger = Logger::root(slog::Discard, o!("source" => "unit-test"));
+        let mut process =
+            Process::new(&logger, &OCIProcess::default(), "wait-owner", true, 32).unwrap();
+        let first = unistd::pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).unwrap();
+        let second = unistd::pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).unwrap();
+        process.parent_stdout = Some(first.1);
+        process.stdout = Some(second.1);
+
+        process.cleanup_process_stream();
+        process.cleanup_process_stream();
+        drop(process);
+
+        assert_pipe_writer_closed(first.0);
+        assert_pipe_writer_closed(second.0);
+        let _ = unistd::close(first.0);
+        let _ = unistd::close(second.0);
+    }
+
+    #[test]
+    fn open_io_fcntl_failure_closes_every_registered_pipe_fd() {
+        let logger = Logger::root(slog::Discard, o!("source" => "unit-test"));
+        let mut process =
+            Process::new(&logger, &OCIProcess::default(), "open-io-fail", true, 32).unwrap();
+        process.log_forwarding = true;
+        let stdout_pair = unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
+        let stderr_pair = unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
+        let all_fds = [stdout_pair.0, stdout_pair.1, stderr_pair.0, stderr_pair.1];
+        let identities = all_fds.map(|fd| fs::read_link(format!("/proc/self/fd/{fd}")).unwrap());
+        let mut pairs = VecDeque::from([stdout_pair, stderr_pair]);
+        let mut configure_calls = 0;
+
+        let error = process
+            .open_io_with(
+                &logger,
+                None,
+                |_| Ok(pairs.pop_front().unwrap()),
+                |_, _, _| {
+                    configure_calls += 1;
+                    if configure_calls == 3 {
+                        Err("injected stderr fcntl failure".to_string())
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.contains("injected stderr fcntl failure"));
+        assert!(process.stdin.is_none());
+        assert!(process.stdout.is_none());
+        assert!(process.stderr.is_none());
+        assert!(process.parent_stdin.is_none());
+        assert!(process.parent_stdout.is_none());
+        assert!(process.parent_stderr.is_none());
+        for (fd, identity) in all_fds.into_iter().zip(identities) {
+            assert_ne!(
+                fs::read_link(format!("/proc/self/fd/{fd}")).ok(),
+                Some(identity),
+                "open_io retained its original pipe description"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn external_stream_clone_has_independent_fd_ownership_after_process_drop() {
+        use tokio::io::AsyncReadExt;
+
+        let logger = Logger::root(slog::Discard, o!("source" => "unit-test"));
+        let mut process =
+            Process::new(&logger, &OCIProcess::default(), "stream-owner", true, 32).unwrap();
+        let (read_fd, write_fd) = unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
+        process.parent_stdout = Some(read_fd);
+        let reader = process.get_reader(StreamType::ParentStdout).unwrap();
+
+        drop(process);
+        unistd::write(write_fd, b"x").unwrap();
+        let mut byte = [0u8; 1];
+        reader.lock().await.read_exact(&mut byte).await.unwrap();
+        assert_eq!(byte, [b'x']);
+
+        drop(reader);
+        assert!(fcntl::fcntl(write_fd, FcntlArg::F_GETFD).is_ok());
+        let _ = unistd::close(write_fd);
     }
 }

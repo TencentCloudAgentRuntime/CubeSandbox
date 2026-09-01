@@ -16,6 +16,11 @@ pub mod systemd;
 
 pub const RESOURCE_METRICS_VERSION_V1: u32 = 1;
 
+pub struct ManagerCreateOutcome<M> {
+    pub manager: M,
+    pub initialization_error: Option<anyhow::Error>,
+}
+
 pub trait Manager {
     fn apply(&self, _pid: i32) -> Result<()> {
         Err(anyhow!("not supported!".to_string()))
