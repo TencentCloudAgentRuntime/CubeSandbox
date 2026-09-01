@@ -1,0 +1,24 @@
+invocation=inv-884v2703dm status=SUCCESS
+task=invt-884v2703dn instance=ins-pl7mznaa status=SUCCESS exit=0 dropped=0
+{"pod":"s34a-runc-besteffort","role":"classic","cpu":{"shares":2,"period":100000},"memory":{},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-runc-besteffort","role":"sidecar","cpu":{"shares":2,"period":100000},"memory":{},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-runc-besteffort","role":"app","cpu":{"shares":2,"period":100000},"memory":{},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-runc-burstable","role":"classic","cpu":{"shares":51,"period":100000},"memory":{},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-runc-burstable","role":"sidecar","cpu":{"shares":102,"period":100000},"memory":{},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-runc-burstable","role":"app","cpu":{"shares":102,"period":100000},"memory":{},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-runc-guaranteed","role":"classic","cpu":{"shares":204,"quota":20000,"period":100000},"memory":{"limit":134217728,"swap":134217728},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-runc-guaranteed","role":"sidecar","cpu":{"shares":102,"quota":10000,"period":100000},"memory":{"limit":67108864,"swap":67108864},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-runc-guaranteed","role":"app","cpu":{"shares":204,"quota":20000,"period":100000},"memory":{"limit":134217728,"swap":134217728},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-cube-besteffort","role":"classic","cpu":{"shares":2,"period":100000},"memory":{},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-cube-besteffort","role":"sidecar","cpu":{"shares":2,"period":100000},"memory":{},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-cube-besteffort","role":"app","cpu":{"shares":2,"period":100000},"memory":{},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-cube-burstable","role":"classic","cpu":{"shares":51,"period":100000},"memory":{},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-cube-burstable","role":"sidecar","cpu":{"shares":102,"period":100000},"memory":{},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-cube-burstable","role":"app","cpu":{"shares":102,"period":100000},"memory":{},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-cube-guaranteed","role":"classic","cpu":{"shares":204,"quota":20000,"period":100000},"memory":{"limit":134217728,"swap":134217728},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-cube-guaranteed","role":"sidecar","cpu":{"shares":102,"quota":10000,"period":100000},"memory":{"limit":67108864,"swap":67108864},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-cube-guaranteed","role":"app","cpu":{"shares":204,"quota":20000,"period":100000},"memory":{"limit":134217728,"swap":134217728},"pids":null,"unified":{"memory.oom.group":"1","memory.swap.max":"0"}}
+{"pod":"s34a-runc-guaranteed","role":"sidecar","phase":"persisted-after-update","cpu":{"shares":153,"quota":15000,"period":100000},"memory":{"limit":83886080,"swap":83886080}}
+{"pod":"s34a-runc-guaranteed","role":"app","phase":"persisted-after-update","cpu":{"shares":307,"quota":30000,"period":100000},"memory":{"limit":167772160,"swap":167772160}}
+{"pod":"s34a-cube-guaranteed","role":"sidecar","phase":"persisted-after-update","cpu":{"shares":153,"quota":15000,"period":100000},"memory":{"limit":83886080,"swap":83886080}}
+{"pod":"s34a-cube-guaranteed","role":"app","phase":"persisted-after-update","cpu":{"shares":307,"quota":30000,"period":100000},"memory":{"limit":167772160,"swap":167772160}}

@@ -1,0 +1,6 @@
+invocation=inv-884v8ngwt7 status=SUCCESS
+task=invt-884v8ngwt8 instance=ins-pl7mznaa status=SUCCESS exit=0 dropped=0
+runtime=runc case=memory-limit phase=before layout=process-leaf resource=/ process=/ memory.max=268435456|268435456|268435456 memory.swap.max=max|max|max
+runtime=runc case=memory-limit phase=after layout=process-leaf resource=/ process=/ memory.max=402653184|402653184|402653184 memory.swap.max=max|max|max
+runtime=cube case=memory-limit phase=before layout=agent-parent-with-runtime-leaf resource=/ process=/runtime memory.max=268435456|max|max memory.swap.max=0|max|max
+runtime=cube case=memory-limit phase=after layout=agent-parent-with-runtime-leaf resource=/ process=/runtime memory.max=402653184|max|max memory.swap.max=0|max|max

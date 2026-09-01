@@ -1,0 +1,3 @@
+invocation=inv-084v08g9um status=SUCCESS
+task=invt-084v08g9un instance=ins-pl7mznaa status=SUCCESS exit=0 dropped=0
+S34A_INDEPENDENT_AUDIT_OK evidence=/data/cubelet/s3.4-evidence/s34a-20260901T145751Z-2537408 highlevel=6 lowlevel_started=17 expected_create_reject=1 invalid_unified=2 trace_pb=20 raw_create=verified raw_update=verified cleanup=exact

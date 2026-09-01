@@ -1,0 +1,83 @@
+invocation=inv-a84v15g4av status=SUCCESS
+task=invt-a84v15g4aw instance=ins-pl7mznaa status=SUCCESS exit=0 dropped=0
+evidence=/data/cubelet/s3.4-evidence/s34a-20260901T145751Z-2537408
+high pod=s34a-runc-besteffort role=classic phase=create layout=process-leaf resource=/ process=/ cpu.max=max 100000|max 100000 cpu.weight=1|1 cpuset.cpus=| cpuset.mems=| memory.max=max|max memory.low=0|0 memory.swap.max=0|0 memory.oom.group=1|1 pids.max=37366|37366
+high pod=s34a-runc-besteffort role=sidecar phase=create layout=process-leaf resource=/ process=/ cpu.max=max 100000|max 100000 cpu.weight=1|1 cpuset.cpus=| cpuset.mems=| memory.max=max|max memory.low=0|0 memory.swap.max=0|0 memory.oom.group=1|1 pids.max=37366|37366
+high pod=s34a-runc-besteffort role=app phase=create layout=process-leaf resource=/ process=/ cpu.max=max 100000|max 100000 cpu.weight=1|1 cpuset.cpus=| cpuset.mems=| memory.max=max|max memory.low=0|0 memory.swap.max=0|0 memory.oom.group=1|1 pids.max=37366|37366
+high pod=s34a-runc-burstable role=classic phase=create layout=process-leaf resource=/ process=/ cpu.max=max 100000|max 100000 cpu.weight=11|11 cpuset.cpus=| cpuset.mems=| memory.max=max|max memory.low=0|0 memory.swap.max=0|0 memory.oom.group=1|1 pids.max=37366|37366
+high pod=s34a-runc-burstable role=sidecar phase=create layout=process-leaf resource=/ process=/ cpu.max=max 100000|max 100000 cpu.weight=17|17 cpuset.cpus=| cpuset.mems=| memory.max=max|max memory.low=0|0 memory.swap.max=0|0 memory.oom.group=1|1 pids.max=37366|37366
+high pod=s34a-runc-burstable role=app phase=create layout=process-leaf resource=/ process=/ cpu.max=max 100000|max 100000 cpu.weight=17|17 cpuset.cpus=| cpuset.mems=| memory.max=max|max memory.low=0|0 memory.swap.max=0|0 memory.oom.group=1|1 pids.max=37366|37366
+high pod=s34a-runc-guaranteed role=classic phase=create layout=process-leaf resource=/ process=/ cpu.max=20000 100000|20000 100000 cpu.weight=29|29 cpuset.cpus=| cpuset.mems=| memory.max=134217728|134217728 memory.low=0|0 memory.swap.max=0|0 memory.oom.group=1|1 pids.max=37366|37366
+high pod=s34a-runc-guaranteed role=sidecar phase=create layout=process-leaf resource=/ process=/ cpu.max=10000 100000|10000 100000 cpu.weight=17|17 cpuset.cpus=| cpuset.mems=| memory.max=67108864|67108864 memory.low=0|0 memory.swap.max=0|0 memory.oom.group=1|1 pids.max=37366|37366
+high pod=s34a-runc-guaranteed role=app phase=create layout=process-leaf resource=/ process=/ cpu.max=20000 100000|20000 100000 cpu.weight=29|29 cpuset.cpus=| cpuset.mems=| memory.max=134217728|134217728 memory.low=0|0 memory.swap.max=0|0 memory.oom.group=1|1 pids.max=37366|37366
+high pod=s34a-runc-guaranteed role=sidecar phase=update layout=process-leaf resource=/ process=/ cpu.max=15000 100000|15000 100000 cpu.weight=24|24 cpuset.cpus=| cpuset.mems=| memory.max=83886080|83886080 memory.low=0|0 memory.swap.max=0|0 memory.oom.group=1|1 pids.max=37366|37366
+high pod=s34a-runc-guaranteed role=app phase=update layout=process-leaf resource=/ process=/ cpu.max=30000 100000|30000 100000 cpu.weight=40|40 cpuset.cpus=| cpuset.mems=| memory.max=167772160|167772160 memory.low=0|0 memory.swap.max=0|0 memory.oom.group=1|1 pids.max=37366|37366
+high pod=s34a-cube-besteffort role=classic phase=create layout=agent-parent-with-runtime-leaf resource=/ process=/runtime cpu.max=max 100000|max 100000 cpu.weight=1|100 cpuset.cpus=| cpuset.mems=| memory.max=max|max memory.low=0|0 memory.swap.max=0|max memory.oom.group=0|0 pids.max=max|max
+high pod=s34a-cube-besteffort role=sidecar phase=create layout=agent-parent-with-runtime-leaf resource=/ process=/runtime cpu.max=max 100000|max 100000 cpu.weight=1|100 cpuset.cpus=| cpuset.mems=| memory.max=max|max memory.low=0|0 memory.swap.max=0|max memory.oom.group=0|0 pids.max=max|max
+high pod=s34a-cube-besteffort role=app phase=create layout=agent-parent-with-runtime-leaf resource=/ process=/runtime cpu.max=max 100000|max 100000 cpu.weight=1|100 cpuset.cpus=| cpuset.mems=| memory.max=max|max memory.low=0|0 memory.swap.max=0|max memory.oom.group=0|0 pids.max=max|max
+high pod=s34a-cube-burstable role=classic phase=create layout=agent-parent-with-runtime-leaf resource=/ process=/runtime cpu.max=max 100000|max 100000 cpu.weight=2|100 cpuset.cpus=| cpuset.mems=| memory.max=max|max memory.low=0|0 memory.swap.max=0|max memory.oom.group=0|0 pids.max=max|max
+high pod=s34a-cube-burstable role=sidecar phase=create layout=agent-parent-with-runtime-leaf resource=/ process=/runtime cpu.max=max 100000|max 100000 cpu.weight=4|100 cpuset.cpus=| cpuset.mems=| memory.max=max|max memory.low=0|0 memory.swap.max=0|max memory.oom.group=0|0 pids.max=max|max
+high pod=s34a-cube-burstable role=app phase=create layout=agent-parent-with-runtime-leaf resource=/ process=/runtime cpu.max=max 100000|max 100000 cpu.weight=4|100 cpuset.cpus=| cpuset.mems=| memory.max=max|max memory.low=0|0 memory.swap.max=0|max memory.oom.group=0|0 pids.max=max|max
+high pod=s34a-cube-guaranteed role=classic phase=create layout=agent-parent-with-runtime-leaf resource=/ process=/runtime cpu.max=20000 100000|max 100000 cpu.weight=8|100 cpuset.cpus=| cpuset.mems=| memory.max=134217728|max memory.low=0|0 memory.swap.max=0|max memory.oom.group=0|0 pids.max=max|max
+high pod=s34a-cube-guaranteed role=sidecar phase=create layout=agent-parent-with-runtime-leaf resource=/ process=/runtime cpu.max=10000 100000|max 100000 cpu.weight=4|100 cpuset.cpus=| cpuset.mems=| memory.max=67108864|max memory.low=0|0 memory.swap.max=0|max memory.oom.group=0|0 pids.max=max|max
+high pod=s34a-cube-guaranteed role=app phase=create layout=agent-parent-with-runtime-leaf resource=/ process=/runtime cpu.max=20000 100000|max 100000 cpu.weight=8|100 cpuset.cpus=| cpuset.mems=| memory.max=134217728|max memory.low=0|0 memory.swap.max=0|max memory.oom.group=0|0 pids.max=max|max
+high pod=s34a-cube-guaranteed role=sidecar phase=update layout=agent-parent-with-runtime-leaf resource=/ process=/runtime cpu.max=15000 100000|max 100000 cpu.weight=6|100 cpuset.cpus=| cpuset.mems=| memory.max=83886080|max memory.low=0|0 memory.swap.max=0|max memory.oom.group=0|0 pids.max=max|max
+high pod=s34a-cube-guaranteed role=app phase=update layout=agent-parent-with-runtime-leaf resource=/ process=/runtime cpu.max=30000 100000|max 100000 cpu.weight=12|100 cpuset.cpus=| cpuset.mems=| memory.max=167772160|max memory.low=0|0 memory.swap.max=0|max memory.oom.group=0|0 pids.max=max|max
+classification runtime=runc case=cpu create=accepted update=accepted update_exit=0
+low runtime=runc case=cpu phase=before layout=process-leaf resource=/ process=/ cpu.max=50000 100000|50000 100000|50000 100000 cpu.weight=59|59|59
+low runtime=runc case=cpu phase=after layout=process-leaf resource=/ process=/ cpu.max=75000 100000|75000 100000|75000 100000 cpu.weight=100|100|100
+classification runtime=runc case=memory-limit create=accepted update=accepted update_exit=0
+low runtime=runc case=memory-limit phase=before layout=process-leaf resource=/ process=/ memory.max=268435456|268435456|268435456
+low runtime=runc case=memory-limit phase=after layout=process-leaf resource=/ process=/ memory.max=402653184|402653184|402653184
+classification runtime=runc case=memory-reservation create=accepted update=accepted update_exit=0
+low runtime=runc case=memory-reservation phase=before layout=process-leaf resource=/ process=/ memory.low=134217728|134217728|134217728
+low runtime=runc case=memory-reservation phase=after layout=process-leaf resource=/ process=/ memory.low=268435456|268435456|268435456
+classification runtime=runc case=swap create=accepted update=accepted update_exit=0
+low runtime=runc case=swap phase=before layout=process-leaf resource=/ process=/ memory.max=268435456|268435456|268435456 memory.swap.max=134217728|134217728|134217728
+low runtime=runc case=swap phase=after layout=process-leaf resource=/ process=/ memory.max=268435456|268435456|268435456 memory.swap.max=268435456|268435456|268435456
+classification runtime=runc case=cpuset create=accepted update=accepted update_exit=0
+low runtime=runc case=cpuset phase=before layout=process-leaf resource=/ process=/ cpuset.cpus=0|0|0 cpuset.mems=0|0|0
+low runtime=runc case=cpuset phase=after layout=process-leaf resource=/ process=/ cpuset.cpus=1|1|1 cpuset.mems=0|0|0
+classification runtime=runc case=pids create=accepted update=accepted update_exit=0
+low runtime=runc case=pids phase=before layout=process-leaf resource=/ process=/ pids.max=128|128|128
+low runtime=runc case=pids phase=after layout=process-leaf resource=/ process=/ pids.max=64|64|64
+classification runtime=runc case=hugepage-create create=accepted update=accepted-unapplied update_exit=0
+low runtime=runc case=hugepage-create phase=before layout=process-leaf resource=/ process=/ hugetlb.2MB.max=0|0|0
+low runtime=runc case=hugepage-create phase=after layout=process-leaf resource=/ process=/ hugetlb.2MB.max=0|0|0
+classification runtime=runc case=hugepage-update create=accepted update=accepted-unapplied update_exit=0
+low runtime=runc case=hugepage-update phase=before layout=process-leaf resource=/ process=/ hugetlb.2MB.max=max|max|max
+low runtime=runc case=hugepage-update phase=after layout=process-leaf resource=/ process=/ hugetlb.2MB.max=max|max|max
+classification runtime=runc case=unified create=accepted update=accepted update_exit=0
+low runtime=runc case=unified phase=before layout=process-leaf resource=/ process=/ memory.oom.group=0|0|0
+low runtime=runc case=unified phase=after layout=process-leaf resource=/ process=/ memory.oom.group=1|1|1
+classification runtime=runc classification=rejected update_exit=1 invalid_key=memory.this_controller_does_not_exist
+low runtime=runc case=invalid-unified phase=before layout=process-leaf resource=/ process=/ memory.oom.group=0|0|0
+low runtime=runc case=invalid-unified phase=after layout=process-leaf resource=/ process=/ memory.oom.group=0|0|0
+classification runtime=cube case=cpu create=accepted update=accepted update_exit=0
+low runtime=cube case=cpu phase=before layout=agent-parent-with-runtime-leaf resource=/ process=/runtime cpu.max=50000 100000|max 100000|max 100000 cpu.weight=20|100|100
+low runtime=cube case=cpu phase=after layout=agent-parent-with-runtime-leaf resource=/ process=/runtime cpu.max=75000 100000|max 100000|max 100000 cpu.weight=39|100|100
+classification runtime=cube case=memory-limit create=accepted update=accepted update_exit=0
+low runtime=cube case=memory-limit phase=before layout=agent-parent-with-runtime-leaf resource=/ process=/runtime memory.max=268435456|max|max
+low runtime=cube case=memory-limit phase=after layout=agent-parent-with-runtime-leaf resource=/ process=/runtime memory.max=402653184|max|max
+classification runtime=cube case=memory-reservation create=accepted update=accepted update_exit=0
+low runtime=cube case=memory-reservation phase=before layout=agent-parent-with-runtime-leaf resource=/ process=/runtime memory.low=134217728|0|0
+low runtime=cube case=memory-reservation phase=after layout=agent-parent-with-runtime-leaf resource=/ process=/runtime memory.low=134217728|0|0
+classification runtime=cube case=swap create=accepted update=accepted update_exit=0
+low runtime=cube case=swap phase=before layout=agent-parent-with-runtime-leaf resource=/ process=/runtime memory.max=268435456|max|max memory.swap.max=0|max|max
+low runtime=cube case=swap phase=after layout=agent-parent-with-runtime-leaf resource=/ process=/runtime memory.max=268435456|max|max memory.swap.max=0|max|max
+classification runtime=cube case=cpuset create=accepted update=accepted update_exit=0
+low runtime=cube case=cpuset phase=before layout=agent-parent-with-runtime-leaf resource=/ process=/runtime cpuset.cpus=|| cpuset.mems=||
+low runtime=cube case=cpuset phase=after layout=agent-parent-with-runtime-leaf resource=/ process=/runtime cpuset.cpus=|| cpuset.mems=||
+classification runtime=cube case=pids create=accepted update=accepted update_exit=0
+low runtime=cube case=pids phase=before layout=agent-parent-with-runtime-leaf resource=/ process=/runtime pids.max=max|max|max
+low runtime=cube case=pids phase=after layout=agent-parent-with-runtime-leaf resource=/ process=/runtime pids.max=max|max|max
+classification runtime=cube case=hugepage-create create=rejected update=not-attempted reason=invalid-guest-cgroup-file-hugetlb..max
+classification runtime=cube case=hugepage-update create=accepted update=accepted-unapplied update_exit=0
+low runtime=cube case=hugepage-update phase=before layout=agent-parent-with-runtime-leaf resource=/ process=/runtime hugetlb.2MB.max=max|max|max
+low runtime=cube case=hugepage-update phase=after layout=agent-parent-with-runtime-leaf resource=/ process=/runtime hugetlb.2MB.max=max|max|max
+classification runtime=cube case=unified create=accepted update=accepted update_exit=0
+low runtime=cube case=unified phase=before layout=agent-parent-with-runtime-leaf resource=/ process=/runtime memory.oom.group=0|0|0
+low runtime=cube case=unified phase=after layout=agent-parent-with-runtime-leaf resource=/ process=/runtime memory.oom.group=0|0|0
+classification runtime=cube classification=accepted-unapplied update_exit=0 invalid_key=memory.this_controller_does_not_exist
+low runtime=cube case=invalid-unified phase=before layout=agent-parent-with-runtime-leaf resource=/ process=/runtime memory.oom.group=0|0|0
+low runtime=cube case=invalid-unified phase=after layout=agent-parent-with-runtime-leaf resource=/ process=/runtime memory.oom.group=0|0|0

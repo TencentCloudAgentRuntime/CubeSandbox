@@ -2,7 +2,7 @@
 
 ## S3.4a 状态
 
-`DONE`。实现、云端 V14 正式矩阵和独立审计均已通过；同一 reviewer 终审无阻断 finding，并明确给出 `APPROVE S3.4a DONE`。
+`DONE`。V15 已用实际 `RuntimeClass`、containerd `Runtime.Name` 和 PID membership 锚定运行时身份，同时读取 Cube resource parent 与 `runtime` process leaf；正式矩阵与独立审计均通过，同一 reviewer 已确认 `APPROVE S3.4a DONE`。V14 的 Guest 支持结论保持撤回，仅保留其历史执行记录。
 
 ## 静态输入审计
 
@@ -12,7 +12,9 @@
 2. `CreateContainer` 生成的标准 OCI `linux.resources`。CubeShim 先用 `oci-spec` 读取完整 OCI JSON，再序列化到旧 Agent protobuf。当前转换主动删除 `pids`、`blockIO`，清空 `cpu.cpus/mems`；CPU shares/quota/period、memory limit/reservation/swap 和 hugepage limits 可以进入现有 protobuf，但“可传输”不等于 Guest 已正确执行。OCI `unified`、RDMA 以及 CPU idle/burst 没有对应 protobuf 字段，当前没有无损传输契约。
 3. containerd `Task.Update` 的 OCI `LinuxResources`。CubeShim 目前只转发 CPU shares/quota/period/cpus 与 memory.limit；memory reservation/swap、CPU mems、PIDs、hugepages、block I/O、RDMA、CPU idle/burst 和 unified 不会进入 Agent。即使被转发，Agent 的 cpuset 设置代码目前也被整体注释。
 
-Guest swap 还存在两个独立风险，不能归类为“Agent 已支持”：protobuf 的 `LinuxMemory` 没有 optional presence，任一 memory message 到 Agent 后都会合成 `swappiness=Some(0)`；当前 cgroups-rs 在 cgroup v2 将 swappiness 直接写到 `memory.swap.max`。同时 Agent 的有限 memory+swap 分支没有先把 OCI 的 memory+swap 总量换算为 cgroup v2 的 swap-only 值。因此显式 swap create 可能被最后的 swappiness 写回 0，memory-limit-only Update 也可能产生 swap 副作用，必须逐阶段实测。
+Guest swap 还存在两个独立风险，不能归类为“Agent 已支持”：protobuf 的 `LinuxMemory` 没有 optional presence，任一 memory message 到 Agent 后都会合成 `swappiness=Some(0)`；当前 cgroups-rs 在 cgroup v2 将 swappiness 直接写到 `memory.swap.max`。同时 Agent 的有限 memory+swap 分支没有先把 OCI 的 memory+swap 总量换算为 cgroup v2 的 swap-only 值。因此显式 swap create 可能被最后的 swappiness 写回 0，memory-limit-only Update 也可能产生 swap 副作用，必须逐阶段实测。Kubernetes 高层 create OCI 还会在 `unified` 中携带 `memory.swap.max=0`，但旧 Agent protobuf 无法表示 `unified`；Cube parent 最终观测为 `0` 是上述 `LinuxMemory` presence/`swappiness=0` 副作用偶然满足 NoSwap 结果，不能证明该 key 已无损传输。S3.4b 修复 presence 时必须同时无损处理或白名单实现 `memory.swap.max`，并保持 Kubernetes NoSwap 回归。
+
+CPU shares 也不能只以“weight 发生变化”判定兼容。Agent 当前使用旧线性公式 `1+((shares-2)*9999)/262142`；现场 containerd/runc 使用 `github.com/containerd/cgroups/v3@v3.1.3` 的 `ConvertCPUSharesToCgroupV2Value` 对数/二次映射，并保持 `shares=1024 → weight=100` 的默认点。S3.4a 必须逐个保存同一 OCI shares 的 runc/Cube weight，S3.4b 再决定统一到当前 containerd 语义，不能把旧公式直接标为支持。
 
 Cube VM 的 vCPU/内存设备规格不等同于 cgroup 限制。当前仓库未由 Cube 自行实现按 Pod 创建 Host resource envelope、设置 controller 值或在 Task Update 后重算包络。Shim runner 仍会在 containerd 显式传入 `shim_cgroup` 时加入已有 cgroup；VMM 和 virtiofs 主要在 Shim 内线程运行，云端必须采集 `/proc/$shim/task/*/{comm,cgroup}`、`shim_cgroup` 配置和继承路径，不能只扫描子进程。
 
@@ -75,7 +77,20 @@ containerd `oci.GenerateSpecWithPlatform` 的低层默认 spec 不含 Kubernetes
 - <https://v1-36.docs.kubernetes.io/docs/concepts/storage/ephemeral-storage/>
 - <https://v1-36.docs.kubernetes.io/docs/tasks/manage-hugepages/scheduling-hugepages/>
 
-## V14 固定输入与执行
+## V15 修正输入与执行
+
+- 源码包 SHA-256：`d4400132b78c3af1f11386aea1be88fa9a5848687a2dc22352ff8e15a395c9a9`；两次独立确定性归档逐字节一致。私有 COS 对象为 `kubernetes-runtime/s3.4a/source/cubesandbox-s34a-source-v14-d4400132.tar.gz`。
+- reviewer 冻结并批准的 main/test/diagnose/audit SHA-256 依次为 `2822a49e9f2285044289490cf2e875deccc8cf0d8155b6765a8ad7c65f8812d5`、`ee7db4f8aa98bf89d52b4699ea4f5e520fd30b2862ee27f5d6bc80cd441864c3`、`3f725985865609310f71e5a8be5ead9c7cb11e3cc8e59b806ee1f6603c8a712e`、`b6831d879216b9c8cec1b378e4d7a377f8651ccc5c8eec64a8ae33f323b8c8e5`。源码、diagnose、audit 下载校验任务分别为 `inv-b84ut0g7ij`、`inv-984ut1g29a`、`inv-a84ut0gkt7`，固定输入切换 `inv-v84utv0jmw`；全部只作用于本 PoC CVM `ins-pl7mznaa` 且为 `SUCCESS`。
+- 云端构建 `inv-984uubgkt5` 为 `SUCCESS`，证据目录 `/data/cubelet/s3.4-evidence/s34a-build-20260901T145623Z-2515543`；trace containerd SHA-256 为 `88476ece6d2629735081bf958d3918df5ef06c34914c2f1eb840e98e279874b8`，新 resource helper SHA-256 为 `242a68a8451ea19ccba65b9d58133f732b2944afc5923a029be7d4b431cd5a44`。
+- 稳定清洁预检 `inv-b84uvagqkj` 为 `SUCCESS`：live containerd 为原始 SHA-256 `15e00263…`，三项服务 active、Node healthy，无 owned Pod、低层容器或 trace root，5 秒窗口状态稳定。
+- V15 正式诊断 `inv-084uvpg3h5` 为 `SUCCESS`，证据目录 `/data/cubelet/s3.4-evidence/s34a-20260901T145751Z-2537408`：`highlevel=6`、`lowlevel_started=17`、`expected_create_reject=1`、`cleanup=exact`。
+- 独立审计 `inv-384uxu0pj7` 为 `SUCCESS`；未截断只读重跑 `inv-084v08g9um` 固定摘要为：`invalid_unified=2`、`trace_pb=20`、`raw_create=verified`、`raw_update=verified`、`cleanup=exact`。父/子/Host 三层紧凑值由只读任务 `inv-a84v15g4av` 提取，OCI 输入由 `inv-884v2703dm` 提取，二者均为 `SUCCESS`。
+- 为便于无云权限 reviewer 独立复核，三项 TAT 完整 stdout 已原样保存为 [`v15-cgroup-result-summary.txt`](./v15-cgroup-result-summary.txt)、[`v15-oci-input-summary.txt`](./v15-oci-input-summary.txt) 和 [`v15-audit-summary.txt`](./v15-audit-summary.txt)，SHA-256 依次为 `1cfe651ff4f2356b0ab1209564c3700eddd65bbfb51942f5dca032f170d1370e`、`323917c516621868fd220a64801419b35646d88af5f8ea955581b786f2ee011a`、`8f929ecab4c6a8e047ff5d2a2b2d7732b68b23a5d2ea441d0798a7b9e4ed59cf`；文件不含凭据、签名 URL 或 secret。
+- reviewer 要求补查的 memory-limit-only swap 三层值由只读任务 `inv-884v8ngwt7` 提取，完整 stdout 保存为 [`v15-memory-limit-swap-summary.txt`](./v15-memory-limit-swap-summary.txt)，SHA-256 为 `ddc5e4c5392d5e0bd00ca9dca5af0155b179182ee8c13a47ca1f2fbc44962d48`。
+
+正式环境与 V14 相同：Kubernetes/kubelet `v1.36.4`、containerd `v2.3.4`、runc `1.4.3`、crictl `v1.36.0`、Linux `6.6.69`、amd64，CubeShim/Agent SHA-256 为 `3c715652…`/`87bac7a6…`。
+
+## V14 历史执行
 
 - 源码包 SHA-256：`4934867f78c33c331ed91413769c27f4fa4e7e927847c6d8b1da8c774ebda9b7`；两次独立确定性归档逐字节一致。
 - 私有 COS 对象：`kubernetes-runtime/s3.4a/source/cubesandbox-s34a-source-v13-4934867f.tar.gz`；只下载到本 PoC 创建的 CVM `ins-pl7mznaa`，下载校验任务 `inv-684tkdg6b7` 与固定输入切换任务 `inv-v84tkwgp0r` 均为 `SUCCESS`。
@@ -87,14 +102,16 @@ containerd `oci.GenerateSpecWithPlatform` 的低层默认 spec 不含 Kubernetes
 
 正式环境固定为 Kubernetes/kubelet `v1.36.4`、containerd `v2.3.4`、runc `1.4.3`、crictl `v1.36.0`、Linux `6.6.69`、amd64。CubeShim/Agent SHA-256 分别为 `3c715652…`/`87bac7a6…`。kubelet 使用 systemd cgroup driver、CPU manager `none`、Memory manager `None`、`failSwapOn=true`、`podPidsLimit=-1`；节点无 swap、无预分配 hugepage。
 
-## V14 结论
+## V15 修正结论
+
+V15 的每个 Cube capture 都满足 scoped view 中 `resource=/`、`process=/runtime`，self PID 只存在于 process leaf，resource parent 不含该 PID；实际 Pod `RuntimeClass`、sandbox/container 的 containerd `Runtime.Name` 同时与目录标签一致。Agent 把资源写在 parent，再把进程放入 child；因此以下无前缀值是权威资源值，`process.*` 默认值只是子层没有叠加第二重限制，不能再据此判定父层未生效。
 
 ### Kubernetes/CRI 路径
 
 | 项目 | runc | Cube | 结论 |
 |---|---|---|---|
-| BestEffort/Burstable/Guaranteed | QoS 与 cgroup v2 值匹配输入；Guaranteed app 为 `cpu.max=20000 100000`、`memory.max=128Mi` | 三种 QoS 均可启动，但 app/sidecar/classic 的 Guest controller 保持默认 `cpu.max=max`、`cpu.weight=100`、`memory.max=max`、`memory.swap.max=max`、`pids.max=max` | Cube 已收到并保存标准 CRI/OCI create 输入，但现有 Guest create 未执行 per-container resources |
-| running app/sidecar `/resize` | app 从 `200m/128Mi` 变为 `300m/160Mi`，sidecar 从 `100m/64Mi` 变为 `150m/80Mi`；CRI、Task 与 cgroup 前后值闭环 | Pod status 同样收敛且 CRI/Task raw trace 完整，但 Guest controller 前后全为默认值 | containerd/Kubernetes update 链路存在；缺口位于 CubeShim/Agent 的转换或 Guest 执行 |
+| BestEffort/Burstable/Guaranteed | QoS 与 create 输入闭环；shares `51/102/204` 对应 weight `11/17/29`；Guaranteed app 为 `cpu.max=20000 100000`、`memory.max=128Mi` | 三种 QoS 的 classic/sidecar/app 均启动；parent 的 quota 和 memory limit 匹配 OCI，但旧线性 shares 映射给出 `51/102/204→2/4/8` | create-time quota 与 `memory.max` 已生效；period 输入和结果均为默认 `100000`，未独立证明；shares 已传输/写入但与当前 runc 映射不兼容；unified 的 `memory.oom.group=1` 和 `memory.swap.max=0` 均未进入 Agent，后者仅被 memory presence 副作用偶然满足 |
+| running app/sidecar `/resize` | app 从 `200m/128Mi` 变为 `300m/160Mi`，weight `29→40`；sidecar从 `100m/64Mi` 变为 `150m/80Mi`，weight `17→24`；CRI、Task 与 cgroup 前后值闭环 | app parent 为 `cpu.max 20000→30000/100000`、旧线性 weight `8→12`、`memory.max 128Mi→160Mi`；sidecar为 `10000→15000/100000`、`4→6`、`64Mi→80Mi` | quota 与 `memory.max` update 已生效；period 前后都是默认 `100000`，未独立证明 update；shares update 会写值但映射仍不兼容，必须进入 S3.4b |
 | 已退出 classic init `/resize` | API 与 kubelet status 从 `200m` 记账为 `250m`，CRI/Task trace 均 `0→0`，持久化 create-time OCI Spec 字节不变 | 与 runc 相同 | 这是 terminated task 的 API/spec 与 kubelet accounting 行为，不是 runtime update 缺口 |
 | Host 拓扑 | app/sidecar 位于各自 `kubepods.slice/.../cri-containerd-*.scope`，resize 后对应 Host leaf 更新 | Shim 全部线程及工作负载实际后代继承 `/system.slice/containerd.service`，前后 controller 均无限制 | 当前没有 Cube Pod 级 Host VM envelope，且未配置 `shim_cgroup` |
 | Kubernetes hugepage | — | `2Mi` 请求在节点容量为 0 时以 `OutOfhugepages-2Mi` 失败，未创建 CRI sandbox | admission/节点容量路径正确；不能据此声明 runtime hugepage 支持 |
@@ -102,18 +119,18 @@ containerd `oci.GenerateSpecWithPlatform` 的低层默认 spec 不含 Kubernetes
 
 ### 低层 OCI/Task 对照
 
-每个字段使用独立 Task，runc 以 Host task PID leaf 为权威，Cube 以 Guest self PID 所在 leaf 为权威。resource helper 给低层进程增加一个私有 cgroup namespace 和一个与 CRI 一致的只读 `/sys/fs/cgroup` mount；它不改变 `linux.resources`。
+每个字段使用独立 Task。runc 的 resource/process 是同一 leaf，并以 Host task PID leaf 再次交叉验证；Cube 的 resource parent 与 process leaf 分离，parent 值是权威限制，process leaf 保持默认值时仍受父层层级约束。resource helper 的私有 cgroup namespace 和只读 cgroup mount 只用于观测，不改变 `linux.resources`。
 
 | 字段 | runc create/update | Cube create/update | S3.4b 输入 |
 |---|---|---|---|
-| CPU shares/quota/period | `cpu.max 50000→75000/100000`、`cpu.weight 59→100` | 调用均成功，Guest 保持 `max/100` | 实现 create 与 update |
-| memory limit | `memory.max 256Mi→384Mi` | 调用均成功，Guest 保持 `max` | 实现 create 与 update |
-| memory reservation | `memory.low 128Mi→256Mi`，limit 保持 `512Mi` | 调用均成功，Guest `memory.low=0`、limit `max` | protobuf create 可表达，update 当前未转发，必须补齐 |
-| swap | OCI total `384Mi→512Mi` 且 limit 固定 `256Mi`，runc 正确写成 swap-only `128Mi→256Mi` | 调用均成功，Guest `memory.swap.max=max` | 修复 OCI total 到 cgroup v2 swap-only 换算及 swappiness 覆盖风险 |
-| cpuset | `cpuset.cpus 0→1`、`mems=0` | 调用均成功，Guest cpuset 为空 | 恢复 Agent cpuset 执行并补齐 update mems |
-| PIDs | `pids.max 128→64` | 调用均成功，Guest `max` | create protobuf 当前被 Shim 删除，update 未转发，必须补齐 |
+| CPU shares/quota/period | 同一 OCI shares `512→1024` 得到 weight `59→100`，`cpu.max 50000→75000/100000` | quota 正确；period 输入和结果始终为默认 `100000`；旧线性映射只得到 weight `20→39` | quota 已支持；period 尚未独立证明，S3.4b 增加非默认 period 的 create/update；shares create/update 虽写入但与当前 cgroups v3/runc 不兼容，需统一转换并回归默认点与代表值 |
+| memory limit | `memory.max 256Mi→384Mi`，未指定 swap 时 `memory.swap.max=max→max` | `memory.max 256Mi→384Mi`，但未指定 swap 在 create 时已被隐式写为 `0`，update 后仍为 `0` | `memory.max` 数值更新已支持；修复 protobuf presence/swappiness，使 limit-only create/update 都不改变 swap，并用非零 swap 基线验证 update |
+| memory reservation | `memory.low 128Mi→256Mi`，limit 保持 `512Mi` | create 正确写 `128Mi`；update 返回成功但仍为 `128Mi` | create 已支持；补齐 update 转发，禁止静默未应用 |
+| swap | OCI total `384Mi→512Mi` 且 limit 固定 `256Mi`，runc 正确写成 swap-only `128Mi→256Mi` | parent create/update 都为 `0`，既不等于初始 `128Mi`，也没有更新为 `256Mi` | 修复 create 的 total→swap-only 与 swappiness 覆盖，并补齐 update |
+| cpuset | `cpuset.cpus 0→1`、`mems=0` | parent create/update 都为空 | 恢复 Agent cpuset 执行，update 同时转发 cpus/mems |
+| PIDs | `pids.max 128→64` | parent create/update 都为 `max` | create 不得删除 PIDs，update 必须转发 |
 | hugepage | runc create `0` 成功，但更新 `2Mi` 返回成功且 leaf 保持 `0`；空 create 后更新也保持 `max` | 显式 create 因错误文件名 `hugetlb..max` fail-closed；空 create 后 update 返回成功但保持 `max` | 修正 Guest page-size 到文件名映射；update 不得静默成功 |
-| unified `memory.oom.group` | `0→1` | 调用成功但保持 `0` | 增加可验证白名单或明确拒绝 |
+| unified `memory.oom.group` / `memory.swap.max` | `memory.oom.group 0→1`；Kubernetes NoSwap create 输入包含 `memory.swap.max=0` | `memory.oom.group` 调用前后均为 `0`；两个 unified key 都没有 protobuf 表示，NoSwap 的 parent `0` 仅由 memory presence 副作用偶然产生 | 增加可验证白名单与协议表示，或对无法表示值明确拒绝；presence 修复后必须保持 Kubernetes NoSwap 回归 |
 | invalid unified key | runc update 返回错误且值不变 | Cube 返回成功但值不变 | 必须 fail-closed，禁止 accepted-unapplied |
 
 Cube 低层 Task 的 Host PID 同样位于 `/system.slice/containerd.service`；各字段变化不会形成 Host Pod/Task cgroup。由此冻结首版分层：S3.4b 先让标准 per-container 资源在 Guest create/update 生效并让不支持字段明确失败；S3.4c 再实现独立的 Host Pod VM 包络，不能把 Guest 限制误当成 Host 总量控制。
@@ -122,9 +139,9 @@ Cube 低层 Task 的 Host PID 同样位于 `/system.slice/containerd.service`；
 
 - create-time container/sandbox store Any、实际 bundle OCI、CRI 辅助视图全部保存；update-time 原始 CRI `UpdateContainerResourcesRequest`、持久化 OCI Spec、Task `LinuxResources` Any 与 scoped Cube trace 均可按 ID 和时间窗关联。
 - 6 个高层 Pod 覆盖 runc/Cube × 三种 QoS，并覆盖 classic init、restartable sidecar、app、ephemeral-storage 和 running/terminated resize；低层矩阵逐字段隔离，拒绝不会遮蔽后续场景。
-- 所有 cgroup 读数均验证唯一 cgroup2 mount、mount-root-relative 路径和 self PID membership；runc 另以 Host task PID 与 live `cgroup.procs` membership 交叉核对。
+- 所有 cgroup 读数均验证唯一 cgroup2 mount、mount-root-relative 路径和 self PID membership；V15 额外强制 Cube `<resource>/runtime` 父子路径、parent non-self、process self、两层 controller 唯一值和实际 containerd runtime identity，runc 另以 Host task PID 与 live `cgroup.procs` membership 交叉核对。
 - 正式脚本结束时 baseline 首次比较即匹配；原始 containerd 恢复，containerd/kubelet/RuntimeResource 三项服务 active，Node Ready 且无 Memory/Disk/PIDPressure，owned Pod、Task、Sandbox、snapshot、mount、netns、Shim、VM、trace root 与新增 active lease 均无残留。
-- V12/V13 失败轮次也完成精确恢复。V12 暴露 hugepage 成功返回与 leaf 实际值不能等同；V13 暴露低层默认 OCI 缺少 cgroup namespace/mount。两项均先修正探针并经同一 reviewer 批准，再进入 V14。
+- V15 正式运行与独立审计均确认原始 containerd 恢复、三项服务健康、`cleanup=exact`。V12/V13 失败轮次也完成精确恢复；V14 暴露了 resource parent/process leaf 取证错误并被撤回，没有把错误结论带入实现阶段。
 
 S3.4a 只冻结输入、现状与精确缺口，不把“请求被接受”记成能力支持，也不提前声明压力/OOM/驱逐语义完成。
 
