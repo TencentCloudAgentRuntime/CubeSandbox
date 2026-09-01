@@ -1,0 +1,49 @@
+S3.4c.1 HOST POD VM ENVELOPE DESIGN FREEZE
+
+status=APPROVED
+reviewer_decision=APPROVE S3.4c DESIGN
+design=docs/handoffs/kubernetes-runtime/evidence/s3.4/s3.4c-design.md
+
+TARGET
+instance=ins-pl7mznaa
+region=ap-hongkong
+kubernetes=v1.36.4
+containerd=v2.3.4
+kernel=6.6.69
+cgroup=v2
+
+INPUT PROBES
+inv-v856u30wn5=SUCCESS BestEffort/request-only/Guaranteed CRI resources and cgroup_parent
+inv-985738gw5i=SUCCESS restartable-sidecar/classic-init/app resources plus 250m/256Mi overhead; cleanup=exact
+inv-v8576v08e1=SUCCESS BestEffort plus overhead parent behavior; cleanup=exact
+inv-a857xtgv7s=SUCCESS systemd package 255.4-1ubuntu8 and target boot identity
+
+SYSTEMD BEHAVIOR GATE
+inv-38589x0k30=SUCCESS dropped=0
+systemd=255.4-1ubuntu8
+properties=PIDs,Delegate=yes,CollectMode=inactive-or-failed
+iterations=200
+created=200
+failures=0
+left_units=0
+left_cgroups=0
+cleanup=exact
+
+EXCLUDED PROBES AND CLEANUP
+inv-88580qg1gi=TIMEOUT and output dropped; excluded from passing evidence
+inv-38587dgng5=SUCCESS but output dropped; excluded from passing evidence
+inv-08588j0g5k=stopped because its payload still emitted per-iteration signal diagnostics; excluded
+inv-v858720f7k=SUCCESS removed 127 old probe units and cgroups; cleanup=exact; dropped=0
+inv-08589cgxsg=SUCCESS stopped the v3 probe task and removed its units/cgroups; cleanup=exact; dropped=0
+
+DESIGN CONTRACT
+kubelet_owner=Pod parent cgroup
+cube_owner=static VM capacity plus RuntimeClass overhead leaf
+guest_owner=per-container cgroups
+containerd_patch=none
+managed_processes=CubeShim server,VMM,vCPU,virtiofs,async helpers
+lifecycle=external durable record plus HostCgroup and RuntimeResource owners
+takeover_event=first identity-matching CreateSandbox or legacy CreateTask
+cleanup_order=revoke epoch,dual owner durable handoff,then exact pidfd stop
+controller_recovery=INTENT-before-write WAL with closed decision table
+systemd_registration_gate=200 iterations per new package/build/boot plus per-start job,state,cgroup,membership checks

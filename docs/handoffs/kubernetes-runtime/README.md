@@ -2,7 +2,7 @@
 
 ## 当前 Stage
 
-S3.4c.1 `IN_PROGRESS`：S3.4b 的四个实现单元及云端终验均已关闭，同一 reviewer 已给出 `APPROVE S3.4b DONE`。当前冻结 Host Pod VM 资源包络的输入、预算算法、cgroup owner/path 和生命周期事务。
+S3.4c.2 `IN_PROGRESS`：S3.4c.1 的 Host Pod VM 包络设计已冻结，同一 reviewer 四轮复审后明确给出 `APPROVE S3.4c DESIGN`。当前实现 managed/legacy 分类、Host leaf 生命周期、进程归属、bundle 外 takeover 与长期 scanner。
 
 ## 基线
 
@@ -10,19 +10,19 @@ S3.4c.1 `IN_PROGRESS`：S3.4b 的四个实现单元及云端终验均已关闭�
 
 ## 已完成
 
-S0、S1、S2.1～S2.4、S3.1～S3.3、S3.4a～S3.4b 全部 `DONE`。S3.4b 已实现 resources-v2 严格协议、presence/partial merge、controller transaction、rollback/undo replay、degraded 门禁和 PendingCreate 清理；数值、压力/OOM/PIDs/hugepage、真实故障、capability、legacy、Kubernetes resize 与全量清理均通过，同一 reviewer 已最终批准。
+S0、S1、S2.1～S2.4、S3.1～S3.3、S3.4a～S3.4b 与 S3.4c.1 全部 `DONE`。S3.4c.1 冻结 kubelet parent/Cube static leaf/Guest per-container 三层 owner、12 个预算向量、classifier/path、immutable/containment identity、external lifecycle + 双 cleanup owner、epoch/revoke、INTENT-before-write WAL 与封闭恢复表；systemd 200 次行为门禁和同一 reviewer 批准均完成。
 
 ## 未完成
 
-S3.4c～S3.4d 尚未完成。Host 上尚无 Pod VM 总量包络，Shim/VMM/virtiofs/辅助进程仍继承 containerd service cgroup；预算计算、Host controller transaction、动态更新、重启恢复和双层压力矩阵待实现。极端 unchecked `memory.max` 下调可能超过 10 秒 Guest RPC，按 `K8S-OQ-017` 跟踪，不计作 S3.4b 通过能力。
+S3.4c.2～S3.4d 尚未完成。Host 上尚无 Pod VM leaf，Shim/VMM/virtiofs/辅助进程仍继承 containerd service cgroup；watchdog、external owners、gate/identity、controller WAL、RuntimeClass overhead、云端压力和重启恢复待实现。极端 unchecked `memory.max` 下调按 `K8S-OQ-017` 跟踪。
 
 ## 验证
 
-S3.4b 的本地 Agent resources/device/capability、Shim resources/rootfs/device policy 和 Go helper 独立复跑全部通过。云端 `inv-8853vxgxh1`、`inv-k852mwg8ud`、`inv-9855pngtst`、`inv-08564809p0`、`inv-68569j047d`、`inv-v856bt07f9` 与 `inv-6856c8gt1t` 均成功；固定输出、controller 读数和 cleanup 哈希见 `evidence/s3.4/s3.4b-*.txt`。
+S3.4b 验证保持不变。S3.4c.1 输入探针 `inv-v856u30wn5`、`inv-985738gw5i`、`inv-v8576v08e1`、`inv-a857xtgv7s` 成功；有效 systemd 门禁 `inv-38589x0k30` 为 200/200、failures=0、cleanup exact、dropped=0。早期无效探针已排除并由 `inv-v858720f7k`、`inv-08589cgxsg` 精确清理。证据见 `evidence/s3.4/s3.4c-*`。
 
 ## 阻塞
 
-无外部阻塞。`K8S-OQ-014`～`K8S-OQ-016` 进入 Host 包络设计与双层组合验证，`K8S-OQ-017` 记录极端 unchecked 内存下调的 RPC/异步语义；只操作本 PoC 创建的 CVM/自建 Kubernetes 和指定私有 COS，不触碰账号内其他资源。
+无外部阻塞。`K8S-OQ-014`～`K8S-OQ-016` 已有设计结论，等待 S3.4c.2～c.4 实现/压力关闭；`K8S-OQ-017`～`019` 继续跟踪极端内存下调、VM hotplug 与有限 Pod PID 语义。只操作本 PoC 创建的 CVM/自建 Kubernetes 和指定私有 COS，不触碰账号内其他资源。
 
 ## 受保护路径
 
@@ -30,4 +30,4 @@ S3.4b 的本地 Agent resources/device/capability、Shim resources/rootfs/device
 
 ## 下一步
 
-执行 S3.4c.1：只读梳理 RunPodSandbox/CreateTask/VM 启动与 containerd update 路径，冻结 Pod 有效预算算法、唯一 Host cgroup owner/path、Shim/VMM/virtiofs/辅助进程归属，以及创建、更新、删除、失败回滚和重启恢复状态机；形成固定测试向量和设计文档，交同一 reviewer 批准后进入 S3.4c.2。
+执行 S3.4c.2：先实现 classifier/path 与 external lifecycle/双 owner schema，再实现 watchdog service、readiness gate、ServerIdentity/pidfd、systemd/cgroupfs leaf 和 cleanup state machine；补 response 后 failpoints、containment breach/PID 诱饵、containerd restart/kill Shim/legacy tests。全部本地与特权验证通过后交同一 reviewer，直到明确 `APPROVE S3.4c.2` 才进入 S3.4c.3。

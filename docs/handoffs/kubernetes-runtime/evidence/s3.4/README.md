@@ -161,6 +161,25 @@ S3.4a 只冻结输入、现状与精确缺口，不把“请求被接受”记�
 
 边界：checkBeforeUpdate=false 且把 `memory.max` 猛降到远低于当前用量时，内核 reclaim 可能超过 Shim-Agent 10 秒 RPC；失败诊断已隔离且最终节点清洁，但该极端路径没有记成通过能力，转入 `K8S-OQ-017`。S3.4b 通过范围是写前拒绝、unchecked 有界下调和稳定 limit 下的 OOM 语义。
 
+## S3.4c.1 Host Pod VM 包络设计
+
+状态：`DONE`。冻结设计见 [`s3.4c-design.md`](./s3.4c-design.md)，紧凑证据见
+[`s3.4c-design-evidence.txt`](./s3.4c-design-evidence.txt)。同一 reviewer 进行了四轮复审，最终
+明确返回 `APPROVE S3.4c DESIGN`。
+
+- kubelet 独占 Pod parent，Cube leaf 只表达静态 VM capacity 加 RuntimeClass overhead，Guest
+  Agent 继续独占 per-container cgroup；动态 resize 不依赖 containerd sandbox Update。
+- managed/legacy classification、OCI cgroup path、bootstrap gate、immutable/containment identity、
+  pidfd、bundle 外 takeover record、长期 watchdog 和全局 socket cleanup 契约已冻结。
+- lifecycle 在首次 mutation 前建立 HostCgroup/RuntimeResource canonical owners；cleanup 必须
+  先 revoke operation-owner epoch、把两个 owner durable handoff，再停止精确 server identity。
+- controller 使用 INTENT-before-write WAL、唯一 owner/epoch、operation lock 与封闭恢复决策表；
+  RuntimeResource 每项分配也必须先持久化可 reconcile 的 allocation INTENT。
+- `inv-38589x0k30` 在目标 systemd `255.4-1ubuntu8` 对
+  `PIDs + Delegate + CollectMode=inactive-or-failed` 连续执行 200 次，结果 `failures=0`、
+  `left_units=0`、`left_cgroups=0`、`cleanup=exact` 且 TAT `dropped=0`。该结果只覆盖当前
+  package/build/boot，新环境仍须重新门禁。
+
 ## 待关闭
 
 - `K8S-OQ-014`：Host Pod VM 包络的进程归属、计算输入与 overhead 处理。
