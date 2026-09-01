@@ -1194,6 +1194,7 @@ impl SandBox {
         id: String,
         spec: Spec,
         info: ContainerInfo,
+        resources_v2: Option<Vec<u8>>,
     ) -> CResult<()> {
         let mut containers = self.containers.lock().await;
         if containers.contains_key(&id) {
@@ -1210,6 +1211,7 @@ impl SandBox {
             info,
             self.tx_containerd.clone(),
             self.app_snapshot_create(),
+            resources_v2,
         )?;
         c.create_container().await?;
         containers.insert(id, c);
@@ -1364,10 +1366,18 @@ impl SandBox {
         }
         Err(Error::NotFoundError(format!("not found container:{}", id)))
     }
-    pub async fn update_container(&mut self, id: &String, res: &LinuxResources) -> Result<()> {
+    pub async fn update_container(
+        &mut self,
+        id: &String,
+        res: &LinuxResources,
+        resources_v2: Option<&[u8]>,
+    ) -> Result<()> {
         let mut containers = self.containers.lock().await;
         if let Some(c) = containers.get_mut(id) {
-            return c.update(res).await.map_err(|e| Error::Other(e.to_string()));
+            return c
+                .update(res, resources_v2)
+                .await
+                .map_err(|e| Error::Other(e.to_string()));
         }
         Err(Error::NotFoundError(format!("not found container:{}", id)))
     }
@@ -1940,6 +1950,7 @@ mod tests {
             ContainerInfo::default(),
             tx.clone(),
             false,
+            None,
         )
         .unwrap();
         let sandbox = SandBox::new("sandbox".to_string(), Log::default(), false, tx);

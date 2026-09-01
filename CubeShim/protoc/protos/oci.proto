@@ -294,6 +294,16 @@ message LinuxResources {
 
 	// Network restriction configuration
 	LinuxNetwork network = 7;
+
+	// Presence-preserving OCI linux.resources transport negotiated by
+	// Kubernetes-managed Cube sandboxes.
+	LinuxResourcesV2 resourceV2 = 8;
+}
+
+message LinuxResourcesV2 {
+	uint32 version = 1;
+	string mediaType = 2;
+	bytes value = 3;
 }
 
 message LinuxMemory {

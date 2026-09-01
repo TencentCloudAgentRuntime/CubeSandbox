@@ -4,6 +4,7 @@
 
 pub mod container_mgr;
 pub mod exec;
+pub(crate) mod resources;
 pub mod rootfs;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -453,6 +454,9 @@ pub struct Container {
     tx_containerd: Sender<(String, Box<dyn MessageDyn>)>,
     execs: Arc<Mutex<HashMap<String, Exec>>>,
     app_snapshot: bool,
+    /// Canonical, strictly validated OCI linux.resources JSON for the
+    /// negotiated V2 transport. `None` preserves the legacy Cubebox path.
+    resources_v2: Option<Vec<u8>>,
     /// Background task forwarding container stdout/stderr to log files.
     /// Template creation: /data/log/template/<id>/stdout|stderr (755 dir).
     /// Normal sandbox: ./stdout and ./stderr relative to the bundle directory.
@@ -473,6 +477,7 @@ impl Container {
         info: ContainerInfo,
         tx_containerd: Sender<(String, Box<dyn MessageDyn>)>,
         app_snapshot: bool,
+        resources_v2: Option<Vec<u8>>,
     ) -> CResult<Self> {
         let mut id = real_id.clone();
         if let Some(annos) = spec.annotations().as_ref() {
@@ -500,6 +505,7 @@ impl Container {
             execs: Arc::new(Mutex::new(HashMap::new())),
             tx_containerd,
             app_snapshot,
+            resources_v2,
             log_forward: LogForwardHandle::new(),
         };
         Ok(c)
@@ -689,6 +695,9 @@ impl Container {
 
         res.mut_cpu().clear_cpus();
         res.mut_cpu().clear_mems();
+        if let Some(payload) = self.resources_v2.as_ref() {
+            res.set_resourceV2(resources::envelope(payload.clone()));
+        }
 
         let mut nss = Vec::new();
         for ns in spec.get_linux().get_namespaces() {
@@ -1405,7 +1414,11 @@ impl Container {
         Ok((exit_code, exit_tm))
     }
 
-    pub async fn update(&mut self, res: &LinuxResources) -> CResult<()> {
+    pub async fn update(
+        &mut self,
+        res: &LinuxResources,
+        resources_v2: Option<&[u8]>,
+    ) -> CResult<()> {
         let mut pb_res = oci::LinuxResources::default();
 
         if let Some(c) = res.cpu() {
@@ -1432,6 +1445,9 @@ impl Container {
             if let Some(limit) = mem.limit() {
                 pb_res.mut_memory().set_limit(limit);
             }
+        }
+        if let Some(payload) = resources_v2 {
+            pb_res.set_resourceV2(resources::envelope(payload.to_vec()));
         }
 
         let req = agent::UpdateContainerRequest {
@@ -1501,6 +1517,7 @@ mod identity_translation_tests {
             ContainerInfo::default(),
             tx,
             false,
+            None,
         )
         .unwrap()
     }

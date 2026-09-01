@@ -23,6 +23,7 @@ use tokio::sync::{Mutex, Notify};
 use tokio::time::{sleep, Duration};
 
 use crate::common::utils::Utils;
+use crate::container::resources::RESOURCE_V2_CAPABILITY;
 use crate::sandbox::sb;
 use crate::service::runtime_resource::{self, RuntimeLease};
 use crate::service::task_srv::TaskService;
@@ -312,6 +313,9 @@ impl SandboxService {
                         sandbox.create_sandbox().await?;
                         if !sandbox.agent_supports(REQUIRED_SANDBOX_CAPABILITY, 1) {
                             return Err(format!("guest agent lacks required capability {REQUIRED_SANDBOX_CAPABILITY}>=1"));
+                        }
+                        if !sandbox.agent_supports(RESOURCE_V2_CAPABILITY, 1) {
+                            return Err(format!("guest agent lacks required capability {RESOURCE_V2_CAPABILITY}>=1"));
                         }
                         Ok::<(), String>(())
                     }.await;

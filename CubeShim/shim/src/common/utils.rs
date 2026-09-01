@@ -201,14 +201,25 @@ impl Utils {
     }
 
     pub fn load_spec(bundle: &str) -> CResult<Spec> {
+        let raw = Self::read_spec(bundle)?;
+        Self::parse_spec(&raw, bundle)
+    }
+
+    /// Read config.json without first constructing a lossy JSON/OCI value.
+    /// Managed resource validation consumes these bytes before calling
+    /// `parse_spec`.
+    pub(crate) fn read_spec(bundle: &str) -> CResult<Vec<u8>> {
         let mut conf_path = PathBuf::from(bundle);
         conf_path.push("config.json");
-        let raw = fs::read(&conf_path).map_err(|error| {
+        fs::read(&conf_path).map_err(|error| {
             format!(
                 "host Shim spec-validation failed: OCI spec I/O error: {} bundle:{}",
                 error, bundle
             )
-        })?;
+        })
+    }
+
+    pub(crate) fn parse_spec(raw: &[u8], bundle: &str) -> CResult<Spec> {
         let value: serde_json::Value = serde_json::from_slice(&raw).map_err(|error| {
             format!(
                 "host Shim spec-validation failed: invalid OCI spec JSON: {} bundle:{}",

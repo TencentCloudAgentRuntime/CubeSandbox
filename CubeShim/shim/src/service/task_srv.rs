@@ -29,6 +29,7 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 
 use crate::common::utils::Utils;
+use crate::container::resources;
 use crate::container::{container_mgr::ContainerInfo, exec::Tty};
 use crate::log::{stat_defer, Log, LogLevel};
 use crate::sandbox::sb;
@@ -378,8 +379,31 @@ impl Task for TaskService {
             self.log.clone(),
         );
 
+        let task_reservation = self
+            .sandbox_lifecycle
+            .reserve_task_create(&req.id)
+            .await
+            .map_err(|error| Error::Other(format!("Create task before sandbox ready: {error}")))?;
+        let task_mode = task_reservation.mode();
+
         let bundle = req.bundle.as_str();
-        let mut spec = Utils::load_spec(bundle).map_err(|e| {
+        let (spec, resources_v2) = match task_mode {
+            TaskMode::Legacy => (Utils::load_spec(bundle), None),
+            TaskMode::ManagedReady { .. } => {
+                let raw = Utils::read_spec(bundle);
+                match raw {
+                    Ok(raw) => {
+                        let payload = resources::canonicalize_create_config(&raw);
+                        match payload {
+                            Ok(payload) => (Utils::parse_spec(&raw, bundle), Some(payload)),
+                            Err(error) => (Err(error), None),
+                        }
+                    }
+                    Err(error) => (Err(error), None),
+                }
+            }
+        };
+        let mut spec = spec.map_err(|e| {
             errf!(self.log, "Load spec failed:{}", e.clone());
             Others(format!("Load spec failed:{}", e))
         })?;
@@ -387,13 +411,6 @@ impl Task for TaskService {
             errf!(self.log, "Validate OCI bind sources failed:{}", e);
             Others(format!("Validate OCI bind sources failed:{}", e))
         })?;
-
-        let task_reservation = self
-            .sandbox_lifecycle
-            .reserve_task_create(&req.id)
-            .await
-            .map_err(|error| Error::Other(format!("Create task before sandbox ready: {error}")))?;
-        let task_mode = task_reservation.mode();
 
         let result = async {
             let mut prepared_rootfs = match task_mode {
@@ -481,7 +498,10 @@ impl Task for TaskService {
                 terminal: req.terminal,
                 ..Default::default()
             };
-            if let Err(e) = sb.create_container(req.id.clone(), spec, info).await {
+            if let Err(e) = sb
+                .create_container(req.id.clone(), spec, info, resources_v2)
+                .await
+            {
                 let message = format!("Create container failed:{}", e);
                 errf!(self.log, "{}", message);
                 return Err(create_error_with_rootfs_cleanup(&mut prepared_rootfs, message).into());
@@ -811,19 +831,44 @@ impl Task for TaskService {
         req: api::UpdateTaskRequest,
     ) -> TtrpcResult<api::Empty> {
         infof!(self.log, "update req start, id:{}", &req.id);
+        let managed = self.sandbox_lifecycle.is_managed().await;
+        let parsed_resources = if let Some(resource) = req.resources.as_ref() {
+            let resources_v2 = if managed {
+                if resource.type_url != resources::OCI_LINUX_RESOURCES_TYPE_URL {
+                    return Err(Error::Other(format!(
+                        "Invalid resource type URL {:?}; expected {}",
+                        resource.type_url,
+                        resources::OCI_LINUX_RESOURCES_TYPE_URL
+                    ))
+                    .into());
+                }
+                Some(
+                    resources::canonicalize_update(resource.value.as_slice()).map_err(|error| {
+                        Error::Other(format!("Invalid raw resource config:{error}"))
+                    })?,
+                )
+            } else {
+                None
+            };
+            let resources = Utils::get_oci_res(resource.value.as_slice())
+                .map_err(|e| Error::Other(format!("Invalid format process config:{}", e)))?;
+            Some((resources, resources_v2))
+        } else {
+            None
+        };
         let outcome = {
             let mut sb = self.sandbox.lock().await;
             if sb.paused().await {
                 errf!(self.log, "sandbox not in normal state");
                 return Err(Others(format!("sandbox not in normal state")));
             }
-            if let Some(resource) = req.resources.as_ref() {
-                let res = Utils::get_oci_res(resource.value.as_slice())
-                    .map_err(|e| Error::Other(format!("Invalid format process config:{}", e)))?;
-                sb.update_container(&req.id, &res).await.map_err(|e| {
-                    errf!(self.log, "update container failed:{}", e);
-                    e
-                })?;
+            if let Some((resources, resources_v2)) = parsed_resources.as_ref() {
+                sb.update_container(&req.id, resources, resources_v2.as_deref())
+                    .await
+                    .map_err(|e| {
+                        errf!(self.log, "update container failed:{}", e);
+                        e
+                    })?;
             }
 
             sb.update_sandbox(&req.annotations).await.map_err(|e| {

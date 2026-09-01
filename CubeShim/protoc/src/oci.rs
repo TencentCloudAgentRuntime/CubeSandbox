@@ -5256,6 +5256,7 @@ pub struct LinuxResources {
     pub blockIO: ::protobuf::SingularPtrField<LinuxBlockIO>,
     pub hugepageLimits: ::protobuf::RepeatedField<LinuxHugepageLimit>,
     pub network: ::protobuf::SingularPtrField<LinuxNetwork>,
+    pub resourceV2: ::protobuf::SingularPtrField<LinuxResourcesV2>,
     // special fields
     #[cfg_attr(feature = "with-serde", serde(skip))]
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -5488,6 +5489,39 @@ impl LinuxResources {
     pub fn take_network(&mut self) -> LinuxNetwork {
         self.network.take().unwrap_or_else(|| LinuxNetwork::new())
     }
+
+    // .grpc.LinuxResourcesV2 resourceV2 = 8;
+
+
+    pub fn get_resourceV2(&self) -> &LinuxResourcesV2 {
+        self.resourceV2.as_ref().unwrap_or_else(|| <LinuxResourcesV2 as ::protobuf::Message>::default_instance())
+    }
+    pub fn clear_resourceV2(&mut self) {
+        self.resourceV2.clear();
+    }
+
+    pub fn has_resourceV2(&self) -> bool {
+        self.resourceV2.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_resourceV2(&mut self, v: LinuxResourcesV2) {
+        self.resourceV2 = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_resourceV2(&mut self) -> &mut LinuxResourcesV2 {
+        if self.resourceV2.is_none() {
+            self.resourceV2.set_default();
+        }
+        self.resourceV2.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_resourceV2(&mut self) -> LinuxResourcesV2 {
+        self.resourceV2.take().unwrap_or_else(|| LinuxResourcesV2::new())
+    }
 }
 
 impl ::protobuf::Message for LinuxResources {
@@ -5527,6 +5561,11 @@ impl ::protobuf::Message for LinuxResources {
                 return false;
             }
         };
+        for v in &self.resourceV2 {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
         true
     }
 
@@ -5554,6 +5593,9 @@ impl ::protobuf::Message for LinuxResources {
                 },
                 7 => {
                     ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.network)?;
+                },
+                8 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.resourceV2)?;
                 },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
@@ -5595,6 +5637,10 @@ impl ::protobuf::Message for LinuxResources {
             let len = v.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         }
+        if let Some(ref v) = self.resourceV2.as_ref() {
+            let len = v.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -5633,6 +5679,11 @@ impl ::protobuf::Message for LinuxResources {
         };
         if let Some(ref v) = self.network.as_ref() {
             os.write_tag(7, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
+        if let Some(ref v) = self.resourceV2.as_ref() {
+            os.write_tag(8, ::protobuf::wire_format::WireTypeLengthDelimited)?;
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         }
@@ -5709,6 +5760,11 @@ impl ::protobuf::Message for LinuxResources {
                 |m: &LinuxResources| { &m.network },
                 |m: &mut LinuxResources| { &mut m.network },
             ));
+            fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<LinuxResourcesV2>>(
+                "resourceV2",
+                |m: &LinuxResources| { &m.resourceV2 },
+                |m: &mut LinuxResources| { &mut m.resourceV2 },
+            ));
             ::protobuf::reflect::MessageDescriptor::new_pb_name::<LinuxResources>(
                 "LinuxResources",
                 fields,
@@ -5732,6 +5788,7 @@ impl ::protobuf::Clear for LinuxResources {
         self.blockIO.clear();
         self.hugepageLimits.clear();
         self.network.clear();
+        self.resourceV2.clear();
         self.unknown_fields.clear();
     }
 }
@@ -5743,6 +5800,246 @@ impl ::std::fmt::Debug for LinuxResources {
 }
 
 impl ::protobuf::reflect::ProtobufValue for LinuxResources {
+    fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
+        ::protobuf::reflect::ReflectValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+#[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "with-serde", serde(default))]
+pub struct LinuxResourcesV2 {
+    // message fields
+    pub version: u32,
+    pub mediaType: ::std::string::String,
+    pub value: ::std::vec::Vec<u8>,
+    // special fields
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub unknown_fields: ::protobuf::UnknownFields,
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a LinuxResourcesV2 {
+    fn default() -> &'a LinuxResourcesV2 {
+        <LinuxResourcesV2 as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl LinuxResourcesV2 {
+    pub fn new() -> LinuxResourcesV2 {
+        ::std::default::Default::default()
+    }
+
+    // uint32 version = 1;
+
+
+    pub fn get_version(&self) -> u32 {
+        self.version
+    }
+    pub fn clear_version(&mut self) {
+        self.version = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_version(&mut self, v: u32) {
+        self.version = v;
+    }
+
+    // string mediaType = 2;
+
+
+    pub fn get_mediaType(&self) -> &str {
+        &self.mediaType
+    }
+    pub fn clear_mediaType(&mut self) {
+        self.mediaType.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_mediaType(&mut self, v: ::std::string::String) {
+        self.mediaType = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_mediaType(&mut self) -> &mut ::std::string::String {
+        &mut self.mediaType
+    }
+
+    // Take field
+    pub fn take_mediaType(&mut self) -> ::std::string::String {
+        ::std::mem::replace(&mut self.mediaType, ::std::string::String::new())
+    }
+
+    // bytes value = 3;
+
+
+    pub fn get_value(&self) -> &[u8] {
+        &self.value
+    }
+    pub fn clear_value(&mut self) {
+        self.value.clear();
+    }
+
+    // Param is passed by value, moved
+    pub fn set_value(&mut self, v: ::std::vec::Vec<u8>) {
+        self.value = v;
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_value(&mut self) -> &mut ::std::vec::Vec<u8> {
+        &mut self.value
+    }
+
+    // Take field
+    pub fn take_value(&mut self) -> ::std::vec::Vec<u8> {
+        ::std::mem::replace(&mut self.value, ::std::vec::Vec::new())
+    }
+}
+
+impl ::protobuf::Message for LinuxResourcesV2 {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.version = tmp;
+                },
+                2 => {
+                    ::protobuf::rt::read_singular_proto3_string_into(wire_type, is, &mut self.mediaType)?;
+                },
+                3 => {
+                    ::protobuf::rt::read_singular_proto3_bytes_into(wire_type, is, &mut self.value)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.version != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.version, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if !self.mediaType.is_empty() {
+            my_size += ::protobuf::rt::string_size(2, &self.mediaType);
+        }
+        if !self.value.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(3, &self.value);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        if self.version != 0 {
+            os.write_uint32(1, self.version)?;
+        }
+        if !self.mediaType.is_empty() {
+            os.write_string(2, &self.mediaType)?;
+        }
+        if !self.value.is_empty() {
+            os.write_bytes(3, &self.value)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: ::std::boxed::Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> LinuxResourcesV2 {
+        LinuxResourcesV2::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
+        descriptor.get(|| {
+            let mut fields = ::std::vec::Vec::new();
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                "version",
+                |m: &LinuxResourcesV2| { &m.version },
+                |m: &mut LinuxResourcesV2| { &mut m.version },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeString>(
+                "mediaType",
+                |m: &LinuxResourcesV2| { &m.mediaType },
+                |m: &mut LinuxResourcesV2| { &mut m.mediaType },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBytes>(
+                "value",
+                |m: &LinuxResourcesV2| { &m.value },
+                |m: &mut LinuxResourcesV2| { &mut m.value },
+            ));
+            ::protobuf::reflect::MessageDescriptor::new_pb_name::<LinuxResourcesV2>(
+                "LinuxResourcesV2",
+                fields,
+                file_descriptor_proto()
+            )
+        })
+    }
+
+    fn default_instance() -> &'static LinuxResourcesV2 {
+        static instance: ::protobuf::rt::LazyV2<LinuxResourcesV2> = ::protobuf::rt::LazyV2::INIT;
+        instance.get(LinuxResourcesV2::new)
+    }
+}
+
+impl ::protobuf::Clear for LinuxResourcesV2 {
+    fn clear(&mut self) {
+        self.version = 0;
+        self.mediaType.clear();
+        self.value.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::std::fmt::Debug for LinuxResourcesV2 {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::protobuf::text_format::fmt(self, f)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for LinuxResourcesV2 {
     fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
         ::protobuf::reflect::ReflectValueRef::Message(self)
     }
@@ -9575,7 +9872,7 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     majorB\0\x12\x16\n\x05minor\x18\x04\x20\x01(\x03R\x05minorB\0\x12\x1c\n\
     \x08fileMode\x18\x05\x20\x01(\rR\x08fileModeB\0\x12\x12\n\x03uid\x18\x06\
     \x20\x01(\rR\x03uidB\0\x12\x12\n\x03gid\x18\x07\x20\x01(\rR\x03gidB\0:\0\
-    \"\xeb\x02\n\x0eLinuxResources\x127\n\x07devices\x18\x01\x20\x03(\x0b2\
+    \"\xa5\x03\n\x0eLinuxResources\x127\n\x07devices\x18\x01\x20\x03(\x0b2\
     \x17.grpc.LinuxDeviceCgroupR\x07devicesB\x04\xc8\xde\x1f\0\x12+\n\x06mem\
     ory\x18\x02\x20\x01(\x0b2\x11.grpc.LinuxMemoryR\x06memoryB\0\x12\"\n\x03\
     cpu\x18\x03\x20\x01(\x0b2\x0e.grpc.LinuxCPUR\x03cpuB\0\x12%\n\x04pids\
@@ -9583,24 +9880,28 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x18\x05\x20\x01(\x0b2\x12.grpc.LinuxBlockIOR\x07blockIOB\0\x12F\n\x0ehu\
     gepageLimits\x18\x06\x20\x03(\x0b2\x18.grpc.LinuxHugepageLimitR\x0ehugep\
     ageLimitsB\x04\xc8\xde\x1f\0\x12.\n\x07network\x18\x07\x20\x01(\x0b2\x12\
-    .grpc.LinuxNetworkR\x07networkB\0:\0\"\xeb\x01\n\x0bLinuxMemory\x12\x16\
-    \n\x05limit\x18\x01\x20\x01(\x03R\x05limitB\0\x12\"\n\x0breservation\x18\
-    \x02\x20\x01(\x03R\x0breservationB\0\x12\x14\n\x04swap\x18\x03\x20\x01(\
-    \x03R\x04swapB\0\x12\x18\n\x06kernel\x18\x04\x20\x01(\x03R\x06kernelB\0\
-    \x12\x1e\n\tkernelTCP\x18\x05\x20\x01(\x03R\tkernelTCPB\0\x12\x20\n\nswa\
-    ppiness\x18\x06\x20\x01(\x04R\nswappinessB\0\x12,\n\x10disableOOMKiller\
-    \x18\x07\x20\x01(\x08R\x10disableOOMKillerB\0:\0\"\xda\x01\n\x08LinuxCPU\
-    \x12\x18\n\x06shares\x18\x01\x20\x01(\x04R\x06sharesB\0\x12\x16\n\x05quo\
-    ta\x18\x02\x20\x01(\x03R\x05quotaB\0\x12\x18\n\x06period\x18\x03\x20\x01\
-    (\x04R\x06periodB\0\x12*\n\x0frealtimeRuntime\x18\x04\x20\x01(\x03R\x0fr\
-    ealtimeRuntimeB\0\x12(\n\x0erealtimePeriod\x18\x05\x20\x01(\x04R\x0ereal\
-    timePeriodB\0\x12\x14\n\x04cpus\x18\x06\x20\x01(\tR\x04cpusB\0\x12\x14\n\
-    \x04mems\x18\x07\x20\x01(\tR\x04memsB\0:\0\"\x81\x01\n\x11LinuxWeightDev\
-    ice\x12\x16\n\x05major\x18\x01\x20\x01(\x03R\x05majorB\0\x12\x16\n\x05mi\
-    nor\x18\x02\x20\x01(\x03R\x05minorB\0\x12\x18\n\x06weight\x18\x03\x20\
-    \x01(\rR\x06weightB\0\x12\x20\n\nleafWeight\x18\x04\x20\x01(\rR\nleafWei\
-    ghtB\0:\0\"]\n\x13LinuxThrottleDevice\x12\x16\n\x05major\x18\x01\x20\x01\
-    (\x03R\x05majorB\0\x12\x16\n\x05minor\x18\x02\x20\x01(\x03R\x05minorB\0\
+    .grpc.LinuxNetworkR\x07networkB\0\x128\n\nresourceV2\x18\x08\x20\x01(\
+    \x0b2\x16.grpc.LinuxResourcesV2R\nresourceV2B\0:\0\"h\n\x10LinuxResource\
+    sV2\x12\x1a\n\x07version\x18\x01\x20\x01(\rR\x07versionB\0\x12\x1e\n\tme\
+    diaType\x18\x02\x20\x01(\tR\tmediaTypeB\0\x12\x16\n\x05value\x18\x03\x20\
+    \x01(\x0cR\x05valueB\0:\0\"\xeb\x01\n\x0bLinuxMemory\x12\x16\n\x05limit\
+    \x18\x01\x20\x01(\x03R\x05limitB\0\x12\"\n\x0breservation\x18\x02\x20\
+    \x01(\x03R\x0breservationB\0\x12\x14\n\x04swap\x18\x03\x20\x01(\x03R\x04\
+    swapB\0\x12\x18\n\x06kernel\x18\x04\x20\x01(\x03R\x06kernelB\0\x12\x1e\n\
+    \tkernelTCP\x18\x05\x20\x01(\x03R\tkernelTCPB\0\x12\x20\n\nswappiness\
+    \x18\x06\x20\x01(\x04R\nswappinessB\0\x12,\n\x10disableOOMKiller\x18\x07\
+    \x20\x01(\x08R\x10disableOOMKillerB\0:\0\"\xda\x01\n\x08LinuxCPU\x12\x18\
+    \n\x06shares\x18\x01\x20\x01(\x04R\x06sharesB\0\x12\x16\n\x05quota\x18\
+    \x02\x20\x01(\x03R\x05quotaB\0\x12\x18\n\x06period\x18\x03\x20\x01(\x04R\
+    \x06periodB\0\x12*\n\x0frealtimeRuntime\x18\x04\x20\x01(\x03R\x0frealtim\
+    eRuntimeB\0\x12(\n\x0erealtimePeriod\x18\x05\x20\x01(\x04R\x0erealtimePe\
+    riodB\0\x12\x14\n\x04cpus\x18\x06\x20\x01(\tR\x04cpusB\0\x12\x14\n\x04me\
+    ms\x18\x07\x20\x01(\tR\x04memsB\0:\0\"\x81\x01\n\x11LinuxWeightDevice\
+    \x12\x16\n\x05major\x18\x01\x20\x01(\x03R\x05majorB\0\x12\x16\n\x05minor\
+    \x18\x02\x20\x01(\x03R\x05minorB\0\x12\x18\n\x06weight\x18\x03\x20\x01(\
+    \rR\x06weightB\0\x12\x20\n\nleafWeight\x18\x04\x20\x01(\rR\nleafWeightB\
+    \0:\0\"]\n\x13LinuxThrottleDevice\x12\x16\n\x05major\x18\x01\x20\x01(\
+    \x03R\x05majorB\0\x12\x16\n\x05minor\x18\x02\x20\x01(\x03R\x05minorB\0\
     \x12\x14\n\x04rate\x18\x03\x20\x01(\x04R\x04rateB\0:\0\"\xf3\x03\n\x0cLi\
     nuxBlockIO\x12\x18\n\x06weight\x18\x01\x20\x01(\rR\x06weightB\0\x12\x20\
     \n\nleafWeight\x18\x02\x20\x01(\rR\nleafWeightB\0\x12A\n\x0cweightDevice\
