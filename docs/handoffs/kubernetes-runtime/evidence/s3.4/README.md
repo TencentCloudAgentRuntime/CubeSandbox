@@ -145,8 +145,25 @@ Cube 低层 Task 的 Host PID 同样位于 `/system.slice/containerd.service`；
 
 S3.4a 只冻结输入、现状与精确缺口，不把“请求被接受”记成能力支持，也不提前声明压力/OOM/驱逐语义完成。
 
+## S3.4b Guest per-container cgroup
+
+状态：`DONE`。最终实现基线为 `be8e7304`；同一 reviewer 已完成本地独立复跑和证据审计，并明确给出 `APPROVE S3.4b DONE`。
+
+- `inv-8853vxgxh1`：17 组 runc/Cube create/update 数值对照、10 个 shares 向量、21 个 invalid update、4 个 invalid create 与 exact cleanup 通过。非默认 CPU period、reservation、swap、cpuset、PIDs、hugepage 和 unified 白名单均生效；unsupported 输入 fail-closed。
+- `inv-k852mwg8ud`：在真实 Host cgroup v2 目录注入 write/readback/rollback fault，journal replay 后 controller 原值恢复，测试目录删除。
+- `inv-9855pngtst`：CPU throttle/unlimited、PIDs fork EAGAIN、稳定 96MiB OOM exit 137、checkBeforeUpdate 正反例、hugepage 配置、20 个 partial update、changed-device reject、PendingCreate 同 ID retry、survivor 和 exact cleanup 通过。
+- `inv-08564809p0`：Agent 缺少 capability 和 version=0 均在首个 task 前失败，逐项恢复 baseline，并恢复 canonical Agent。
+- `inv-68569j047d`：new Shim/new Agent 与 old Shim/new Agent 各连续 20 次，标准 rootfs 和动态 mount 均通过且精确清理，canonical Shim 恢复。
+- `inv-v856bt07f9`：实际 `RuntimeClass` 两容器 Pod 原地 resize；app weight `29→40`、memory `64Mi→96Mi`，Pod UID/IP、Sandbox、container ID、Shim start、VM inode 和 survivor controller 保持，删除后 14 类基线精确恢复。
+- `inv-6856c8gt1t`：最终独立预检 `cube_pods=0 lowlevel=0 vm=0 shim=0 active_leases=0`。
+
+固定 live CubeShim/Agent SHA-256 为 `398416c5…`/`2e3318e6…`。完整 invocation 输出、目录摘要、OOM/controller 读数和逐类 cleanup 哈希见 [`s3.4b-execution-summary.txt`](./s3.4b-execution-summary.txt)、[`s3.4b-runtime-behavior-summary.txt`](./s3.4b-runtime-behavior-summary.txt) 和 [`s3.4b-cleanup-hashes.txt`](./s3.4b-cleanup-hashes.txt)，文件 SHA-256 依次为 `af5d8627…`、`68253edb…`、`a0076216…`。
+
+边界：checkBeforeUpdate=false 且把 `memory.max` 猛降到远低于当前用量时，内核 reclaim 可能超过 Shim-Agent 10 秒 RPC；失败诊断已隔离且最终节点清洁，但该极端路径没有记成通过能力，转入 `K8S-OQ-017`。S3.4b 通过范围是写前拒绝、unchecked 有界下调和稳定 limit 下的 OOM 语义。
+
 ## 待关闭
 
 - `K8S-OQ-014`：Host Pod VM 包络的进程归属、计算输入与 overhead 处理。
 - `K8S-OQ-015`：Guest 更新和 Host 包络重算的顺序、幂等键与失败恢复。
 - `K8S-OQ-016`：swap、PIDs、hugepage 的 Guest/Host 分层，以及 ephemeral-storage 的 kubelet 边界。
+- `K8S-OQ-017`：极端 unchecked `memory.max` 下调的阻塞写、RPC deadline 与最终状态对账。

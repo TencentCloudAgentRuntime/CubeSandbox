@@ -2,27 +2,27 @@
 
 ## 当前 Stage
 
-S3.4b `IN_PROGRESS`：S3.4a 已获 `APPROVE S3.4a DONE`；Guest per-container cgroup 设计及 S3.4b.1～S3.4b.3 实现单元均获同一 reviewer 批准。当前执行 S3.4b.4 云端资源、压力、故障、兼容矩阵与独立审计。
+S3.4c.1 `IN_PROGRESS`：S3.4b 的四个实现单元及云端终验均已关闭，同一 reviewer 已给出 `APPROVE S3.4b DONE`。当前冻结 Host Pod VM 资源包络的输入、预算算法、cgroup owner/path 和生命周期事务。
 
 ## 基线
 
-最后一项已验证实现 commit 为 `8784815628adb70573673156dbfcee855766ef20`，tree 为 `7316bafdcf5fd573b10c9ce42c0cb4f0573b78da`。该单元尚未部署，Agent 未广告 resources-v2 capability，中间态始终 fail-closed。V15 source SHA-256 为 `d4400132…`，containerd trace/helper 为 `88476ece…`/`242a68a8…`；live 原始 containerd 为 `15e00263…`，CubeShim 为 `3c715652…`，Agent ext4 为 `87bac7a6…`。
+最后一项已验证实现 commit 为 `be8e7304c7ada8b4e7e13af8727613357a575bfb`，tree 为 `7aae3e6a7a96f76377be07a99f48da74ae769c76`；验收证据 commit 为 `136df12cd60ee3fa8b5e25759611cd68db3753fc`。项目 CVM 的最终 CubeShim/Agent SHA-256 为 `398416c5…`/`2e3318e6…`，resources-v2 capability 已启用并完成 missing/version-zero fail-closed 验证。
 
 ## 已完成
 
-S0、S1、S2.1～S2.4、S3.1～S3.3、S3.4a 全部 `DONE`。S3.4b 设计、S3.4b.1 Shim/Protocol、S3.4b.2 Agent transaction 和 S3.4b.3 fail-stop/PendingCreate 已获同一 reviewer 批准。Agent 已实现严格 V2 解码、presence/partial merge、cgroup v2 transaction、rollback/undo replay 与 degraded 门禁，以及 create/storage/rootfs/process/cgroup/FD 的显式所有权和幂等可重试清理。
+S0、S1、S2.1～S2.4、S3.1～S3.3、S3.4a～S3.4b 全部 `DONE`。S3.4b 已实现 resources-v2 严格协议、presence/partial merge、controller transaction、rollback/undo replay、degraded 门禁和 PendingCreate 清理；数值、压力/OOM/PIDs/hugepage、真实故障、capability、legacy、Kubernetes resize 与全量清理均通过，同一 reviewer 已最终批准。
 
 ## 未完成
 
-S3.4b.4 与 S3.4c～S3.4d 尚未完成。resources-v2 capability 广告、固定 SHA 云端部署和正式矩阵仍未完成。V15 的非默认 period、shares、limit-only swap、NoSwap、reservation、显式 swap、cpuset、PIDs、hugepage、unified、transaction/degraded 与 create cleanup 仍待真实 Guest 验收。
+S3.4c～S3.4d 尚未完成。Host 上尚无 Pod VM 总量包络，Shim/VMM/virtiofs/辅助进程仍继承 containerd service cgroup；预算计算、Host controller transaction、动态更新、重启恢复和双层压力矩阵待实现。极端 unchecked `memory.max` 下调可能超过 10 秒 Guest RPC，按 `K8S-OQ-017` 跟踪，不计作 S3.4b 通过能力。
 
 ## 验证
 
-S3.4b.3 的 `cargo check -p cube-agent`、`cargo test -p cube-agent --no-run`、格式和 diff 检查通过；rustjail 全量 128/129，唯一失败为受限本机 `container::tests::test_set_stdio_permissions` 的 `fchown` EINVAL；跳过该宿主机特定用例后的 128/128 稳定集连续三轮通过；Agent degraded/update/pending-create/shared-storage/tombstone 专项通过。S3.4a V15 构建、正式诊断和独立审计仍为 `SUCCESS`，完整摘要见 `evidence/s3.4/README.md`。
+S3.4b 的本地 Agent resources/device/capability、Shim resources/rootfs/device policy 和 Go helper 独立复跑全部通过。云端 `inv-8853vxgxh1`、`inv-k852mwg8ud`、`inv-9855pngtst`、`inv-08564809p0`、`inv-68569j047d`、`inv-v856bt07f9` 与 `inv-6856c8gt1t` 均成功；固定输出、controller 读数和 cleanup 哈希见 `evidence/s3.4/s3.4b-*.txt`。
 
 ## 阻塞
 
-无外部阻塞。`K8S-OQ-014`～`K8S-OQ-016` 继续 `VALIDATING`，但 V15 已给出可用于实现的父层权威值和精确缺口；只操作本 PoC 创建的 CVM/自建 Kubernetes 和指定私有 COS，不触碰账号内其他资源。
+无外部阻塞。`K8S-OQ-014`～`K8S-OQ-016` 进入 Host 包络设计与双层组合验证，`K8S-OQ-017` 记录极端 unchecked 内存下调的 RPC/异步语义；只操作本 PoC 创建的 CVM/自建 Kubernetes 和指定私有 COS，不触碰账号内其他资源。
 
 ## 受保护路径
 
@@ -30,4 +30,4 @@ S3.4b.3 的 `cargo check -p cube-agent`、`cargo test -p cube-agent --no-run`、
 
 ## 下一步
 
-执行 S3.4b.4：广告并握手 resources-v2 capability；构建、经指定私有 COS 投递并在项目 CVM 部署固定 SHA 的 Shim/Agent；完成 runc/Cube create/update 数值、CPU/内存/PIDs/hugepage 压力、transaction/degraded/create-cleanup 失败注入、legacy/unsupported 兼容路径、survivor 与 exact baseline 矩阵；保存证据并由同一 reviewer 独立审计。S3.4b 获批前不得开始 S3.4c。
+执行 S3.4c.1：只读梳理 RunPodSandbox/CreateTask/VM 启动与 containerd update 路径，冻结 Pod 有效预算算法、唯一 Host cgroup owner/path、Shim/VMM/virtiofs/辅助进程归属，以及创建、更新、删除、失败回滚和重启恢复状态机；形成固定测试向量和设计文档，交同一 reviewer 批准后进入 S3.4c.2。
