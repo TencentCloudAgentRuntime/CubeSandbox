@@ -892,7 +892,7 @@ pub fn merge(current: &mut LinuxResources, incoming: &LinuxResources) -> Result<
 mod tests {
     use super::*;
     use oci::{LinuxCpu, LinuxMemory, LinuxPids};
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::BTreeSet;
 
     #[derive(Default)]
@@ -959,6 +959,59 @@ mod tests {
         fn remove_journal(&self, _path: &Path) -> Result<()> {
             *self.journal.borrow_mut() = None;
             Ok(())
+        }
+    }
+
+    struct FaultingRealIo {
+        writes: Cell<usize>,
+        fail_writes: RefCell<BTreeSet<usize>>,
+        corrupt_readback: RefCell<Option<PathBuf>>,
+    }
+
+    impl FaultingRealIo {
+        fn new() -> Self {
+            Self {
+                writes: Cell::new(0),
+                fail_writes: RefCell::new(BTreeSet::new()),
+                corrupt_readback: RefCell::new(None),
+            }
+        }
+
+        fn reset_faults(&self) {
+            self.writes.set(0);
+            self.fail_writes.borrow_mut().clear();
+            *self.corrupt_readback.borrow_mut() = None;
+        }
+    }
+
+    impl ResourceIo for FaultingRealIo {
+        fn read(&self, path: &Path) -> Result<String> {
+            let value = RealResourceIo.read(path)?;
+            if self.corrupt_readback.borrow().as_deref() == Some(path) && self.writes.get() > 0 {
+                return Ok("injected-corrupt-readback".to_string());
+            }
+            Ok(value)
+        }
+
+        fn write(&self, path: &Path, value: &str) -> Result<()> {
+            let index = self.writes.get() + 1;
+            self.writes.set(index);
+            if self.fail_writes.borrow().contains(&index) {
+                bail!("injected real cgroup write {index}");
+            }
+            RealResourceIo.write(path, value)
+        }
+
+        fn write_journal(&self, path: &Path, journal: &UndoJournal) -> Result<()> {
+            RealResourceIo.write_journal(path, journal)
+        }
+
+        fn read_journal(&self, path: &Path) -> Result<UndoJournal> {
+            RealResourceIo.read_journal(path)
+        }
+
+        fn remove_journal(&self, path: &Path) -> Result<()> {
+            RealResourceIo.remove_journal(path)
         }
     }
 
@@ -1347,6 +1400,69 @@ mod tests {
         replay_with_io(&io, Path::new("/journal")).unwrap();
         assert_eq!(io.files.borrow()[Path::new("/cg/x/cpu.weight")], "100");
         assert!(io.journal.borrow().is_none());
+    }
+
+    #[test]
+    fn real_cgroup_io_rolls_back_and_replays_injected_failures() {
+        let Some(root) = std::env::var_os("CUBE_TEST_REAL_CGROUP_ROOT").map(PathBuf::from) else {
+            eprintln!(
+                "INFO: skipping real cgroup transaction test without CUBE_TEST_REAL_CGROUP_ROOT"
+            );
+            return;
+        };
+        assert!(root.starts_with("/sys/fs/cgroup/cubesandbox-s34b-realio-"));
+        assert!(root.is_dir());
+
+        let cpu_path = root.join("cpu.weight");
+        let oom_path = root.join("memory.oom.group");
+        let original_cpu = RealResourceIo.read(&cpu_path).unwrap();
+        let original_oom = RealResourceIo.read(&oom_path).unwrap();
+        let shares = if original_cpu == "100" { 512 } else { 1024 };
+        let target_cpu = cpu_shares_to_weight(shares).to_string();
+        let target_oom = if original_oom == "0" { "1" } else { "0" };
+        assert_ne!(target_cpu, original_cpu);
+        assert_ne!(target_oom, original_oom);
+
+        let resources = LinuxResources {
+            cpu: Some(LinuxCpu {
+                shares: Some(shares),
+                ..Default::default()
+            }),
+            unified: std::collections::HashMap::from([(
+                "memory.oom.group".to_string(),
+                target_oom.to_string(),
+            )]),
+            ..Default::default()
+        };
+        let journal_directory = tempfile::tempdir().unwrap();
+        let journal = journal_directory.path().join("resources-v2.undo.json");
+        let io = FaultingRealIo::new();
+
+        io.fail_writes.borrow_mut().insert(2);
+        let rolled_back = apply_with_io(&io, &root, &journal, &resources, true).unwrap_err();
+        assert_eq!(rolled_back.kind, TransactionFailureKind::RolledBack);
+        assert_eq!(RealResourceIo.read(&cpu_path).unwrap(), original_cpu);
+        assert_eq!(RealResourceIo.read(&oom_path).unwrap(), original_oom);
+        assert!(!journal.exists());
+
+        io.reset_faults();
+        io.fail_writes.borrow_mut().insert(3);
+        *io.corrupt_readback.borrow_mut() = Some(cpu_path.clone());
+        let degraded = apply_with_io(&io, &root, &journal, &resources, true).unwrap_err();
+        assert_eq!(degraded.kind, TransactionFailureKind::Degraded);
+        assert!(degraded
+            .rollback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("injected real cgroup write 3")));
+        assert!(journal.exists());
+        assert_eq!(RealResourceIo.read(&cpu_path).unwrap(), original_cpu);
+        assert_eq!(RealResourceIo.read(&oom_path).unwrap(), target_oom);
+
+        io.reset_faults();
+        replay_with_io(&io, &journal).unwrap();
+        assert_eq!(RealResourceIo.read(&cpu_path).unwrap(), original_cpu);
+        assert_eq!(RealResourceIo.read(&oom_path).unwrap(), original_oom);
+        assert!(!journal.exists());
     }
 
     #[test]
