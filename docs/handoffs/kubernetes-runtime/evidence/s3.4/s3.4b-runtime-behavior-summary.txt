@@ -1,0 +1,24 @@
+S3.4b controller/压力关键读数
+
+最终 runtime behavior：
+- identity：Pod UID 4cc59d6c-5cc3-447c-bfdf-ae5c2fd7bb6a；Sandbox 1c1cc1cd8aad961824161e1ea14b1fedca8de6fd07f1652599f410048964ab28；holder ddfaa01d3d265423ee2e4cf41777a4721815bb7c76a7e0e72e0482c0e4efd572；Pod IP 10.244.0.66；同一 Shim start time 与 VM inode 持续不变。
+- checkBeforeUpdate 前：memory.current=54870016；resource parent memory.max=134217728、memory.low=16777216、memory.swap.max=0、pids.max=32、cpu.max=`10000 100000`、cpu.weight=59。
+- checkBeforeUpdate=true 的低于 current 请求被拒绝；拒绝后上述 controller 值逐项不变。
+- checkBeforeUpdate=false 的有界下调提交为 memory.max=53821440；其他 controller 值保持。
+- 稳定 96MiB limit 下的 OOM：memory.events `oom 0→1`、`oom_kill 0→1`、`max 1029→1080`；目标 exec exit=137。
+- CPU 压力：受限窗口 nr_periods 27→54、nr_throttled 27→54、throttled_usec 2112610→4497041；恢复 unlimited 后用户态用量继续增长而 nr_throttled 保持 54。
+- PIDs 压力：fork 返回 EAGAIN，构成限制生效证据；该 Guest kernel 的 pids.events.max 未递增，单独分类为 platform observation，不把计数器不变解释成未限制。
+- hugepage：2MiB max 配置接受；Guest 全局 hugepage pool=0，因此只声明 controller 配置，不声明正向分配。
+- changed device rule：明确拒绝 `device policy is create-only and the requested rules differ from the create-time policy`；完全相同的 device 规则作为 no-op 接受。
+- partial update：20 个单字段/组合请求逐项验证 absent 字段保持；目标容器压力与 OOM 不影响同 Pod survivor。
+- PendingCreate：同一唯一 container ID 首次以 pids.limit=0 在资源 cgroup 建立后失败；脚本轮询并断言 container、task、overlay snapshot 和 runtime bundle 全不存在。随后以同一 ID、pids.limit=16 重试成功，Guest 读取 pids.max=16，再正常删除。该链路同时覆盖 helper 使用原 containerd namespace 执行事务式 container/snapshot rollback。
+
+最终 Kubernetes RuntimeClass smoke：
+- Pod UID、Sandbox ID、Pod IP、app container ID、survivor container ID、Shim start time 和 VM inode 在 resize 前后不变。
+- app：cpu.max `20000 100000→30000 100000`，cpu.weight `29→40`，memory.max `67108864→100663296`；memory.swap.max=0、memory.oom.group=1 保持。
+- survivor：cpu.max=`10000 100000`、cpu.weight=17、memory.max=33554432、memory.swap.max=0、memory.oom.group=1 全部保持。
+- 删除 Pod 后 containers/tasks/sandboxes/snapshots/runtime bundles/netns/shims/VM/adapter/shared/reaper/active leases/kubelet pod dirs/services 与运行前逐字节一致。
+
+真实 cgroup fault：
+- 故障前 cpu.weight=100、memory.oom.group=0。
+- 注入 mid-write/readback/rollback failure 后进入 journal/replay；replay 后 cpu.weight=100、memory.oom.group=0，原值恢复；真实 cgroup 专项 1/1 通过。

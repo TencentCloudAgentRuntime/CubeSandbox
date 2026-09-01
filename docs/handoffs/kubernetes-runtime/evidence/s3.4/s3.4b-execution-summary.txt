@@ -1,0 +1,72 @@
+S3.4b 云端执行摘要（不含凭据）
+日期：2026-09-01～2026-09-02（Asia/Beijing）
+目标：项目专用 CVM ins-pl7mznaa，自建 Kubernetes
+环境：Kubernetes/kubelet v1.36.4，containerd v2.3.4，Linux 6.6.69，amd64，cgroup v2
+
+最终 live 产物：
+Shim SHA-256 398416c5d6655e8ea2964cef7f9595dad6f15cdb8a541cf7a481a6503e9cfe56
+Agent ext4 SHA-256 2e3318e6a57af1452906dbb207bb6f9398a93e36aeb9c59f58c5c16e44b80368
+
+实现提交（87848156 之后）：
+90934bb4 resources-v2 capability
+a8abdc63 real cgroup fault test
+8ea90dd8 real cgroup path assertion
+2ea1aa2c BPF LDX encoding fix
+a5d93f62 unchanged device update compatibility
+350996c1 pids.limit=0 create rejection
+764d2d7d busy rootfs export detach
+d4aa00a2 rootfs mount ownership on path error
+91c36048 failed-create transactional rollback
+7487e8b5 namespace preservation during rollback
+be8e7304 cargo fmt only
+
+正式验收 invocation 与未截断终态：
+
+inv-8853vxgxh1 SUCCESS
+S34B_RESOURCE_MATRIX_OK pair_cases=17 invalid_updates=21 invalid_creates=4 runc_cube_parity=true shares_vectors=10 exact_cleanup=true
+evidence=/data/cubelet/s3.4-evidence/s34b-resource-matrix-20260901T185703Z-3041285
+
+inv-k852mwg8ud SUCCESS
+测试在 privileged、host cgroup namespace 的离线 builder 中显式设置 `CUBE_TEST_REAL_CGROUP_ROOT=/sys/fs/cgroup/cubesandbox-s34b-realio-*`，并把 Host `/sys/fs/cgroup` bind 进 builder；脚本同时要求真实目录的 `cpu.weight` 和 `memory.oom.group` 存在、`cgroup.procs` 为空，并拒绝 test log 中的 skip 标记。真实 cgroup fault test 1/1 通过；cpu.weight=100、memory.oom.group=0，rollback/replay 后原值恢复，退出时 rmdir 测试 cgroup。
+evidence=/data/cubelet/s3.4-evidence/s34b-real-cgroup-20260901T181421Z-2687492
+
+inv-9855pngtst SUCCESS
+S34B_RUNTIME_BEHAVIOR_OK pending_create_retry=true changed_device_reject=true cpu_pressure=true pids_pressure=true check_before_update=true oom_boundary=true memory_positive=true hugepage_config=true partial_updates=20 survivor=true exact_cleanup=true
+evidence=/data/cubelet/s3.4-evidence/s34b-runtime-behavior-20260901T195837Z-3395299
+
+inv-08564809p0 SUCCESS
+S34B_AGENT_CAPABILITY_FAILCLOSED_OK cases=missing,version-zero failure_before_task=true exact_cleanup=true canonical_restored=true
+evidence=/data/cubelet/s3.4-evidence/s34b-agent-capability-failclosed-20260901T201200Z-3417382
+
+inv-68569j047d SUCCESS
+S34B_LEGACY_COMPATIBILITY_OK new_shim_new_agent=true old_shim_new_agent=true standard_rootfs=true dynamic_mount=true cycles_each=20 exact_cleanup=true canonical_shim_restored=true
+evidence=/data/cubelet/s3.4-evidence/s34b-legacy-compatibility-20260901T201742Z-3427342
+
+inv-v856bt07f9 SUCCESS
+S34B_KUBERNETES_SMOKE_OK pod_uid=d40e20b3-7717-40c3-8652-138ad3c3686e sandbox=b24a348256bbee6c5282a712c662d444d9105da28670fdf5bb723857855756a6 ip=10.244.0.125 app=4fee00a03487c01e4b98a6569a458d043e881cdff322a136b068a66f854c2b63 survivor=c55977eb92d8db92f831c9f26b5df7567e1e7ebf1adb2404ef70c79cd6a2e08f no_swap=0 cpu=29_to_40 memory=64Mi_to_96Mi survivor_stable=true vm_stable=true cleanup=exact
+evidence=/data/cubelet/s3.4-evidence/s34b-kubernetes-smoke-20260901T202006Z-3433636
+
+inv-6856c8gt1t SUCCESS
+S34B_CLEAN_PREFLIGHT_OK cube_pods=0 lowlevel=0 vm=0 shim=0 active_leases=0
+
+inv-9856g2g5cg SUCCESS（stdout 因包含非关键 Pod JSON 被 TAT 标记 dropped=12303；本文件只使用丢弃发生前的目录摘要与基线结果）
+证据目录内容摘要 SHA-256：
+resource-matrix ca6c2e00ef453c212b40da219b9a57495238d4cf817498229fee2476188ddc17
+real-cgroup eb434aed147238a9662cf96333a3fe277cad90e17c99d7a0fc15c30221e62171
+runtime-behavior 9e7aab7e9a35cfd3495fb688e0c5e8cbc14ccda9cb685ceceb8398ace5f41907
+capability-failclosed e4433ee1f42c919aee76bae761e1d6a1ca0036079abf79513d494aaba5371bc6
+legacy-compatibility 865a755c3699a32d405751fed983256938fd85cbafab12f6f35c55c326817197
+kubernetes-smoke e82498ab11dc33cb9f6bc0c64426b8215b50c88954ed87b6990b4136eec4a3c9
+计算方法：按相对文件名排序，对每个文件执行 sha256sum，再对输出流执行 sha256sum；路径固定为上述 evidence 目录。
+
+本地复核：
+cargo fmt --all -- --check PASS
+cargo check -p cube-agent PASS
+cargo test -p rustjail cgroups::fs::resources_v2 -- --test-threads=1 PASS 17/17
+cargo test -p rustjail cgroups::fs::devices_v2 -- --test-threads=1 PASS 5/5
+go test ./cmd/s34-resource-evidence PASS
+git diff --check PASS
+
+已知边界（不得解释为通过）：
+失败诊断第六轮目录 /data/cubelet/s3.4-evidence/s34b-runtime-behavior-20260901T194231Z-3226426 中，memory.current=49393664；checkBeforeUpdate=false 把 memory.max 猛降至远低于当前用量时，Agent 写 controller 超过 Shim-Agent 10 秒 RPC deadline，返回 `Receive packet timeout Elapsed(())`，随后 ctr 观测 `DeadlineExceeded`。该轮只清理测试 owner 的 helper/shim/reaper/低层残留；无法安全复用的 bundle 被可恢复地隔离为 /opt/cubesandbox-s34b-v6-orphan-bundle-s34bb-runtime-pressure。最终节点 clean preflight 为零残留。
+最终通过矩阵只声明：checkBeforeUpdate=true 在写前拒绝并保持原值；checkBeforeUpdate=false 的小幅有界下调可提交；在稳定 memory.max=96MiB 下的独立 OOM 边界成立。极端下调的异步/超时语义进入后续开放问题，不伪装成本阶段已解决。
