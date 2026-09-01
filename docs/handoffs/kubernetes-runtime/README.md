@@ -2,7 +2,7 @@
 
 ## 当前 Stage
 
-S3.4b `IN_PROGRESS`：S3.4a V15 父 resource cgroup、`runtime` process leaf、实际 RuntimeClass/containerd runtime identity 和独立审计已闭环，同一 reviewer 已给出 `APPROVE S3.4a DONE`；当前冻结 Guest per-container cgroup 的协议与字段矩阵。
+S3.4b `IN_PROGRESS`：S3.4a V15 父 resource cgroup、`runtime` process leaf、实际 RuntimeClass/containerd runtime identity 和独立审计已闭环，同一 reviewer 已给出 `APPROVE S3.4a DONE`；Guest per-container cgroup 的协议、presence、字段矩阵、事务与失败语义已冻结，同一 reviewer 已给出 `APPROVE S3.4b DESIGN`，当前进入实现。
 
 ## 基线
 
@@ -30,4 +30,4 @@ S3.4a V15 构建 `inv-984uubgkt5`、稳定预检 `inv-b84uvagqkj`、正式诊断
 
 ## 下一步
 
-冻结 S3.4b 的协议版本、protobuf presence、create/update 字段矩阵、cgroup v2 转换、原子更新与错误语义，再提交同一 reviewer 审核设计。实现时保持 quota 与 `memory.max` 数值更新不回退，增加非默认 period create/update 以独立验证，统一 shares→weight 到当前 containerd/cgroups v3 语义，并修复 limit-only swap presence、无损处理/白名单 unified `memory.swap.max` 且保持 Kubernetes NoSwap 回归，以及 reservation update、显式 swap、cpuset、PIDs、hugepage 与 unified/fail-close；S3.4b 获批前不得开始 S3.4c。
+按已批准的 [`s3.4b-design.md`](evidence/s3.4/s3.4b-design.md) 实现：先完成 mirrored proto、Shim raw JSON/capability/V2 发包与 Agent strict decode/presence，再完成 cgroup v2 planner/transaction/merge/degraded 状态及 PendingCreate cleanup。保持 quota 与 `memory.max` 数值更新不回退，增加非默认 period，统一 shares→weight 到当前 containerd/cgroups v3 语义，并修复 limit-only swap presence、无损处理/白名单 unified、reservation、显式 swap、cpuset、PIDs 与 hugepage；本地测试和同一 reviewer 批准后再做云端矩阵，S3.4b 获批前不得开始 S3.4c。
