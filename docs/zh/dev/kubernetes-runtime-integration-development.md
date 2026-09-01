@@ -1,6 +1,6 @@
 # CubeSandbox Kubernetes RuntimeClass PoC 开发计划
 
-> 状态：执行中（S3.3 SecurityContext）
+> 状态：执行中（S3.4 资源控制）
 > 日期：2026-08-30  
 > 总体设计：[CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)  
 > 活动交接：[Kubernetes RuntimeClass PoC Handoff](../../../docs/handoffs/kubernetes-runtime/README.md)
@@ -328,14 +328,14 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 - 终止宽限期、SIGTERM/SIGKILL 和 TaskExit 事件时序有自动化测试。
 
 ## 8. S3：存储、安全与资源
-> Milestone 状态：`IN_PROGRESS`。S2、S3.1、S3.2 已完成；当前执行 S3.3。
+> Milestone 状态：`IN_PROGRESS`。S2、S3.1、S3.2、S3.3 已完成；当前执行 S3.4。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
 | S3.1 基础 Volume | `DONE` | Codex | 输入、独立 Pod Volume share、可写卷/失败回滚、四类投射卷动态更新、subPath 固定语义和最终支持矩阵均已关闭 | 实现 `5b504b58`；S3.1d 回归 `aafdef40` / `inv-a83u0wgvxv`；审计 `inv-v83u490xa8`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.1/README.md)；同一 reviewer 确认 S3.1 `DONE` | S3.2 filesystem PVC |
 | S3.2 PVC | `DONE` | Codex | S3.2a～S3.2d 已完成输入基线、跨容器/Pod 重建持久化、失败回滚、static-local Retain 手工重绑、组合回归与支持矩阵 | `83902212`；组合终验 `inv-a83x7s0g04`；独立审计 `inv-883xivg7ub`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.2/README.md)；同一 reviewer 确认 S3.2 `DONE` | S3.3 SecurityContext |
-| S3.3 SecurityContext | `IN_PROGRESS` | Codex | S3.3a～S3.3e 已完成输入诊断、身份与组、capability/rootfs、NNP/seccomp 和 privileged 双门禁 | S3.3e 实现 `d594a7fa`；部署 `inv-684bwgg03r`；终验 `inv-084cdrgc1k`；独立审计 `inv-384cpa0n8v`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.3/README.md)；同一 reviewer `APPROVE S3.3e DONE` | S3.3f 安全组合回归与支持矩阵 |
-| S3.4 资源控制 | `NOT_STARTED` | 待指定 | — | — | 实现 Host/Guest 双层 cgroup |
+| S3.3 SecurityContext | `DONE` | Codex | S3.3a～S3.3f 已完成输入诊断、身份与组、capability/rootfs、NNP/seccomp、privileged 双门禁、exec 安全上下文和组合支持矩阵 | 实现 `7bf7f09d`；组合终验 `inv-v84gjpgj7k`；独立审计 `inv-884huw00ab`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.3/README.md)；同一 reviewer `APPROVE S3.3f DONE` | S3.4 资源控制 |
+| S3.4 资源控制 | `IN_PROGRESS` | Codex | 已拆分 S3.4a～S3.4d 并开始输入/现状诊断 | — | S3.4a 冻结 Kubernetes/CRI/OCI、Host/Guest cgroup 输入和当前差异 |
 
 ### S3.1 子阶段执行记录
 
@@ -364,7 +364,16 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 | S3.3c capabilities 与只读 rootfs | `DONE` | 固化 capability add/drop 和 rootfs 只读执行语义 | `drop ALL`、选择性 add、边界 capability 和只读写失败正反用例通过；Guest mask 与 OCI 输入一致；清理闭环 | `c55b759e` / `inv-b845t9grgt` / `inv-6846wbgtiv` / `inv-6847cm06pi`：两轮 18 个 Pod、26 个容器、9 个 Cube sandbox 覆盖五类 mask、CAP 40、RO/RW/emptyDir、非 TTY exec 和非法 capability host fail-closed；lease `479→488`、所有活动基线归零；legacy `inv-084814gvgg` 通过 324 项 race tests；同一 reviewer `APPROVE S3.3c DONE` |
 | S3.3d NNP 与 seccomp | `DONE` | 去除 NNP 静默降级并固化 RuntimeDefault seccomp | host NNP=true 时 Guest `NoNewPrivs=1`；false/true 正反用例和 RuntimeDefault 过滤行为通过；关闭 `K8S-OQ-013`；清理闭环 | `5a851245` 保留 NNP 并对当前 protobuf 无法表达的 seccomp 字段 fail-closed；Shim `60ba8906…`。`inv-b849phgapi` 两轮 8 Pod 验证 runc/Cube 的 NNP `0/1`、seccomp mode `0/2` 和 `unshare` 允许/阻断，4 个 Cube sandbox、lease `488→492`、active lease 0、精确基线恢复；`inv-3849tjgnmx` 独立审计通过；同一 reviewer `APPROVE S3.3d DONE` |
 | S3.3e privileged 双门禁 | `DONE` | 实现节点开关与 Pod 请求双门禁，只在 Guest 内提权 | 开关关闭时 privileged 请求明确失败；开关开启且 Pod 请求时才生效；普通 Pod 不提权；Host `/dev` 不透传；六次活动资源精确归零；同一 reviewer `APPROVE S3.3e DONE` | `d594a7fa` / `inv-684bwgg03r` / `inv-084cdrgc1k` / `inv-384cpa0n8v`：Shim `84c27649…`、Agent ext4 `87bac7a6…`；普通/privileged capability 与 mount 正反例、canonical OCI marker、Host `/dev` fail-closed、开关恢复均闭环；cgroup v2 的 Guest device rule 明确标为 E2E 不可观察，Agent wildcard 云单测 2/2 |
-| S3.3f 回归与支持矩阵 | `IN_PROGRESS` | 顺序重放安全子阶段并冻结首版支持范围 | 固定脚本 hash 的组合回归通过；正反用例、失败语义、lease/资源基线和支持矩阵闭环；同一 reviewer `APPROVE` | 设计 S3.3b～S3.3e 组合矩阵，先由同一 reviewer 审核，再在自管 Kubernetes 节点完整重放 |
+| S3.3f 回归与支持矩阵 | `DONE` | 顺序重放安全子阶段并冻结首版支持范围 | 固定脚本 hash 的组合回归通过；正反用例、失败语义、lease/资源基线和支持矩阵闭环；同一 reviewer `APPROVE` | `7bf7f09d` / `inv-v84gjpgj7k` / `inv-884huw00ab`：16 个 raw container、8 个 Cube sandbox/tombstone、lease `524→532`、14 类 exact baseline、21 项支持矩阵与 effective privileged switch=false 全部闭环；同一 reviewer `APPROVE S3.3f DONE` |
+
+### S3.4 子阶段执行记录
+
+| 子阶段 | 状态 | 目标 | 验收标准 | 当前结果/下一步 |
+|---|---|---|---|---|
+| S3.4a 资源输入与现状诊断 | `IN_PROGRESS` | 冻结 Kubernetes 1.36/containerd 2.3 在 cgroup v2 上对 CPU、内存、swap、PIDs、hugepages 和 ephemeral-storage 的职责边界，并定位 Cube create/update 的真实缺口 | runc/Cube 对照覆盖 BestEffort/Burstable/Guaranteed、request-only/limit、init/restartable sidecar/app；保存 raw Pod/CRI/ctr OCI、Host VM/Shim cgroup、Guest per-container cgroup 和 cleanup 基线；create/update/拒绝路径形成证据矩阵；同一 reviewer `APPROVE` | 先只读审计现有 Shim/Agent resource 转换、Task Update 和云端 cgroup 拓扑，再设计最小探针 |
+| S3.4b Guest per-container cgroup | `NOT_STARTED` | 让标准 OCI/Task Update 的 CPU、memory、swap、PIDs 与 hugepage 限制在 Guest 每容器 cgroup 生效 | create 与 update 后 Guest controller 文件和值正确；CPU throttle、memory OOM/oom_group、PIDs/hugepage 正反例可归因到目标容器；同 Pod survivor 不受影响；失败回滚无残留；同一 reviewer `APPROVE` | 依赖 S3.4a 冻结字段和当前缺口 |
+| S3.4c Host Pod VM 资源包络 | `NOT_STARTED` | 在 Host cgroup 对一个 Pod VM 的总 CPU/内存/进程资源实施上限，并正确处理 init、restartable sidecar、app 与动态更新 | Host 预算算法有固定测试向量；VM/VMM/virtiofs/辅助进程归入唯一 Pod cgroup；压力下 Host 上限生效且不影响其他 Pod；更新、OOM、删除和失败创建均收敛；同一 reviewer `APPROVE` | 依赖 S3.4a 的 Host 拓扑和 S3.4b 的 Guest 语义 |
+| S3.4d 压力回归与支持矩阵 | `NOT_STARTED` | 组合验证 Host/Guest 双层限制、QoS、更新、故障与非 cgroup 资源，并冻结首版范围 | 多容器 CPU/内存压力、定向 OOM、in-place update、swap/hugepage/PIDs、ephemeral-storage 责任边界均有通过或明确拒绝证据；lease/Pod/VM/cgroup 全量基线恢复；独立审计和同一 reviewer `APPROVE S3.4 DONE` | 依赖 S3.4b、S3.4c |
 
 
 ### 目标

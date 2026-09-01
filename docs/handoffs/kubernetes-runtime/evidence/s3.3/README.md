@@ -439,3 +439,100 @@ runtime-resource service 与目标节点健康。同一 reviewer 最终给出
 
 上述失败轮次均完成 owned Pod 清理、开关恢复和活动资源精确归零。S3.3e 只声明 Guest 内
 privileged 双门禁；Host device passthrough、GPU 与生产准入策略不在本阶段范围。
+
+## S3.3f：组合回归与支持矩阵
+
+### exec 安全上下文补齐
+
+实现提交为 `7bf7f09d`，实现 patch SHA-256 为
+`b73771d7676a1df4bc6e9c471cce28876d5e2aa45056dba948fdd4c50ff03185`。
+CubeShim 的非 TTY exec 现在从 OCI `Process` 到 Agent protobuf 保留五组 capability、
+rlimit 和 `noNewPrivileges`，同时保持 TTY 覆盖与既有 UID/GID/additionalGids 顺序语义。
+当前 Agent protobuf 无法无损表达的 `user.umask`、`commandLine`、`ioPriority`、
+`scheduler` 和 `execCPUAffinity` 在 passfd 分配前 fail-closed；raw OCI ingress 同时识别
+规范字段 `/execCPUAffinity` 和当前 oci-spec serde 名 `/execCpuAffinity`，避免 typed
+反序列化静默吞字段。AppArmor、OOM score 和 SELinux 仍按首版边界不在 exec 支持范围内。
+
+云端最终构建 `inv-984fnr0n8h` 为 `SUCCESS`，独立构建审计
+`inv-b84fx5ght7` 为 `SUCCESS`；证据目录为
+`/data/cubelet/s3.3-evidence/s3.3f-exec-build-v5-20260901T072642Z`。四项定向测试
+1/1/1/1、Shim 全量测试 164/164、all-targets check 和 release build 全部通过；固定
+vendor 为 18,350 个文件，content/tree SHA 分别为 `62479c28…` 和 `7d5d6d47…`。
+最终 Shim SHA-256 为
+`3c7156524fb62bd595840fd9e4cb306682a98f56b28c96a37623be76fa2770f3`。
+
+部署 `inv-384g480rcx` 与独立部署审计 `inv-884ga1gc5e` 均为 `SUCCESS`；证据目录为
+`/data/cubelet/s3.3-evidence/s3.3f-exec-deploy-20260901T074104Z`，旧 Shim 保存在
+`/opt/cubesandbox-s33f-predeploy-backup-exec-v1`。部署未重启 containerd，Agent ext4
+保持 `87bac7a6…`，部署前后 Cube Pod、Shim、VM 和 active lease 均为 0，节点开关保持
+`false`。
+
+### Kubernetes/Guest 组合回归
+
+正式脚本
+`CubeShim/sandbox-probe/scripts/verify-s33f-security-combined-cloud.sh` SHA-256 为
+`86cc6a1136966cf546d8bb37ed380a2389a69d95895246e56a1c26229a4c247a`；
+正式执行 `inv-v84gjpgj7k` 为 `SUCCESS`，证据目录为：
+
+`/data/cubelet/s3.3-evidence/s33f-20260901T075735Z-1024831`
+
+组合回归顺序覆盖 runc/Cube、Strict/Merge、classic init/restartable sidecar/app、
+UID/GID/supplemental groups/fsGroup、capability 五集合、RO/RW rootfs、NNP/seccomp、
+非 TTY exec、privileged 开关关闭/开启、同 Pod 普通与 privileged 容器、Host `/dev`
+负例、非法 capability 和 `runAsNonRoot=true + uid 0`。16 个成功容器均从原始 CRI 与
+ctr OCI 重算并绑定 Pod UID；exec 的 UID/GID/groups、capability bounding、
+`NoNewPrivs=1` 和 seccomp mode 2 在 runc/Cube 及开关前后相同。
+
+本轮记录 8 个唯一 Cube sandbox，lease record 从 `524` 增至 `532`；每条 record 的
+`highWatermark=1`，且恰有一条 inactive tombstone、一个 PREPARE 和一个 RELEASE，
+无 active lease。
+`before`、`after-off`、`after-on` 和 `cleanup` 的 containers、tasks、sandboxes、
+snapshots、netns、Cube shims、VM runtime、adapter、shared、reaper、cleanup marker、
+shared mount、active lease 和 runtime-resource 共 14 类集合逐字恢复基线。最终
+privileged effective config 与磁盘 fragment 均为 `false`，三项服务 active，Node
+Ready 且无 DiskPressure，Cube Pod/Shim/VM/active lease 全为 0。
+
+### 独立审计与冻结边界
+
+独立只读审计脚本
+`CubeShim/sandbox-probe/scripts/audit-s33f-security-combined-cloud.sh` SHA-256 为
+`972e9962c81dfd4d56916ef2705a5ff6cfd90ef14faec6b8b29dad80786c9a94`；
+最终审计 `inv-884huw00ab` 为 `SUCCESS`。审计不使用正式脚本生成的 normalized JSON
+作为结论，而是从 16 份 raw CRI/ctr OCI、Guest/exec 文本、Pod 与 CRI sandbox、
+lease JSONL、build/deploy evidence 和 live state 重新计算；另验证三类
+`StartError`、两类 kubelet no-record、Host `/dev` 的 privileged/hostPath/mountPath
+原始 Pod spec，以及 S3.3d 的 direct-bound NNP/seccomp 证据。
+
+最终支持矩阵共 21 项：
+
+- 12 项 `VERIFIED_THIS_RUN`：数值身份与 Strict/Merge groups、init/sidecar/app、
+  runtime-specific mount 差异、capability add/drop/CAP 40、RO/RW rootfs、
+  NNP/RuntimeDefault、Unconfined、非 TTY exec、privileged 双门禁和 mixed Pod；
+- 3 项 `REJECTED`：显式 Host `/dev`、`runAsNonRoot=true + uid 0`、Cube 非法
+  capability；
+- 3 项 `NOT_SUPPORTED_POC`：Host 自动设备枚举、TTY/stdin、host namespaces/
+  Host device passthrough/GPU；
+- 1 项 `SUPPORTED_BY_PRIOR_FIXED_EVIDENCE`：S3.3d 的 RuntimeDefault syscall
+  causality；
+- 2 项 `DEFERRED`：AppArmor/SELinux/procMount/unsafe sysctls，以及 cgroup v2
+  Guest `devices.list` 直接观察。
+
+这里的 mixed privileged + ordinary 只证明同一 Cube VM 内 per-container 配置未串扰，
+不声明恶意 sibling 隔离；runc 对非法 capability 的输入/Guest 行为只作为对照记录，
+拒绝结论属于 Cube fail-closed。
+
+### 失败迭代与恢复
+
+- 构建前两轮分别因 network-none 环境下 rustup 同步和错误 vendor 版本停止；第三轮通过
+  raw ingress 测试发现 oci-spec 的 `execCpuAffinity` 派生拼写，修正后才进入最终构建。
+- 组合回归前四轮依次修复 shell 局部变量、非 root Guest capability、Merge groups/mount
+  预期，并发现 exec NNP 的真实实现缺口；实现重构、重新构建和部署后继续。
+- `inv-984gdx0m1d` 发现 kubelet 对已有 `StartError` CRI record 的空日志可返回 rc 0；
+  脚本改为记录 rc 并精确要求 stdout 为空，cleanup 的 Pod/目录/lease/全量资源基线和
+  开关恢复均为 true。
+- 独立审计的失败轮次全部只读，依次收紧预期 trace、Bash `local` 初始化、Pod/CRI
+  message 编码和空 ID 集合的序列化表示，未修改正式证据或 live 状态。
+
+同一 reviewer 对实现、构建、部署、正式组合回归和独立审计逐项复核，最终明确给出
+`APPROVE S3.3f DONE`。S3.3 SecurityContext 至此完成；资源 requests/limits 与
+Host/Guest 双层 cgroup 进入 S3.4。
