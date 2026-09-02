@@ -1373,7 +1373,12 @@ impl Container {
                 .unwrap_or("")
                 .to_string();
         }
-        let client = self.client.as_ref().unwrap().lock().await;
+        // AgentServiceClient is a cheap cloneable ttrpc handle. Do not retain
+        // the handle mutex across ExecProcess: that RPC may stay open while
+        // passfd/process admission completes, and retaining the mutex would
+        // head-of-line block UpdateContainerResources and Stats for the whole
+        // sandbox.
+        let client = self.client.as_ref().unwrap().lock().await.clone();
 
         let _ = client
             .exec_process(self.ctx.clone(), &req)
@@ -1472,7 +1477,9 @@ impl Container {
             resources: Some(pb_res).into(),
             ..Default::default()
         };
-        let client = self.client.as_ref().unwrap().lock().await;
+        // Use an independent ttrpc handle so a long exec RPC cannot serialize
+        // resource updates behind the client-holder mutex.
+        let client = self.client.as_ref().unwrap().lock().await.clone();
 
         let _ = client
             .update_container(self.ctx.clone(), &req)

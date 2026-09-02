@@ -1302,7 +1302,8 @@ impl SandBox {
             .as_ref()
             .ok_or_else(|| Error::Other("guest agent is not connected".to_string()))?
             .lock()
-            .await;
+            .await
+            .clone();
         let req = agent::StatsContainerRequest {
             container_id: guest_container_id,
             ..Default::default()
