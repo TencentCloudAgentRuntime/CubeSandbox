@@ -4860,21 +4860,31 @@ where
     }
     verify_cgroup_cleanup_identity(path, parent_identity, leaf_identity)?;
 
-    let values = match properties() {
-        Ok(values) => values,
-        Err(query_error) => {
-            // systemctl show races scope collection: it can fail after the
-            // exact path was observed but before properties are returned.
-            // Only accept that race when the unit is now absent and the
-            // identity-bound leaf is empty.
-            if !unit_absent()? {
-                return Err(query_error);
+    let values = {
+        let mut query_attempt = 0;
+        loop {
+            match properties() {
+                Ok(values) => break values,
+                Err(query_error) => {
+                    // systemctl show races scope collection: it can fail
+                    // while LoadState still reports loaded, then become
+                    // inactive or absent milliseconds later. Retry only
+                    // after the exact path identity was verified above; an
+                    // absent unit still requires an empty identity-bound leaf.
+                    if unit_absent()? {
+                        if path.exists() {
+                            verify_cgroup_cleanup_identity(path, parent_identity, leaf_identity)?;
+                            verify_empty_cgroup(path)?;
+                        }
+                        return Ok(());
+                    }
+                    query_attempt += 1;
+                    if query_attempt >= 100 {
+                        return Err(query_error);
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
             }
-            if path.exists() {
-                verify_cgroup_cleanup_identity(path, parent_identity, leaf_identity)?;
-                verify_empty_cgroup(path)?;
-            }
-            return Ok(());
         }
     };
 
@@ -6214,7 +6224,7 @@ mod tests {
     use oci_spec::runtime::{LinuxBuilder, SpecBuilder};
     use std::os::unix::net::UnixListener;
     use std::process::Command as ProcessCommand;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Barrier};
     use std::thread;
 
@@ -6857,6 +6867,31 @@ mod tests {
             || panic!("an absent unit must not be reset"),
         )
         .unwrap();
+        fs::remove_dir_all(root).unwrap();
+
+        let (root, leaf, parent, identity) = empty_systemd_cleanup_fixture("collecting");
+        let property_calls = Arc::new(AtomicUsize::new(0));
+        let property_call = Arc::clone(&property_calls);
+        cleanup_systemd_target_with(
+            "fixture.scope",
+            &leaf,
+            &parent,
+            Some(&identity),
+            move || {
+                if property_call.fetch_add(1, Ordering::AcqRel) < 2 {
+                    Err("injected transient systemctl show failure".to_string())
+                } else {
+                    Ok(HashMap::from([(
+                        "ActiveState".to_string(),
+                        "inactive".to_string(),
+                    )]))
+                }
+            },
+            || Ok(false),
+            || panic!("inactive state must not reset the unit"),
+        )
+        .unwrap();
+        assert_eq!(property_calls.load(Ordering::Acquire), 3);
         fs::remove_dir_all(root).unwrap();
     }
 
