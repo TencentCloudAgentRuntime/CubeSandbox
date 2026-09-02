@@ -3567,11 +3567,29 @@ fn systemd_unit_absent(unit: &str) -> Result<bool, String> {
         .args(["show", unit, "--property=LoadState", "--value"])
         .output()
         .map_err(|error| format!("query systemd unit collection {unit}: {error}"))?;
-    let value = String::from_utf8_lossy(&output.stdout);
-    if output.status.success() {
-        return Ok(value.trim() == "not-found");
+    systemd_unit_absent_from_output(
+        unit,
+        output.status.success(),
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )
+}
+
+fn systemd_unit_absent_from_output(
+    unit: &str,
+    success: bool,
+    stdout: &str,
+    stderr: &str,
+) -> Result<bool, String> {
+    // systemctl versions disagree on the exit status for a collected unit:
+    // some return non-zero while still printing the authoritative LoadState
+    // value on stdout.  Classify that value before considering the status.
+    if stdout.trim() == "not-found" {
+        return Ok(true);
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    if success {
+        return Ok(false);
+    }
     if stderr.contains("could not be found") || stderr.contains("not found") {
         return Ok(true);
     }
@@ -6840,6 +6858,26 @@ mod tests {
         )
         .unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn systemd_absence_accepts_not_found_stdout_with_nonzero_status() {
+        assert!(
+            systemd_unit_absent_from_output("collected.scope", false, "not-found\n", "").unwrap()
+        );
+        assert!(!systemd_unit_absent_from_output("loaded.scope", true, "loaded\n", "").unwrap());
+        assert!(systemd_unit_absent_from_output(
+            "legacy.scope",
+            false,
+            "",
+            "Unit legacy.scope could not be found."
+        )
+        .unwrap());
+        assert!(
+            systemd_unit_absent_from_output("broken.scope", false, "", "")
+                .unwrap_err()
+                .contains("query systemd unit collection broken.scope")
+        );
     }
 
     #[test]
