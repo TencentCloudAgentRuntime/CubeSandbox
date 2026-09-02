@@ -370,8 +370,22 @@ pub(crate) fn canonicalize_create_config(raw: &[u8]) -> CResult<Vec<u8>> {
 }
 
 pub(crate) fn canonicalize_update(raw: &[u8]) -> CResult<Vec<u8>> {
-    let resources = parse_strict(raw, "Task.Update resources")?;
+    let mut resources = parse_strict(raw, "Task.Update resources")?;
     validate_resources(&resources, "resources")?;
+    // CRI UpdateContainerResources cannot express the OCI
+    // checkBeforeUpdate field. For a Kubernetes-managed sandbox, make an
+    // absent value safe by default whenever a finite memory limit is being
+    // changed: reject below-current downsizes before touching any controller
+    // instead of allowing a synchronous kernel reclaim to outlive the Agent
+    // RPC deadline. An explicit true/false from a lower-level Task client is
+    // still preserved verbatim.
+    if let StrictValue::Object(resources) = &mut resources {
+        if let Some(StrictValue::Object(memory)) = resources.get_mut("memory") {
+            if memory.contains_key("limit") && !memory.contains_key("checkBeforeUpdate") {
+                memory.insert("checkBeforeUpdate".to_string(), StrictValue::Bool(true));
+            }
+        }
+    }
     canonical_payload(resources)
 }
 
@@ -455,7 +469,31 @@ mod tests {
             br#"{"memory":{"limit":1048576},"devices":[{"allow":true,"access":"rwm"}]}"#,
         )
         .unwrap();
-        assert_eq!(payload, br#"{"memory":{"limit":1048576}}"#);
+        assert_eq!(
+            payload,
+            br#"{"memory":{"checkBeforeUpdate":true,"limit":1048576}}"#
+        );
+    }
+
+    #[test]
+    fn managed_memory_update_defaults_to_precheck_but_preserves_explicit_policy() {
+        let defaulted = canonicalize_update(br#"{"memory":{"limit":67108864}}"#).unwrap();
+        assert_eq!(
+            defaulted,
+            br#"{"memory":{"checkBeforeUpdate":true,"limit":67108864}}"#
+        );
+
+        let explicit_false =
+            canonicalize_update(br#"{"memory":{"checkBeforeUpdate":false,"limit":67108864}}"#)
+                .unwrap();
+        assert_eq!(
+            explicit_false,
+            br#"{"memory":{"checkBeforeUpdate":false,"limit":67108864}}"#
+        );
+
+        let reservation_only =
+            canonicalize_update(br#"{"memory":{"reservation":33554432}}"#).unwrap();
+        assert_eq!(reservation_only, br#"{"memory":{"reservation":33554432}}"#);
     }
 
     #[test]
