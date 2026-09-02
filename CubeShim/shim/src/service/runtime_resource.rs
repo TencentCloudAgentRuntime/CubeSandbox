@@ -57,6 +57,11 @@ const RUNTIME_REAPER_ROOT_ENV: &str = "CUBE_RUNTIME_RESOURCE_REAPER_DIR";
 const DEFAULT_RUNTIME_REAPER_ROOT: &str = "/data/cubelet/runtime-resource-reaper";
 const RUNTIMECLASS_OVERHEAD_CONFIG_ENV: &str = "CUBE_RUNTIMECLASS_OVERHEAD_CONFIG";
 const DEFAULT_RUNTIMECLASS_OVERHEAD_CONFIG: &str = "/etc/cubesandbox/runtimeclass-overhead.json";
+// Keep inferred Kubernetes Pod resources from producing a VM too small to
+// boot the supported Linux 6.6/PVM guest. Explicit cube.vmmres values are an
+// operator contract and therefore fail closed instead of being silently
+// increased.
+const MINIMUM_VM_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 // Linux 6.6 on the supported x86_64 PoC nodes defines PIDS_MAX as
 // PID_MAX_LIMIT + 1 and rejects numeric pids.max values >= PIDS_MAX.
 pub(crate) const LINUX_PIDS_MAX_LIMIT: u64 = 4_194_304;
@@ -2067,11 +2072,21 @@ fn resources_from_config(
         .map(|resources| resources.memory_limit_in_bytes)
         .filter(|memory| *memory > 0)
         .map(|memory| memory as u64)
-        .unwrap_or(256 * 1024 * 1024);
+        .unwrap_or(MINIMUM_VM_MEMORY_BYTES)
+        .max(MINIMUM_VM_MEMORY_BYTES);
     let memory_bytes = match configured.as_ref().and_then(|value| value.memory) {
-        Some(memory_mib) => memory_mib
-            .checked_mul(1024 * 1024)
-            .ok_or_else(|| "Cube VM memory annotation overflows bytes".to_string())?,
+        Some(memory_mib) => {
+            let memory_bytes = memory_mib
+                .checked_mul(1024 * 1024)
+                .ok_or_else(|| "Cube VM memory annotation overflows bytes".to_string())?;
+            if memory_bytes < MINIMUM_VM_MEMORY_BYTES {
+                return Err(format!(
+                    "Cube VM memory annotation {memory_mib}MiB is below the supported minimum {}MiB",
+                    MINIMUM_VM_MEMORY_BYTES / (1024 * 1024)
+                ));
+            }
+            memory_bytes
+        }
         None => inferred_memory,
     };
     if cpu == 0 || memory_bytes == 0 {
@@ -3079,7 +3094,37 @@ mod tests {
         };
         let resources = resources_from_config(&HashMap::new(), &config).unwrap();
         assert_eq!(resources.vcpu_count, 1);
-        assert_eq!(resources.memory_bytes, 256 * 1024 * 1024);
+        assert_eq!(resources.memory_bytes, MINIMUM_VM_MEMORY_BYTES);
+    }
+
+    #[test]
+    fn vm_resources_floor_small_cri_aggregate_but_reject_small_explicit_override() {
+        let mut config = sample_cri();
+        config
+            .linux
+            .as_mut()
+            .unwrap()
+            .resources
+            .as_mut()
+            .unwrap()
+            .memory_limit_in_bytes = 64 * 1024 * 1024;
+
+        let inferred = resources_from_config(&HashMap::new(), &config).unwrap();
+        assert_eq!(inferred.memory_bytes, MINIMUM_VM_MEMORY_BYTES);
+
+        let annotations = HashMap::from([(
+            ANNO_VM_RES.to_string(),
+            r#"{"cpu":1,"memory":64}"#.to_string(),
+        )]);
+        let error = resources_from_config(&annotations, &config).unwrap_err();
+        assert!(error.contains("below the supported minimum 256MiB"));
+
+        let annotations = HashMap::from([(
+            ANNO_VM_RES.to_string(),
+            r#"{"cpu":1,"memory":256}"#.to_string(),
+        )]);
+        let explicit = resources_from_config(&annotations, &config).unwrap();
+        assert_eq!(explicit.memory_bytes, MINIMUM_VM_MEMORY_BYTES);
     }
 
     fn poc_overhead_config() -> RuntimeClassOverheadConfig {

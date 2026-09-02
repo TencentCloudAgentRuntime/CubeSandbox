@@ -8,6 +8,7 @@ use std::fmt;
 use std::fs;
 use std::fs::create_dir_all;
 use std::fs::{File, OpenOptions};
+use std::future::Future;
 use std::io;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::FileExt;
@@ -103,6 +104,20 @@ const ERR_CANNOT_GET_WRITER: &str = "Cannot get writer";
 const ERR_INVALID_BLOCK_SIZE: &str = "Invalid block size";
 const ERR_NO_LINUX_FIELD: &str = "Spec does not contain linux field";
 const ERR_NO_SANDBOX_PIDNS: &str = "Sandbox does not have sandbox_pidns";
+// The Shim-side Agent client has a 10-second deadline. Finish first or cancel
+// the in-Guest launch so a timed-out ExecProcess cannot retain the Sandbox and
+// global process-launch locks after the caller has already given up.
+const EXEC_PROCESS_START_TIMEOUT: Duration = Duration::from_secs(8);
+
+async fn bounded_exec_process_start<F>(timeout: Duration, operation: F) -> Option<Result<()>>
+where
+    F: Future<Output = Result<()>>,
+{
+    match tokio::time::timeout(timeout, operation).await {
+        Ok(result) => Some(result),
+        Err(_) => None,
+    }
+}
 
 // IPTABLES_RESTORE_WAIT_SEC is the timeout value provided to iptables-restore --wait. Since we
 // don't expect other writers to iptables, we don't expect contention for grabbing the iptables
@@ -829,46 +844,75 @@ impl AgentService {
 
         info!(sl!(), "do_exec_process cid: {} eid: {}", cid, exec_id);
 
-        let s = self.sandbox.clone();
-        let mut sandbox = s.lock().await;
+        // Every exec that enters the serialized Sandbox section carries its
+        // own launch deadline. Start the deadline only after acquiring the
+        // lock so a queued exec can never cancel another operation's pending
+        // process.
+        let mut sandbox = self.sandbox.lock().await;
+        let sandbox_ref = &mut *sandbox;
+        let operation_cid = cid.clone();
+        let operation_exec_id = exec_id.clone();
+        let operation = async move {
+            let mut process = req
+                .process
+                .into_option()
+                .ok_or_else(|| anyhow!(nix::Error::EINVAL))?;
 
-        let mut process = req
-            .process
-            .into_option()
-            .ok_or_else(|| anyhow!(nix::Error::EINVAL))?;
+            // Apply any necessary corrections for PCI addresses.
+            update_env_pci(&mut process.Env, &sandbox_ref.pcimap)?;
 
-        // Apply any necessary corrections for PCI addresses
-        update_env_pci(&mut process.Env, &sandbox.pcimap)?;
+            let pipe_size = AGENT_CONFIG.read().await.container_pipe_size;
+            let ocip = rustjail::process_grpc_to_oci(&process);
+            let mut p = Process::new(&sl!(), &ocip, operation_exec_id.as_str(), false, pipe_size)?;
+            p.container_id = operation_cid.clone();
+            if crate::passfd_io::has_passfd_ports(req.stdin_port, req.stdout_port, req.stderr_port)
+            {
+                p.proc_io = Some(
+                    crate::passfd_io::create_process_io(
+                        req.stdin_port,
+                        req.stdout_port,
+                        req.stderr_port,
+                    )
+                    .await?,
+                );
+            }
+            let ctr = sandbox_ref
+                .get_container(&operation_cid)
+                .ok_or_else(|| anyhow!("Invalid container id"))?;
 
-        let pipe_size = AGENT_CONFIG.read().await.container_pipe_size;
-        let ocip = rustjail::process_grpc_to_oci(&process);
-        let mut p = Process::new(&sl!(), &ocip, exec_id.as_str(), false, pipe_size)?;
-        p.container_id = cid.clone();
-        if crate::passfd_io::has_passfd_ports(req.stdin_port, req.stdout_port, req.stderr_port) {
-            p.proc_io = Some(
-                crate::passfd_io::create_process_io(
-                    req.stdin_port,
-                    req.stdout_port,
-                    req.stderr_port,
-                )
-                .await?,
-            );
+            check_container_resource_operation(ctr, ContainerResourceOperation::Exec)?;
+
+            if req.runtime_unix_addr.is_empty() {
+                p.open_io(&sl!(), None).map_err(|e| anyhow!(e))?;
+            } else {
+                p.open_io(&sl!(), Some(&req.runtime_unix_addr))
+                    .map_err(|e| anyhow!(e))?;
+            }
+
+            ctr.run(p).await
+        };
+
+        match bounded_exec_process_start(EXEC_PROCESS_START_TIMEOUT, operation).await {
+            Some(result) => result?,
+            None => {
+                let cleanup = sandbox
+                    .get_container(&cid)
+                    .ok_or_else(|| anyhow!("Invalid container id during timed-out exec cleanup"))?
+                    .abort_exec_start(&exec_id);
+                let message = format!(
+                    "exec process start timed out after {} milliseconds",
+                    EXEC_PROCESS_START_TIMEOUT.as_millis()
+                );
+                match cleanup {
+                    Ok(()) => return Err(anyhow!(message)),
+                    Err(error) => {
+                        return Err(anyhow!(
+                            "{message}; timed-out exec cleanup failed: {error:#}"
+                        ))
+                    }
+                }
+            }
         }
-        let ctr = sandbox
-            .get_container(&cid)
-            .ok_or_else(|| anyhow!("Invalid container id"))?;
-
-        check_container_resource_operation(ctr, ContainerResourceOperation::Exec)?;
-
-        if req.runtime_unix_addr.is_empty() {
-            p.open_io(&sl!(), None).map_err(|e| anyhow!(e))?;
-        } else {
-            p.open_io(&sl!(), Some(&req.runtime_unix_addr))
-                .map_err(|e| anyhow!(e))?;
-        }
-
-        ctr.run(p).await?;
-
         Ok(())
     }
 
@@ -2883,6 +2927,31 @@ mod tests {
         skip_if_no_cap, skip_if_not_root,
     };
     use capctl::caps::Cap;
+
+    #[tokio::test]
+    async fn bounded_exec_process_start_cancels_timed_out_launch() {
+        struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let operation = {
+            let probe = DropProbe(dropped.clone());
+            async move {
+                let _probe = probe;
+                std::future::pending::<()>().await;
+                Ok(())
+            }
+        };
+
+        let outcome = bounded_exec_process_start(Duration::from_millis(10), operation).await;
+        assert!(outcome.is_none());
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[test]
     fn version_response_advertises_versioned_unique_capabilities() {

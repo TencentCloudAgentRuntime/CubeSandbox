@@ -756,11 +756,14 @@ impl Task for TaskService {
             req.id(),
             req.exec_id()
         );
-        let mut sb = self.sandbox.lock().await;
-        if sb.paused().await {
-            errf!(self.log, "sandbox not in normal state");
-            return Err(Others(format!("sandbox not in normal state")));
-        }
+        let sb = {
+            let sb = self.sandbox.lock().await;
+            if sb.paused().await {
+                errf!(self.log, "sandbox not in normal state");
+                return Err(Others(format!("sandbox not in normal state")));
+            }
+            sb.clone()
+        };
         if req.exec_id().is_empty() {
             sb.start_container(&req.id).await.map_err(|e| {
                 errf!(self.log, "Start container failed:{}", e);
@@ -1050,21 +1053,29 @@ impl Task for TaskService {
         } else {
             None
         };
+        let sb = {
+            let sb = self.sandbox.lock().await;
+            if sb.paused().await {
+                errf!(self.log, "sandbox not in normal state");
+                return Err(Others(format!("sandbox not in normal state")));
+            }
+            sb.clone()
+        };
+        if let Some((resources, resources_v2)) = parsed_resources.as_ref() {
+            sb.update_container(&req.id, resources, resources_v2.as_deref())
+                .await
+                .map_err(|e| {
+                    errf!(self.log, "update container failed:{}", e);
+                    e
+                })?;
+        }
+
         let outcome = {
             let mut sb = self.sandbox.lock().await;
             if sb.paused().await {
                 errf!(self.log, "sandbox not in normal state");
                 return Err(Others(format!("sandbox not in normal state")));
             }
-            if let Some((resources, resources_v2)) = parsed_resources.as_ref() {
-                sb.update_container(&req.id, resources, resources_v2.as_deref())
-                    .await
-                    .map_err(|e| {
-                        errf!(self.log, "update container failed:{}", e);
-                        e
-                    })?;
-            }
-
             sb.update_sandbox(&req.annotations).await.map_err(|e| {
                 errf!(self.log, "update sandbox failed:{}", e.clone());
                 Error::Other(format!("update sandbox failed:{}", e))

@@ -1661,6 +1661,52 @@ impl LinuxContainer {
         }
     }
 
+    /// Cancel only the process being admitted by a timed-out exec operation.
+    ///
+    /// `start()` records the child in `pending_process_pid` between the PID
+    /// handshake and publication in `processes`. A timeout can occur on either
+    /// side of that publication boundary, so fence both representations by
+    /// the non-empty exec ID without disturbing the container init process or
+    /// an unrelated exec.
+    pub fn abort_exec_start(&mut self, exec_id: &str) -> Result<()> {
+        if exec_id.is_empty() {
+            return Err(anyhow!(
+                "refusing to abort an init process as a timed-out exec"
+            ));
+        }
+
+        let pending_pid = self.pending_process_pid.filter(|pid| *pid > 0);
+        let mut candidates = self
+            .processes
+            .iter()
+            .filter_map(|(pid, process)| (process.exec_id == exec_id).then_some(*pid))
+            .collect::<BTreeSet<_>>();
+        if let Some(pid) = pending_pid {
+            candidates.insert(pid);
+        }
+
+        let mut released = BTreeSet::new();
+        let mut errors = Vec::new();
+        for pid in candidates {
+            match signal::kill(Pid::from_raw(pid), Some(Signal::SIGKILL)) {
+                Ok(()) | Err(Errno::ESRCH) => {
+                    released.insert(pid);
+                }
+                Err(error) => errors.push(format!("kill timed-out exec pid {pid}: {error}")),
+            }
+        }
+        self.processes.retain(|pid, _| !released.contains(pid));
+        if pending_pid.is_some_and(|pid| released.contains(&pid)) {
+            self.pending_process_pid = None;
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(errors.join("; ")))
+        }
+    }
+
     fn kill_owned_processes(&mut self) -> Vec<String> {
         let (pids, mut errors) = self.owned_process_ids();
         let pending_pid = self.pending_process_pid;
@@ -2828,6 +2874,28 @@ mod tests {
         let (pids, errors) = container.owned_process_ids();
         assert!(errors.is_empty());
         assert!(pids.is_empty());
+    }
+
+    #[test]
+    fn abort_exec_start_fences_pending_and_published_process_by_exec_id() {
+        let (container, _dir) = new_linux_container();
+        let mut container = container.unwrap();
+        container.pending_process_pid = Some(222_222);
+
+        let mut target =
+            Process::new(&sl!(), &oci::Process::default(), "timed-out", false, 1).unwrap();
+        target.pid = 333_333;
+        container.processes.insert(target.pid, target);
+        let mut survivor =
+            Process::new(&sl!(), &oci::Process::default(), "survivor", false, 1).unwrap();
+        survivor.pid = 444_444;
+        container.processes.insert(survivor.pid, survivor);
+
+        container.abort_exec_start("timed-out").unwrap();
+        assert_eq!(container.pending_process_pid, None);
+        assert!(!container.processes.contains_key(&333_333));
+        assert!(container.processes.contains_key(&444_444));
+        assert!(container.abort_exec_start("").is_err());
     }
 
     #[test]

@@ -1219,11 +1219,13 @@ impl SandBox {
         Ok(())
     }
 
-    pub async fn start_container(&mut self, id: &String) -> Result<()> {
-        let mut containers = self.containers.lock().await;
-        let container = match containers.get_mut(id) {
-            Some(c) => c,
-            None => return Err(Error::NotFoundError(format!("not found container:{}", id))),
+    pub async fn start_container(&self, id: &String) -> Result<()> {
+        let mut container = {
+            let containers = self.containers.lock().await;
+            match containers.get(id) {
+                Some(c) => c.clone(),
+                None => return Err(Error::NotFoundError(format!("not found container:{}", id))),
+            }
         };
         container
             .start_container()
@@ -1345,11 +1347,14 @@ impl SandBox {
     }
 
     pub async fn start_exec(&self, id: &String, exec_id: &String) -> Result<()> {
-        let mut containers = self.containers.lock().await;
-        if let Some(c) = containers.get_mut(id) {
-            return c.start_exec(exec_id).await;
-        }
-        Err(Error::NotFoundError(format!("not found container:{}", id)))
+        let mut container = {
+            let containers = self.containers.lock().await;
+            containers
+                .get(id)
+                .cloned()
+                .ok_or_else(|| Error::NotFoundError(format!("not found container:{}", id)))?
+        };
+        container.start_exec(exec_id).await
     }
 
     pub async fn delete_exec(
@@ -1367,19 +1372,22 @@ impl SandBox {
         Err(Error::NotFoundError(format!("not found container:{}", id)))
     }
     pub async fn update_container(
-        &mut self,
+        &self,
         id: &String,
         res: &LinuxResources,
         resources_v2: Option<&[u8]>,
     ) -> Result<()> {
-        let mut containers = self.containers.lock().await;
-        if let Some(c) = containers.get_mut(id) {
-            return c
-                .update(res, resources_v2)
-                .await
-                .map_err(|e| Error::Other(e.to_string()));
-        }
-        Err(Error::NotFoundError(format!("not found container:{}", id)))
+        let container = {
+            let containers = self.containers.lock().await;
+            containers
+                .get(id)
+                .cloned()
+                .ok_or_else(|| Error::NotFoundError(format!("not found container:{}", id)))?
+        };
+        container
+            .update(res, resources_v2)
+            .await
+            .map_err(|e| Error::Other(e.to_string()))
     }
 
     pub async fn update_sandbox(&mut self, annotation: &HashMap<String, String>) -> CResult<()> {

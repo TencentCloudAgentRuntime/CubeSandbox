@@ -1434,11 +1434,7 @@ impl Container {
         Ok((exit_code, exit_tm))
     }
 
-    pub async fn update(
-        &mut self,
-        res: &LinuxResources,
-        resources_v2: Option<&[u8]>,
-    ) -> CResult<()> {
+    pub async fn update(&self, res: &LinuxResources, resources_v2: Option<&[u8]>) -> CResult<()> {
         validate_unchanged_device_update(&self.spec, res)?;
         let mut pb_res = oci::LinuxResources::default();
 
