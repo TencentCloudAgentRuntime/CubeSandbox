@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "minimum_cpu_millicores": 250,
+  "minimum_memory_bytes": 268435456,
+  "host_pids_max": 512
+}

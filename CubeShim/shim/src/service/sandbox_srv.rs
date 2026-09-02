@@ -265,9 +265,18 @@ impl SandboxService {
         mut spec: Spec,
         netns_path: String,
         config: runtime_resource::CriPodSandboxConfig,
+        plan: runtime_resource::RuntimePreparePlan,
         publisher: CreatePublisherGuard,
     ) {
-        let result = match runtime_resource::prepare(&self.id, &netns_path, &config, &mut spec).await {
+        let result = match runtime_resource::prepare(
+            &self.id,
+            &netns_path,
+            &config,
+            &plan,
+            &mut spec,
+        )
+        .await
+        {
             Ok(lease) => match self.sandbox.lock().await.init(spec) {
                 Ok(()) => Ok(lease),
                 Err(error) => match lease.release().await {
@@ -314,6 +323,7 @@ impl SandboxService {
             // revoke and rejects success, or establishes a success point before
             // cleanup is allowed to pass the barrier.
             let readback = lifecycle.begin_create_readback_operation()?;
+            readback.verify_host_controllers()?;
             let runtime = {
                 let state = self.lifecycle.state.lock().await;
                 if !matches!(state.phase, Phase::Created | Phase::Starting | Phase::Ready) {
@@ -422,6 +432,14 @@ impl SandboxService {
                 .await)
             }
         };
+        if let Err(error) = operation.verify_host_controllers() {
+            drop(operation);
+            return Err(release_after_start_failure(
+                lease,
+                format!("Host controller readback before StartSandbox: {error}"),
+            )
+            .await);
+        }
 
         let tap_cleanup_identity = match lease.tap_cleanup_identity() {
             Ok(identity) => identity,
@@ -1080,50 +1098,40 @@ impl Sandbox for SandboxService {
 
         if admission == CreateAdmission::First {
             let publisher = host_lifecycle.create_publisher_guard();
-            if let Err(error) = host_lifecycle.place_managed_server() {
-                let message = format!("place CubeShim server in Host Pod cgroup: {error}");
-                publisher.failure_until_durable("INTERNAL", &message).await;
-                waiter.finish().map_err(|finish_error| {
-                    rpc_error(
-                        Code::INTERNAL,
-                        format!("finish failed Host placement waiter: {finish_error}"),
-                    )
-                })?;
-                return Err(rpc_error(Code::INTERNAL, message));
-            }
-            host_lifecycle
-                .wait_test_failpoint("after-create-commit")
-                .await;
-            let semantic: TtrpcResult<(Spec, Any)> = (|| {
-                runtime_resource::shared_pid_namespace(&config)
-                    .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
-                if req.netns_path.is_empty() || !Path::new(&req.netns_path).is_absolute() {
-                    return Err(rpc_error(
-                        Code::INVALID_ARGUMENT,
-                        "netns_path must be absolute; host-network sandboxes are not supported",
-                    ));
-                }
-                host_lifecycle
-                    .validate_cri_parent(runtime_resource::cgroup_parent(&config))
-                    .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
-                let config_path = Path::new(&req.bundle_path).join("config.json");
-                let mut spec: Spec = if config_path.is_file() {
-                    Utils::load_spec(&req.bundle_path).map_err(|error| {
-                        rpc_error(
+            let validate_semantics =
+                || -> TtrpcResult<(Spec, Any, runtime_resource::RuntimePreparePlan)> {
+                    runtime_resource::shared_pid_namespace(&config)
+                        .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
+                    if req.netns_path.is_empty() || !Path::new(&req.netns_path).is_absolute() {
+                        return Err(rpc_error(
                             Code::INVALID_ARGUMENT,
-                            format!("load sandbox bundle spec: {error}"),
-                        )
-                    })?
-                } else {
-                    Spec::default()
+                            "netns_path must be absolute; host-network sandboxes are not supported",
+                        ));
+                    }
+                    host_lifecycle
+                        .validate_cri_parent(runtime_resource::cgroup_parent(&config))
+                        .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
+                    let config_path = Path::new(&req.bundle_path).join("config.json");
+                    let mut spec: Spec = if config_path.is_file() {
+                        Utils::load_spec(&req.bundle_path).map_err(|error| {
+                            rpc_error(
+                                Code::INVALID_ARGUMENT,
+                                format!("load sandbox bundle spec: {error}"),
+                            )
+                        })?
+                    } else {
+                        Spec::default()
+                    };
+                    runtime_resource::merge_cri_annotations(&mut spec, &config, &req.annotations)
+                        .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
+                    let plan = runtime_resource::runtime_prepare_plan(&config, &req.annotations)
+                        .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
+                    let sandbox_spec = encode_sandbox_spec(&spec)
+                        .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
+                    Ok((spec, sandbox_spec, plan))
                 };
-                runtime_resource::merge_cri_annotations(&mut spec, &config, &req.annotations)
-                    .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
-                let sandbox_spec = encode_sandbox_spec(&spec)
-                    .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
-                Ok((spec, sandbox_spec))
-            })();
-            let (spec, sandbox_spec) = match semantic {
+            let semantic = validate_semantics();
+            let (spec, sandbox_spec, plan) = match semantic {
                 Ok(values) => values,
                 Err(error) => {
                     let (code, message) = rpc_failure_identity(&error);
@@ -1146,6 +1154,31 @@ impl Sandbox for SandboxService {
                     return Err(error);
                 }
             };
+            if let Err(error) = host_lifecycle.place_managed_server() {
+                let message = format!("place CubeShim server in Host Pod cgroup: {error}");
+                publisher.failure_until_durable("INTERNAL", &message).await;
+                waiter.finish().map_err(|finish_error| {
+                    rpc_error(
+                        Code::INTERNAL,
+                        format!("finish failed Host placement waiter: {finish_error}"),
+                    )
+                })?;
+                return Err(rpc_error(Code::INTERNAL, message));
+            }
+            host_lifecycle
+                .wait_test_failpoint("after-create-commit")
+                .await;
+            if let Err(error) = host_lifecycle.apply_host_resource_ceiling(plan.host_ceiling()) {
+                let message = format!("apply Host Pod resource ceiling: {error}");
+                publisher.failure_until_durable("INTERNAL", &message).await;
+                waiter.finish().map_err(|finish_error| {
+                    rpc_error(
+                        Code::INTERNAL,
+                        format!("finish failed Host controller waiter: {finish_error}"),
+                    )
+                })?;
+                return Err(rpc_error(Code::INTERNAL, message));
+            }
 
             let mut state = self.lifecycle.state.lock().await;
             match state.phase {
@@ -1153,10 +1186,13 @@ impl Sandbox for SandboxService {
                     state.phase = Phase::Creating;
                     state.create_request = Some(fingerprint.clone());
                     state.sandbox_spec = Some(sandbox_spec);
-                    tokio::spawn(
-                        self.clone()
-                            .run_create(spec, req.netns_path, config, publisher),
-                    );
+                    tokio::spawn(self.clone().run_create(
+                        spec,
+                        req.netns_path,
+                        config,
+                        plan,
+                        publisher,
+                    ));
                 }
                 phase => {
                     let error = rpc_error(

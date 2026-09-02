@@ -55,6 +55,8 @@ const CRI_V1_POD_SANDBOX_CONFIG: &str = "runtime.v1.PodSandboxConfig";
 const RUNTIME_CLEANUP_RECORD: &str = "cube-runtime-resource.json";
 const RUNTIME_REAPER_ROOT_ENV: &str = "CUBE_RUNTIME_RESOURCE_REAPER_DIR";
 const DEFAULT_RUNTIME_REAPER_ROOT: &str = "/data/cubelet/runtime-resource-reaper";
+const RUNTIMECLASS_OVERHEAD_CONFIG_ENV: &str = "CUBE_RUNTIMECLASS_OVERHEAD_CONFIG";
+const DEFAULT_RUNTIMECLASS_OVERHEAD_CONFIG: &str = "/etc/cubesandbox/runtimeclass-overhead.json";
 pub(crate) const RUNTIME_REAPER_ACTION: &str = "runtime-resource-reaper";
 pub(crate) const MANAGED_VOLUME_EXPORT_DIR: &str = "volumes";
 pub(crate) const MANAGED_VOLUME_VIRTIOFS_ID: &str = "cubeVolumes";
@@ -103,12 +105,44 @@ struct PodIdentity {
     attempt: u32,
 }
 
-#[derive(Clone, PartialEq, Message)]
+#[derive(Clone, Eq, PartialEq, Message)]
 struct ResourceRequest {
     #[prost(uint32, tag = "1")]
     vcpu_count: u32,
     #[prost(uint64, tag = "2")]
     memory_bytes: u64,
+}
+
+/// Static Host-side budget for the CubeShim/VMM leaf. Kubernetes owns the
+/// Pod parent and the Guest owns each container cgroup; this budget therefore
+/// contains only VM capacity plus RuntimeClass overhead.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HostResourceCeiling {
+    pub(crate) cpu_max: String,
+    pub(crate) memory_max: String,
+    pub(crate) pids_max: String,
+    pub(crate) memory_oom_group: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RuntimePreparePlan {
+    resources: ResourceRequest,
+    host_ceiling: HostResourceCeiling,
+}
+
+impl RuntimePreparePlan {
+    pub(crate) fn host_ceiling(&self) -> &HostResourceCeiling {
+        &self.host_ceiling
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct RuntimeClassOverheadConfig {
+    schema_version: u32,
+    minimum_cpu_millicores: u64,
+    minimum_memory_bytes: u64,
+    host_pids_max: u64,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -1223,6 +1257,7 @@ pub(crate) async fn prepare(
     sandbox_id: &str,
     netns_path: &str,
     config: &CriPodSandboxConfig,
+    plan: &RuntimePreparePlan,
     spec: &mut Spec,
 ) -> Result<RuntimeLease, String> {
     let endpoint = std::env::var("CUBE_RUNTIME_RESOURCE_ENDPOINT")
@@ -1239,8 +1274,7 @@ pub(crate) async fn prepare(
     validate_capabilities(&capabilities)?;
 
     let metadata = pod_metadata(config)?;
-    let annotations = spec.annotations().as_ref().cloned().unwrap_or_default();
-    let resources = resources_from_config(&annotations, config)?;
+    let resources = plan.resources.clone();
     let generation = u64::from(metadata.attempt) + 1;
     let dns = cri_dns_entries(config.dns_config.as_ref())?;
     let idempotency_key = prepare_key(sandbox_id, generation);
@@ -1982,6 +2016,173 @@ fn resources_from_config(
     })
 }
 
+fn load_runtimeclass_overhead_config() -> Result<RuntimeClassOverheadConfig, String> {
+    let path = std::env::var_os(RUNTIMECLASS_OVERHEAD_CONFIG_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_RUNTIMECLASS_OVERHEAD_CONFIG));
+    if !path.is_absolute() {
+        return Err(format!(
+            "{RUNTIMECLASS_OVERHEAD_CONFIG_ENV} must be an absolute path"
+        ));
+    }
+    let data = fs::read(&path).map_err(|error| {
+        format!(
+            "read RuntimeClass overhead config {}: {error}",
+            path.display()
+        )
+    })?;
+    let config: RuntimeClassOverheadConfig = serde_json::from_slice(&data).map_err(|error| {
+        format!(
+            "decode RuntimeClass overhead config {}: {error}",
+            path.display()
+        )
+    })?;
+    validate_runtimeclass_overhead_config(&config)?;
+    Ok(config)
+}
+
+fn validate_runtimeclass_overhead_config(
+    config: &RuntimeClassOverheadConfig,
+) -> Result<(), String> {
+    if config.schema_version != 1 {
+        return Err(format!(
+            "unsupported RuntimeClass overhead config schema {}",
+            config.schema_version
+        ));
+    }
+    if config.minimum_cpu_millicores == 0
+        || config.minimum_memory_bytes == 0
+        || config.host_pids_max == 0
+    {
+        return Err(
+            "RuntimeClass overhead minimum CPU, memory, and Host PIDs must be non-zero".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Validate the exact CRI RuntimeClass overhead and derive a checked static
+/// Host leaf ceiling. Request annotations override the copy carried inside
+/// PodSandboxConfig in the same way as merge_cri_annotations.
+pub(crate) fn runtime_prepare_plan(
+    config: &CriPodSandboxConfig,
+    request_annotations: &HashMap<String, String>,
+) -> Result<RuntimePreparePlan, String> {
+    let node = load_runtimeclass_overhead_config()?;
+    runtime_prepare_plan_with_config(config, request_annotations, &node)
+}
+
+#[cfg(test)]
+fn host_resource_ceiling_with_config(
+    config: &CriPodSandboxConfig,
+    request_annotations: &HashMap<String, String>,
+    node: &RuntimeClassOverheadConfig,
+) -> Result<HostResourceCeiling, String> {
+    Ok(runtime_prepare_plan_with_config(config, request_annotations, node)?.host_ceiling)
+}
+
+fn runtime_prepare_plan_with_config(
+    config: &CriPodSandboxConfig,
+    request_annotations: &HashMap<String, String>,
+    node: &RuntimeClassOverheadConfig,
+) -> Result<RuntimePreparePlan, String> {
+    validate_runtimeclass_overhead_config(node)?;
+    let linux = config
+        .linux
+        .as_ref()
+        .ok_or_else(|| "CRI LinuxPodSandboxConfig is required".to_string())?;
+    let overhead = linux
+        .overhead
+        .as_ref()
+        .ok_or_else(|| "RuntimeClass overhead is required for RuntimeClass cube".to_string())?;
+
+    if overhead.cpu_period <= 0
+        || overhead.cpu_quota <= 0
+        || overhead.cpu_shares <= 0
+        || overhead.memory_limit_in_bytes <= 0
+    {
+        return Err(
+            "RuntimeClass overhead requires positive CPU period/quota/shares and memory"
+                .to_string(),
+        );
+    }
+    if overhead.oom_score_adj != 0
+        || !overhead.cpuset_cpus.is_empty()
+        || !overhead.cpuset_mems.is_empty()
+        || !overhead.hugepage_limits.is_empty()
+        || overhead.memory_swap_limit_in_bytes != 0
+    {
+        return Err(
+            "RuntimeClass overhead supports only CPU, memory, and memory.oom.group=1".to_string(),
+        );
+    }
+    if overhead.unified.len() > 1
+        || overhead
+            .unified
+            .iter()
+            .any(|(key, value)| key != "memory.oom.group" || value != "1")
+    {
+        return Err("RuntimeClass overhead unified supports only memory.oom.group=1".to_string());
+    }
+
+    let period = u128::try_from(overhead.cpu_period)
+        .map_err(|_| "RuntimeClass overhead CPU period is negative".to_string())?;
+    let quota = u128::try_from(overhead.cpu_quota)
+        .map_err(|_| "RuntimeClass overhead CPU quota is negative".to_string())?;
+    let normalized = quota
+        .checked_mul(100_000)
+        .and_then(|value| value.checked_add(period - 1))
+        .map(|value| value / period)
+        .ok_or_else(|| "RuntimeClass overhead CPU normalization overflow".to_string())?;
+    let millicores = quota
+        .checked_mul(1_000)
+        .and_then(|value| value.checked_add(period - 1))
+        .map(|value| value / period)
+        .ok_or_else(|| "RuntimeClass overhead CPU millicore normalization overflow".to_string())?;
+    if millicores < u128::from(node.minimum_cpu_millicores) {
+        return Err(format!(
+            "RuntimeClass CPU overhead {millicores}m is below node minimum {}m",
+            node.minimum_cpu_millicores
+        ));
+    }
+    let overhead_memory = u64::try_from(overhead.memory_limit_in_bytes)
+        .map_err(|_| "RuntimeClass overhead memory is negative".to_string())?;
+    if overhead_memory < node.minimum_memory_bytes {
+        return Err(format!(
+            "RuntimeClass memory overhead {overhead_memory} is below node minimum {}",
+            node.minimum_memory_bytes
+        ));
+    }
+
+    let mut annotations = config.annotations.clone();
+    annotations.extend(request_annotations.clone());
+    let vm = resources_from_config(&annotations, config)?;
+    let cpu_quota = u128::from(vm.vcpu_count)
+        .checked_mul(100_000)
+        .and_then(|value| value.checked_add(normalized))
+        .ok_or_else(|| "Host CPU ceiling overflow".to_string())?;
+    if cpu_quota > i64::MAX as u128 {
+        return Err("Host CPU ceiling exceeds cgroup controller range".to_string());
+    }
+    let memory_max = vm
+        .memory_bytes
+        .checked_add(overhead_memory)
+        .ok_or_else(|| "Host memory ceiling overflow".to_string())?;
+    if memory_max > i64::MAX as u64 {
+        return Err("Host memory ceiling exceeds cgroup controller range".to_string());
+    }
+
+    Ok(RuntimePreparePlan {
+        resources: vm,
+        host_ceiling: HostResourceCeiling {
+            cpu_max: format!("{cpu_quota} 100000"),
+            memory_max: memory_max.to_string(),
+            pids_max: node.host_pids_max.to_string(),
+            memory_oom_group: "1".to_string(),
+        },
+    })
+}
+
 fn lease_id_for_prepare(sandbox_id: &str, generation: u64, idempotency_key: &str) -> String {
     let generation = generation.to_string();
     let mut hasher = Sha256::new();
@@ -2581,6 +2782,35 @@ mod tests {
     }
 
     #[test]
+    fn kubernetes_v1_36_golden_wire_preserves_parent_and_overhead_tags() {
+        // runtime.v1.PodSandboxConfig captured with the Kubernetes v1.36 CRI
+        // field layout. Keeping this independent byte vector prevents the
+        // local prost declarations from agreeing with themselves on a wrong
+        // tag number.
+        const GOLDEN: &[u8] = &[
+            0x0a, 0x25, 0x0a, 0x0a, 0x67, 0x6f, 0x6c, 0x64, 0x65, 0x6e, 0x2d, 0x70, 0x6f, 0x64,
+            0x12, 0x0a, 0x67, 0x6f, 0x6c, 0x64, 0x65, 0x6e, 0x2d, 0x75, 0x69, 0x64, 0x1a, 0x09,
+            0x67, 0x6f, 0x6c, 0x64, 0x65, 0x6e, 0x2d, 0x6e, 0x73, 0x20, 0x07, 0x12, 0x0b, 0x67,
+            0x6f, 0x6c, 0x64, 0x65, 0x6e, 0x2d, 0x68, 0x6f, 0x73, 0x74, 0x42, 0x4e, 0x0a, 0x22,
+            0x6b, 0x75, 0x62, 0x65, 0x70, 0x6f, 0x64, 0x73, 0x2d, 0x62, 0x75, 0x72, 0x73, 0x74,
+            0x61, 0x62, 0x6c, 0x65, 0x2d, 0x70, 0x6f, 0x64, 0x67, 0x6f, 0x6c, 0x64, 0x65, 0x6e,
+            0x2e, 0x73, 0x6c, 0x69, 0x63, 0x65, 0x22, 0x28, 0x08, 0xa0, 0x8d, 0x06, 0x10, 0xa8,
+            0xc3, 0x01, 0x18, 0x80, 0x02, 0x20, 0x80, 0x80, 0x80, 0x80, 0x01, 0x4a, 0x15, 0x0a,
+            0x10, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x2e, 0x6f, 0x6f, 0x6d, 0x2e, 0x67, 0x72,
+            0x6f, 0x75, 0x70, 0x12, 0x01, 0x31,
+        ];
+        let decoded = decode_cri_config(CRI_V1_POD_SANDBOX_CONFIG, GOLDEN).unwrap();
+        let linux = decoded.linux.unwrap();
+        assert_eq!(linux.cgroup_parent, "kubepods-burstable-podgolden.slice");
+        let overhead = linux.overhead.unwrap();
+        assert_eq!(overhead.cpu_period, 100_000);
+        assert_eq!(overhead.cpu_quota, 25_000);
+        assert_eq!(overhead.cpu_shares, 256);
+        assert_eq!(overhead.memory_limit_in_bytes, 256 * 1024 * 1024);
+        assert_eq!(overhead.unified["memory.oom.group"], "1");
+    }
+
+    #[test]
     fn cri_fingerprint_covers_parent_and_complete_overhead() {
         let base = sample_cri();
         let base_fingerprint = cri_semantic_fingerprint(&base);
@@ -2766,5 +2996,207 @@ mod tests {
         let resources = resources_from_config(&HashMap::new(), &config).unwrap();
         assert_eq!(resources.vcpu_count, 1);
         assert_eq!(resources.memory_bytes, 256 * 1024 * 1024);
+    }
+
+    fn poc_overhead_config() -> RuntimeClassOverheadConfig {
+        RuntimeClassOverheadConfig {
+            schema_version: 1,
+            minimum_cpu_millicores: 250,
+            minimum_memory_bytes: 256 * 1024 * 1024,
+            host_pids_max: 512,
+        }
+    }
+
+    fn default_overhead() -> CriLinuxContainerResources {
+        CriLinuxContainerResources {
+            cpu_period: 100_000,
+            cpu_quota: 25_000,
+            cpu_shares: 256,
+            memory_limit_in_bytes: 256 * 1024 * 1024,
+            unified: HashMap::from([("memory.oom.group".to_string(), "1".to_string())]),
+            ..Default::default()
+        }
+    }
+
+    fn ceiling_config(
+        aggregate: CriLinuxContainerResources,
+        overhead: CriLinuxContainerResources,
+    ) -> CriPodSandboxConfig {
+        let mut config = sample_cri();
+        let linux = config.linux.as_mut().unwrap();
+        linux.resources = Some(aggregate);
+        linux.overhead = Some(overhead);
+        config
+    }
+
+    #[test]
+    fn runtimeclass_ceiling_matches_v1_v3_v5_v9_v10() {
+        let node = poc_overhead_config();
+        let v1 = ceiling_config(CriLinuxContainerResources::default(), default_overhead());
+        assert_eq!(
+            host_resource_ceiling_with_config(&v1, &HashMap::new(), &node).unwrap(),
+            HostResourceCeiling {
+                cpu_max: "125000 100000".to_string(),
+                memory_max: "536870912".to_string(),
+                pids_max: "512".to_string(),
+                memory_oom_group: "1".to_string(),
+            }
+        );
+
+        let v2 = ceiling_config(
+            CriLinuxContainerResources {
+                cpu_period: 100_000,
+                cpu_shares: 204,
+                ..Default::default()
+            },
+            default_overhead(),
+        );
+        assert_eq!(
+            host_resource_ceiling_with_config(&v2, &HashMap::new(), &node).unwrap(),
+            host_resource_ceiling_with_config(&v1, &HashMap::new(), &node).unwrap()
+        );
+
+        let v3 = ceiling_config(
+            CriLinuxContainerResources {
+                cpu_period: 100_000,
+                cpu_quota: 60_000,
+                cpu_shares: 614,
+                memory_limit_in_bytes: 320 * 1024 * 1024,
+                ..Default::default()
+            },
+            default_overhead(),
+        );
+        let v3_ceiling = host_resource_ceiling_with_config(&v3, &HashMap::new(), &node).unwrap();
+        assert_eq!(v3_ceiling.cpu_max, "125000 100000");
+        assert_eq!(v3_ceiling.memory_max, "603979776");
+
+        let v4 = ceiling_config(
+            CriLinuxContainerResources {
+                cpu_period: 100_000,
+                cpu_quota: 70_000,
+                cpu_shares: 716,
+                memory_limit_in_bytes: 384 * 1024 * 1024,
+                ..Default::default()
+            },
+            default_overhead(),
+        );
+        let v4 = host_resource_ceiling_with_config(&v4, &HashMap::new(), &node).unwrap();
+        assert_eq!(v4.cpu_max, "125000 100000");
+        assert_eq!(v4.memory_max, "671088640");
+
+        let v5_annotations = HashMap::from([(
+            ANNO_VM_RES.to_string(),
+            r#"{"cpu":2,"memory":1024}"#.to_string(),
+        )]);
+        let v5 = host_resource_ceiling_with_config(&v3, &v5_annotations, &node).unwrap();
+        assert_eq!(v5.cpu_max, "225000 100000");
+        assert_eq!(v5.memory_max, "1342177280");
+
+        // V7 carries no finite Pod PID input into this Host-only budget. V8
+        // keeps the same pre-reserved leaf across the workload resize.
+        assert_eq!(
+            host_resource_ceiling_with_config(&v1, &HashMap::new(), &node)
+                .unwrap()
+                .pids_max,
+            "512"
+        );
+        let v8_before = host_resource_ceiling_with_config(&v3, &v5_annotations, &node).unwrap();
+        let mut v8_after_config = v3.clone();
+        let resources = v8_after_config
+            .linux
+            .as_mut()
+            .unwrap()
+            .resources
+            .as_mut()
+            .unwrap();
+        resources.cpu_quota = 45_000;
+        resources.cpu_shares = 460;
+        resources.memory_limit_in_bytes = 240 * 1024 * 1024;
+        let v8_after =
+            host_resource_ceiling_with_config(&v8_after_config, &v5_annotations, &node).unwrap();
+        assert_eq!(v8_before, v8_after);
+
+        let mut v9_overhead = default_overhead();
+        v9_overhead.cpu_period = 200_000;
+        v9_overhead.cpu_quota = 50_001;
+        let v9 = ceiling_config(CriLinuxContainerResources::default(), v9_overhead);
+        assert_eq!(
+            host_resource_ceiling_with_config(&v9, &HashMap::new(), &node)
+                .unwrap()
+                .cpu_max,
+            "125001 100000"
+        );
+
+        let mut v10_overhead = default_overhead();
+        v10_overhead.cpu_quota = 50_000;
+        v10_overhead.cpu_shares = 512;
+        v10_overhead.memory_limit_in_bytes = 512 * 1024 * 1024;
+        let v10 = ceiling_config(CriLinuxContainerResources::default(), v10_overhead);
+        let v10 = host_resource_ceiling_with_config(&v10, &HashMap::new(), &node).unwrap();
+        assert_eq!(v10.cpu_max, "150000 100000");
+        assert_eq!(v10.memory_max, "805306368");
+    }
+
+    #[test]
+    fn runtimeclass_ceiling_rejects_v6_and_v11_before_controller_io() {
+        let node = poc_overhead_config();
+        let mut missing = ceiling_config(CriLinuxContainerResources::default(), default_overhead());
+        missing.linux.as_mut().unwrap().overhead = None;
+        assert!(host_resource_ceiling_with_config(&missing, &HashMap::new(), &node).is_err());
+
+        let mut invalid = default_overhead();
+        for mutate in 0..5 {
+            let mut candidate = invalid.clone();
+            match mutate {
+                0 => candidate.cpu_quota = 24_900,
+                1 => candidate.memory_limit_in_bytes = 255 * 1024 * 1024,
+                2 => candidate.memory_limit_in_bytes = 0,
+                3 => candidate.cpu_period = 0,
+                4 => candidate.cpu_quota = -1,
+                _ => unreachable!(),
+            }
+            let config = ceiling_config(CriLinuxContainerResources::default(), candidate);
+            assert!(host_resource_ceiling_with_config(&config, &HashMap::new(), &node).is_err());
+        }
+
+        invalid.cpu_period = 1;
+        invalid.cpu_quota = i64::MAX;
+        let overflow = ceiling_config(CriLinuxContainerResources::default(), invalid);
+        assert!(
+            host_resource_ceiling_with_config(&overflow, &HashMap::new(), &node)
+                .unwrap_err()
+                .contains("controller range")
+        );
+    }
+
+    #[test]
+    fn runtimeclass_ceiling_rejects_unsupported_overhead_fields_and_bad_node_config() {
+        let node = poc_overhead_config();
+        let mut overhead = default_overhead();
+        overhead.cpuset_cpus = "0".to_string();
+        let config = ceiling_config(CriLinuxContainerResources::default(), overhead);
+        assert!(host_resource_ceiling_with_config(&config, &HashMap::new(), &node).is_err());
+
+        let mut overhead = default_overhead();
+        overhead
+            .unified
+            .insert("memory.swap.max".to_string(), "0".to_string());
+        let config = ceiling_config(CriLinuxContainerResources::default(), overhead);
+        assert!(host_resource_ceiling_with_config(&config, &HashMap::new(), &node).is_err());
+
+        let bad = RuntimeClassOverheadConfig {
+            schema_version: 2,
+            ..node
+        };
+        assert!(host_resource_ceiling_with_config(
+            &ceiling_config(CriLinuxContainerResources::default(), default_overhead()),
+            &HashMap::new(),
+            &bad,
+        )
+        .is_err());
+        assert!(serde_json::from_str::<RuntimeClassOverheadConfig>(
+            r#"{"schema_version":1,"minimum_cpu_millicores":250,"minimum_memory_bytes":268435456,"host_pids_max":512,"unknown":true}"#
+        )
+        .is_err());
     }
 }

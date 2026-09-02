@@ -3,10 +3,12 @@ set -eu
 
 shim_candidate=${1:-/usr/local/bin/containerd-shim-cube-rs}
 unit_source=${2:-./cubesandbox-shim-watchdog.service}
+overhead_source=${3:-./runtimeclass-overhead.json}
 shim_binary=/usr/local/bin/containerd-shim-cube-rs
 
 test -x "$shim_candidate"
 test -f "$unit_source"
+test -f "$overhead_source"
 candidate_path=$(readlink -f "$shim_candidate")
 target_path=$(readlink -m "$shim_binary")
 if [ "$candidate_path" != "$target_path" ]; then
@@ -23,6 +25,8 @@ install -d -m 0755 /data/cubelet/shim-lifecycle
 install -d -m 0755 /data/cubelet/shim-cleanup/host-cgroup
 install -d -m 0755 /data/cubelet/shim-cleanup/runtime-resource
 install -d -m 0755 /data/cubelet/runtime-resource-reaper
+install -d -m 0755 /etc/cubesandbox
+install -m 0644 "$overhead_source" /etc/cubesandbox/runtimeclass-overhead.json
 install -m 0644 "$unit_source" /etc/systemd/system/cubesandbox-shim-watchdog.service
 systemctl daemon-reload
 systemctl enable cubesandbox-shim-watchdog.service
