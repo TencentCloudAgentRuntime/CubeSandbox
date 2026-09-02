@@ -6,7 +6,7 @@ S3.4c.3 `IN_PROGRESS`：实现 RuntimeClass overhead 输入、Host 静态 leaf C
 
 ## 基线
 
-最后一项已验证实现 commit 为 `6c7eb7540b0da846a1774c95a4b81ad4deccf15c`；上一个已完成 Stage 的验收证据 commit 为 `fe7b4044`。S0 双工作节点当前 CubeShim/Agent/`cube-runtime` SHA-256 为 `c17d0164…`/`870fd590…`/`8c17375d…`；固定 builder 153/153、双节点 systemd gate 200、RuntimeClass、真实 V1、controller after-write crash recovery 与最终 exact zero 均通过。
+最后一项已验证实现 commit 为 `be91f9e0dac3b0a1f963aade71d8fb45c67a7529`；上一个已完成 Stage 的验收证据 commit 为 `fe7b4044`。S0 双工作节点当前 CubeShim/Agent/`cube-runtime` SHA-256 为 `a5c68da0…`/`870fd590…`/`8c17375d…`；固定 builder 157/157、双节点 systemd gate 200、RuntimeClass、真实 V1、controller after-write crash recovery、V12/PIDs 对抗回归与最终 exact zero 均通过。
 
 ## 已完成
 
@@ -18,7 +18,7 @@ S3.4c.3～S3.4d 尚未完成。S3.4c.3 实现与云证据已闭合，当前只�
 
 ## 验证
 
-`6c7eb754` 完成 checked overhead、静态 leaf ceiling、controller forward/rollback WAL、epoch fencing 和 crash matrix。`inv-386f3ggcjd` 固定构建 153/153；`inv-v86f7i0r8v`/`inv-b86f7j09wh` 双节点部署并各通过 gate 200；最终 V1 `inv-386f8tg1kc`/`inv-a86f940j5r` 和真实 after-write crash `inv-986fbag33m`/`inv-686fct0t83` 通过，最终双 Worker `inv-886f9m06ba`/`inv-b86fdng3d5` 精确归零。详见 [S3.4c.3 执行摘要](./evidence/s3.4/s3.4c.3-execution-summary.md)。
+`be91f9e0` 在既有 checked overhead、静态 leaf ceiling、controller WAL/epoch fencing/crash matrix 上关闭 CRI 指纹结构碰撞与数值 `pids.max` 上界。`inv-386fp40a6b` 固定构建 157/157；`inv-886ftngie9`/`inv-886ftp00b4` 双节点部署并各通过 gate 200；最终 V1/controller `inv-886fv7gh79`/`inv-886fvfgqhw` 和既有真实 after-write crash `inv-986fbag33m`/`inv-686fct0t83` 通过，最终双 Worker `inv-686fw1g9bw`/`inv-a86fw20wua` 精确归零。详见 [S3.4c.3 执行摘要](./evidence/s3.4/s3.4c.3-execution-summary.md)。
 
 ## 阻塞
 
