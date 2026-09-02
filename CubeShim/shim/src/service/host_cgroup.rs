@@ -3127,12 +3127,35 @@ enum ProcessObservation {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcPresence {
+    Present,
+    Missing,
+    Unknown,
+}
+
 fn observe_process(expected: &ProcessIdentity) -> Result<ProcessObservation, String> {
     // SAFETY: pidfd_open returns a new owned descriptor on success.
     let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, expected.pid, 0) as i32 };
     if raw < 0 {
         let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
+        let presence = if error.raw_os_error() == Some(libc::EINVAL) {
+            let process_path = PathBuf::from(format!("/proc/{}", expected.pid));
+            match process_path.try_exists() {
+                Ok(false) => ProcPresence::Missing,
+                Ok(true) => ProcPresence::Present,
+                Err(proc_error) => {
+                    return Err(format!(
+                        "pidfd_open lifecycle pid {}: {error}; inspect {}: {proc_error}",
+                        expected.pid,
+                        process_path.display()
+                    ))
+                }
+            }
+        } else {
+            ProcPresence::Unknown
+        };
+        if pidfd_open_failure_means_gone(&error, presence) {
             return Ok(ProcessObservation::Gone);
         }
         return Err(format!(
@@ -3157,6 +3180,11 @@ fn observe_process(expected: &ProcessIdentity) -> Result<ProcessObservation, Str
         identity: actual,
         pidfd,
     })
+}
+
+fn pidfd_open_failure_means_gone(error: &std::io::Error, presence: ProcPresence) -> bool {
+    error.raw_os_error() == Some(libc::ESRCH)
+        || (error.raw_os_error() == Some(libc::EINVAL) && presence == ProcPresence::Missing)
 }
 
 fn immutable_process_is_live(expected: &ProcessIdentity) -> Result<bool, String> {
@@ -6383,6 +6411,41 @@ mod tests {
         assert!(bait.try_wait().unwrap().is_none());
         bait.kill().unwrap();
         bait.wait().unwrap();
+    }
+
+    #[test]
+    fn stale_pidfd_is_gone_after_proc_disappears() {
+        let mut expected = process_identity(std::process::id() as i32).unwrap();
+        expected.pid = i32::MAX;
+        assert!(matches!(
+            observe_process(&expected).unwrap(),
+            ProcessObservation::Gone
+        ));
+    }
+
+    #[test]
+    fn pidfd_einval_requires_confirmed_missing_proc_entry() {
+        let einval = std::io::Error::from_raw_os_error(libc::EINVAL);
+        let esrch = std::io::Error::from_raw_os_error(libc::ESRCH);
+        let eperm = std::io::Error::from_raw_os_error(libc::EPERM);
+
+        assert!(pidfd_open_failure_means_gone(
+            &einval,
+            ProcPresence::Missing
+        ));
+        assert!(!pidfd_open_failure_means_gone(
+            &einval,
+            ProcPresence::Present
+        ));
+        assert!(!pidfd_open_failure_means_gone(
+            &einval,
+            ProcPresence::Unknown
+        ));
+        assert!(pidfd_open_failure_means_gone(&esrch, ProcPresence::Unknown));
+        assert!(!pidfd_open_failure_means_gone(
+            &eperm,
+            ProcPresence::Missing
+        ));
     }
 
     #[test]
