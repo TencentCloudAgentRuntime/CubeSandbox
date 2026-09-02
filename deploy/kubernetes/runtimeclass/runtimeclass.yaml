@@ -9,3 +9,6 @@ overhead:
   podFixed:
     cpu: 250m
     memory: 256Mi
+scheduling:
+  nodeSelector:
+    cubesandbox.io/runtime: cube
