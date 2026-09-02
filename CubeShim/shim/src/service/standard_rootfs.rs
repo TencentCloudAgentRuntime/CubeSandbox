@@ -31,6 +31,7 @@ use crate::service::runtime_resource::{
 pub const ENABLE_ANNOTATION: &str = "io.containerd.cube.s0.standard-rootfs";
 pub const SHARE_BASE: &str = "/data/cubelet/s0.2-share";
 const VIRTIOFS_SHARED_DIR: &str = "/data/cubelet";
+const GUEST_SANDBOX_RESOLV_CONF: &str = "/etc/resolv.conf";
 static EXPORT_ATTEMPT: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -166,7 +167,7 @@ pub fn prepare_managed(
     let shared_root = canonical_runtime_shared_root(shared_root)?;
     let volume_root = managed_volume_export_root(&shared_root)?;
     let guest_share_name = guest_share_name(&shared_root)?;
-    prepare_at(
+    let prepared = prepare_at(
         &shared_root,
         &guest_share_name,
         task_id,
@@ -175,7 +176,32 @@ pub fn prepare_managed(
         false,
         false,
         Some(&volume_root),
-    )
+    )?;
+    inject_guest_sandbox_resolver(spec);
+    Ok(prepared)
+}
+
+/// containerd's sandboxer path can omit the workload-level resolv.conf bind
+/// mount because DNS belongs to the Pod sandbox. Each Cube workload still has
+/// its own mount namespace and rootfs, so bind the resolver configured by the
+/// Agent at sandbox creation unless containerd supplied an explicit mount.
+fn inject_guest_sandbox_resolver(spec: &mut Spec) {
+    if spec.mounts().as_ref().is_some_and(|mounts| {
+        mounts
+            .iter()
+            .any(|mount| mount.destination() == Path::new(GUEST_SANDBOX_RESOLV_CONF))
+    }) {
+        return;
+    }
+
+    let mut resolver = oci_spec::runtime::Mount::default();
+    resolver.set_destination(PathBuf::from(GUEST_SANDBOX_RESOLV_CONF));
+    resolver.set_typ(Some("bind".to_string()));
+    resolver.set_source(Some(PathBuf::from(GUEST_SANDBOX_RESOLV_CONF)));
+    resolver.set_options(Some(vec!["bind".to_string(), "ro".to_string()]));
+    spec.mounts_mut()
+        .get_or_insert_with(Vec::new)
+        .push(resolver);
 }
 
 fn prepare_at(
@@ -733,6 +759,53 @@ mod tests {
         assert_eq!(
             guest_share_name(Path::new("/data/cubelet/s11/shared/sb-generation")).unwrap(),
             "sb-generation"
+        );
+    }
+
+    #[test]
+    fn managed_rootfs_injects_guest_sandbox_resolver_when_missing() {
+        let mut spec = Spec::default();
+        spec.set_mounts(Some(Vec::new()));
+        inject_guest_sandbox_resolver(&mut spec);
+
+        let mounts = spec.mounts().as_ref().unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(
+            mounts[0].destination(),
+            Path::new(GUEST_SANDBOX_RESOLV_CONF)
+        );
+        assert_eq!(
+            mounts[0].source(),
+            &Some(PathBuf::from(GUEST_SANDBOX_RESOLV_CONF))
+        );
+        assert_eq!(mounts[0].typ().as_deref(), Some("bind"));
+        assert_eq!(
+            mounts[0].options().as_ref().unwrap(),
+            &["bind".to_string(), "ro".to_string()]
+        );
+    }
+
+    #[test]
+    fn managed_rootfs_preserves_explicit_resolver_mount() {
+        let mut resolver = oci_spec::runtime::Mount::default();
+        resolver.set_destination(PathBuf::from(GUEST_SANDBOX_RESOLV_CONF));
+        resolver.set_typ(Some("bind".to_string()));
+        resolver.set_source(Some(PathBuf::from("/explicit/resolv.conf")));
+        resolver.set_options(Some(vec!["rbind".to_string(), "ro".to_string()]));
+        let mut spec = Spec::default();
+        spec.set_mounts(Some(vec![resolver]));
+
+        inject_guest_sandbox_resolver(&mut spec);
+
+        let mounts = spec.mounts().as_ref().unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(
+            mounts[0].source(),
+            &Some(PathBuf::from("/explicit/resolv.conf"))
+        );
+        assert_eq!(
+            mounts[0].options().as_ref().unwrap(),
+            &["rbind".to_string(), "ro".to_string()]
         );
     }
 
