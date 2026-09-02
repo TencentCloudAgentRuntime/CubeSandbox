@@ -186,3 +186,10 @@ S3.4a 只冻结输入、现状与精确缺口，不把“请求被接受”记�
 - `K8S-OQ-015`：Guest 更新和 Host 包络重算的顺序、幂等键与失败恢复。
 - `K8S-OQ-016`：swap、PIDs、hugepage 的 Guest/Host 分层，以及 ephemeral-storage 的 kubelet 边界。
 - `K8S-OQ-017`：极端 unchecked `memory.max` 下调的阻塞写、RPC deadline 与最终状态对账。
+
+## 额外多节点交互基线（2026-09-02）
+
+额外 TKE `cls-1oqe2py4` 的两个节点、Deployment 5 副本、StatefulSet 3 副本及
+逐 Pod HTTP/curl 验收已经通过。该集群当前使用 TKE 默认 containerd，不计作 Cube
+RuntimeClass 的 S3.4c 验收；资源清单、TAT 证据和用户验证命令见
+[`extra-two-node-cluster.md`](./extra-two-node-cluster.md)。

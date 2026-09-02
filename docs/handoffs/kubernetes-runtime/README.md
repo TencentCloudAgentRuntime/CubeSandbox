@@ -2,11 +2,11 @@
 
 ## 当前 Stage
 
-S3.4c.2 `IN_PROGRESS`：S3.4c.1 的 Host Pod VM 包络设计已冻结，同一 reviewer 四轮复审后明确给出 `APPROVE S3.4c DESIGN`。当前实现 managed/legacy 分类、Host leaf 生命周期、进程归属、bundle 外 takeover 与长期 scanner。
+S3.4c.2 `VALIDATING`：Host leaf lifecycle、进程归位、bundle 外 takeover/scanner 和 Create/Delete failure barrier 已实现；当前执行剩余云端故障、漂移、重启与 legacy 验收。
 
 ## 基线
 
-最后一项已验证实现 commit 为 `be8e7304c7ada8b4e7e13af8727613357a575bfb`，tree 为 `7aae3e6a7a96f76377be07a99f48da74ae769c76`；验收证据 commit 为 `136df12cd60ee3fa8b5e25759611cd68db3753fc`。项目 CVM 的最终 CubeShim/Agent SHA-256 为 `398416c5…`/`2e3318e6…`，resources-v2 capability 已启用并完成 missing/version-zero fail-closed 验证。
+最后一项已验证实现 commit 为 `fe2f47cb17a3f6f256dc22eb5ff73ce60566beb1`，tree 为 `8c3daa1ee894565a7f3bac697976507a589e6a47`；上一个验收证据 commit 为 `136df12cd60ee3fa8b5e25759611cd68db3753fc`。项目 CVM 当前 CubeShim SHA-256 为 `1cce8aa4…`，固定 commit 云端 50 项 Host lifecycle 测试、RuntimeClass Pod 与 SIGKILL/30 秒兜底已通过。
 
 ## 已完成
 
@@ -14,20 +14,20 @@ S0、S1、S2.1～S2.4、S3.1～S3.3、S3.4a～S3.4b 与 S3.4c.1 全部 `DONE`。
 
 ## 未完成
 
-S3.4c.2～S3.4d 尚未完成。Host 上尚无 Pod VM leaf，Shim/VMM/virtiofs/辅助进程仍继承 containerd service cgroup；watchdog、external owners、gate/identity、controller WAL、RuntimeClass overhead、云端压力和重启恢复待实现。极端 unchecked `memory.max` 下调按 `K8S-OQ-017` 跟踪。
+S3.4c.2～S3.4d 尚未全部完成。S3.4c.2 还需 sibling containment/PID 诱饵、containerd restart、legacy Task 和最终 reviewer closure；S3.4c.3 的 controller WAL/RuntimeClass overhead 与 S3.4c.4 压力矩阵尚未开始。极端 unchecked `memory.max` 下调按 `K8S-OQ-017` 跟踪。
 
 ## 验证
 
-S3.4b 验证保持不变。S3.4c.1 输入探针 `inv-v856u30wn5`、`inv-985738gw5i`、`inv-v8576v08e1`、`inv-a857xtgv7s` 成功；有效 systemd 门禁 `inv-38589x0k30` 为 200/200、failures=0、cleanup exact、dropped=0。早期无效探针已排除并由 `inv-v858720f7k`、`inv-08589cgxsg` 精确清理。证据见 `evidence/s3.4/s3.4c-*`。
+`fe2f47cb` 由同一 reviewer 复审为 P0/P1=0 并 `APPROVE THIS FIX`；`inv-085uf4g092` 固定构建 50/50，`inv-885uk4gin4` 部署并通过本 build/boot 的 systemd 200 次 gate，`inv-985umh0f8d` 真实 RuntimeClass Pod 启停/日志/exec/Host leaf/exact cleanup 通过。`inv-v85umsgm7x` 证明 shim SIGKILL 后 durable FAILED、epoch fence、未 drain waiter 保留 30.698 秒后 exact cleanup。`inv-685vvwg356` 证明显式 120 秒客户端 timeout 下 live Delete 后五秒内 RuntimeResource=EMPTY、epoch 2→3，release 后收敛；其中诊断 ERR trap 对预期 `wait rc=1` 打出误报文字，但任务 exit=0 且最终验收行通过，需干净重跑替换该证据。额外两节点 TKE `cls-1oqe2py4` 已 Ready；`inv-a85win0n3a` 的 Deployment 5/5、StatefulSet 3/3 与全 Pod HTTP/curl 验收通过，该环境只作为默认 containerd 多节点基线，不冒充 Cube RuntimeClass 证据。
 
 ## 阻塞
 
-无外部阻塞。`K8S-OQ-014`～`K8S-OQ-016` 已有设计结论，等待 S3.4c.2～c.4 实现/压力关闭；`K8S-OQ-017`～`019` 继续跟踪极端内存下调、VM hotplug 与有限 Pod PID 语义。只操作本 PoC 创建的 CVM/自建 Kubernetes 和指定私有 COS，不触碰账号内其他资源。
+无外部阻塞，也无待用户决策。live-delete 前两轮失败已定位为 `crictl` 默认短 timeout 导致 waiter 正常 drain；显式 120 秒后功能通过，当前只清理诊断 trap 误报并补干净证据。`K8S-OQ-014`～`K8S-OQ-016` 等待 S3.4c.2～c.4 最终关闭；`K8S-OQ-017`～`019` 继续跟踪极端内存下调、VM hotplug 与有限 Pod PID 语义。
 
 ## 受保护路径
 
-`CubeShim/`、`Cubelet/`、`agent/`、`deploy/kubernetes/runtimeclass/`、`tests/e2e/kubernetes-runtime/` 和本 handoff bundle。云端只操作本 PoC 创建的 `ins-pl7mznaa`、对应自建 Kubernetes 和私有 COS `cubesandbox-k8s-poc-20260831-1251707795`；现有证据、构建产物和回滚副本不覆盖。
+`CubeShim/`、`Cubelet/`、`agent/`、`deploy/kubernetes/runtimeclass/`、`deploy/kubernetes/smoke/`、`tests/e2e/kubernetes-runtime/` 和本 handoff bundle。云端只操作本 PoC 创建的 CVM/自建 Kubernetes、额外 TKE `cls-1oqe2py4` 及其节点 `ins-h06xpkbw`、`ins-lus07026`，以及私有 COS `cubesandbox-k8s-poc-20260831-1251707795`；现有证据、构建产物和回滚副本不覆盖，名称带“勿删”的资源不得删除。
 
 ## 下一步
 
-执行 S3.4c.2：先实现 classifier/path 与 external lifecycle/双 owner schema，再实现 watchdog service、readiness gate、ServerIdentity/pidfd、systemd/cgroupfs leaf 和 cleanup state machine；补 response 后 failpoints、containment breach/PID 诱饵、containerd restart/kill Shim/legacy tests。全部本地与特权验证通过后交同一 reviewer，直到明确 `APPROVE S3.4c.2` 才进入 S3.4c.3。
+先干净重跑 live Create/并发 Delete；随后完成 sibling containment breach + 同 executable/argv PID 诱饵、containerd restart 时现有 Pod 可用、legacy Task 与最终零基线。更新 S3.4c 实际契约/证据后交同一 reviewer，直到明确 `APPROVE S3.4c.2` 才进入 S3.4c.3。
