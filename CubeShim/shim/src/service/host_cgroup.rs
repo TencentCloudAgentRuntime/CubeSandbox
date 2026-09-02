@@ -1978,6 +1978,11 @@ impl LifecycleHandle {
                 owner.controllers = Some(updated.clone());
                 persist_host_owner_exact(&self.directory, &owner)
             },
+            || {
+                let _record_lock = self.record_lock()?;
+                let record = self.read_record()?;
+                verify_controller_claim(&record, epoch, identity, target)
+            },
             |name| controller_test_failpoint(&self.directory, name),
         )?;
         let _record_lock = self.record_lock()?;
@@ -3011,18 +3016,20 @@ where
     Load: FnMut() -> Result<ControllerJournal, String>,
     Persist: FnMut(&ControllerJournal) -> Result<(), String>,
 {
-    replay_controller_rollback_with_failpoint(leaf, load, persist, |_| Ok(()))
+    replay_controller_rollback_with_failpoint(leaf, load, persist, || Ok(()), |_| Ok(()))
 }
 
-fn replay_controller_rollback_with_failpoint<Load, Persist, Failpoint>(
+fn replay_controller_rollback_with_failpoint<Load, Persist, Verify, Failpoint>(
     leaf: &Path,
     mut load: Load,
     mut persist: Persist,
+    mut verify_claim: Verify,
     mut failpoint: Failpoint,
 ) -> Result<(), String>
 where
     Load: FnMut() -> Result<ControllerJournal, String>,
     Persist: FnMut(&ControllerJournal) -> Result<(), String>,
+    Verify: FnMut() -> Result<(), String>,
     Failpoint: FnMut(&str) -> Result<(), String>,
 {
     loop {
@@ -3097,6 +3104,7 @@ where
                 let old = step.old.clone();
                 persist(&journal)?;
                 failpoint(&format!("before-rollback-write-{file}"))?;
+                verify_claim()?;
                 write_controller_value(leaf, &file, &old)?;
                 failpoint(&format!("after-rollback-write-{file}"))?;
                 failpoint(&format!("before-rollback-readback-{file}"))?;
@@ -6555,6 +6563,7 @@ mod tests {
                             Ok(())
                         }
                     },
+                    || Ok(()),
                     |name| {
                         if armed.get() && name == crash_point {
                             armed.set(false);
@@ -6588,6 +6597,49 @@ mod tests {
                 fs::remove_dir_all(root).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn revoked_epoch_fences_controller_rollback_before_external_write() {
+        let (root, mut journal) = controller_fixture();
+        journal.state = ControllerTransactionState::ControllersCommitted;
+        for step in &mut journal.steps {
+            step.state = ControllerStepState::Applied;
+            step.observed = Some(step.target.clone());
+            fs::write(root.join(&step.file), &step.target).unwrap();
+        }
+        let expected = journal
+            .steps
+            .iter()
+            .map(|step| (step.file.clone(), step.target.clone()))
+            .collect::<Vec<_>>();
+        let stored = Arc::new(std::sync::Mutex::new(journal));
+        let error = replay_controller_rollback_with_failpoint(
+            &root,
+            {
+                let stored = Arc::clone(&stored);
+                move || Ok(stored.lock().unwrap().clone())
+            },
+            {
+                let stored = Arc::clone(&stored);
+                move |updated| {
+                    *stored.lock().unwrap() = updated.clone();
+                    Ok(())
+                }
+            },
+            || Err("operation owner epoch was revoked".to_string()),
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.contains("epoch was revoked"));
+        assert_eq!(
+            stored.lock().unwrap().steps[3].state,
+            ControllerStepState::UndoIntent
+        );
+        for (file, target) in expected {
+            assert_eq!(read_controller_value(&root, &file).unwrap(), target);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
