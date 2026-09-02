@@ -55,6 +55,43 @@ Cube runtime 节点，并保留 5 副本 Deployment、3 副本 StatefulSet 供�
 Shim lib check 通过；本机测试只因缺少 `libseccomp` 停在链接，真实链接和测试以上述
 云端构建为准。
 
+### 补齐 `cube-runtime` CLI（2026-09-03）
+
+最初的 S0 增量运行包只包含本轮需要替换的 CubeShim 和 Agent，没有包含 Host 侧调试/
+snapshot 辅助 CLI `cube-runtime`。这不影响 containerd 通过
+`containerd-shim-cube-rs` 启动 Pod，但不满足人工使用 `cube-runtime login` 或底层
+snapshot 命令的需要。
+
+补充构建从 `2269a3b3248bda1259cec722fbdd1d20cf843bbd` 精确归档 `CubeShim/` 与其
+同仓 `hypervisor/` path dependency。源码归档共 1,622,355 字节，SHA-256 为
+`46a80b5ec919326d4740b3fef7cc7d5f5a439d72a78bfaa9a73f062eef85d80f`，私有 COS
+对象为 `poc/s0-cube-multinode/source/CubeSandbox-buildsrc-2269a3b3.tar.gz`。
+构建任务 `inv-886aawg8bb` 在 build CVM 的既有 Docker builder 中完成；其编译日志超过
+TAT 24 KiB 输出上限，但任务本身为 `SUCCESS`，随后 `inv-v86aeig4w1` 独立读取产物身份：
+
+| 项目 | 值 |
+|---|---|
+| `cube-runtime` 版本 | `0.0.0-s0-k8s-poc (2269a3b3248bda1259cec722fbdd1d20cf843bbd)` |
+| 文件大小 | 9,381,472 字节 |
+| SHA-256 | `8c17375d937bf612e617d9a98c0ccfdf551a8916197b9cf103f64b3c00aa41ec` |
+| 私有 COS 对象 | `poc/s0-cube-multinode/runtime/cube-runtime-2269a3b3` |
+
+`inv-v86aek0p10` 在两个 Worker 上均先校验下载 SHA，再写入
+`/opt/cubesandbox-s0-multinode-runtime-2269a3b3/bin/cube-runtime`，更新该版本的
+`SHA256SUMS`，并创建 `/usr/local/bin/cube-runtime` 软链接。旧 manifest 保存在各节点的
+`backups/SHA256SUMS.pre-cube-runtime-20260903`。两个节点的 `--version`、`login --help`
+和 `snapshot --help` 均通过，containerd 没有重启且保持 `active`；活动 sandbox/VM 数量
+仍分别为 3/3 和 5/5。`inv-v86aem0qtx` 随后确认 8/8 Pod Ready、重启数 0，并从每个
+Pod 访问 Service DNS，结果 8/8。
+独立只读审计 `inv-886ag30i7c` 又在两个 Worker 上执行完整 `sha256sum -c
+SHA256SUMS`，Shim、harness、Agent、kernel、guest image 与新增 CLI 全部为 `OK`；同时复核
+软链接目标、manifest 备份、两个 CLI 子命令和 containerd `active`。
+
+构建前的失败尝试都发生在隔离 build CVM 目录、早于 Worker 安装：`inv-b86a810mfs`
+缺少非登录 shell 的 Cargo PATH，`inv-986a9dgnaq` 证明只归档 `CubeShim/` 会缺少
+`hypervisor/` path dependency，`inv-v86aam052w` 是 builder 工作目录指向源码根而非
+`CubeShim/`。三者均未修改 Worker；相关隔离目录保留用于审计。
+
 ## 最终验收
 
 `inv-8863x002rx` 在 9 秒内完成最终 rollout：Deployment `5/5`、StatefulSet `3/3`，
@@ -95,6 +132,9 @@ kubectl -n cubesandbox-cube-crossnode exec stateful-http-1 -c curl -- \
 低层身份需在对应工作节点查看：
 
 ```bash
+cube-runtime --version
+cube-runtime login --help
+cube-runtime snapshot --help
 ctr -n k8s.io sandboxes list
 find /run/vc/vm -mindepth 1 -maxdepth 1
 ```

@@ -203,3 +203,6 @@ S0 三节点自建集群的两个 PVM 工作节点已使用 `RuntimeClass/cube` 
 证据和人工复查命令见
 [`s0-cube-crossnode-workloads.md`](./s0-cube-crossnode-workloads.md)。该回归扩充
 S3.4c.2 证据，但不代替尚未完成的 sibling/PID 诱饵、containerd restart 和 legacy Task。
+2026-09-03 又以同一 `2269a3b3` 源码补齐两个 Worker 的 `cube-runtime` CLI；两节点
+SHA 一致，安装未重启 containerd，8 Pod/8 次 Service DNS 回归保持通过，详细制品身份、
+TAT 任务和失败尝试边界记录在同一证据页。
