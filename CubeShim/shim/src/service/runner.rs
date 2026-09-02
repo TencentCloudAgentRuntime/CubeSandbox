@@ -13,7 +13,9 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -22,6 +24,7 @@ use tokio::process::Command;
 
 use crate::common::utils::ADDRESS_FILE;
 use crate::service::bootstrap::{BootstrapParams, BootstrapResult};
+use crate::service::host_cgroup::{self, BootstrapSession};
 use crate::service::runtime_resource;
 use crate::service::sandbox_srv::SandboxService;
 use crate::service::srv::Service;
@@ -38,6 +41,8 @@ pub async fn run(runtime_id: &str, flags: Flags) -> Result<(), Error> {
         runtime_resource::RUNTIME_REAPER_ACTION => runtime_resource::run_persisted_reaper()
             .await
             .map_err(Error::Other),
+        host_cgroup::WATCHDOG_ACTION => host_cgroup::run_watchdog().await.map_err(Error::Other),
+        host_cgroup::SYSTEMD_PROBE_ACTION => host_cgroup::run_systemd_probe().map_err(Error::Other),
         _ => serve(runtime_id, flags).await,
     }
 }
@@ -65,63 +70,105 @@ async fn start(flags: Flags) -> Result<(), Error> {
         err,
     })?;
     let debug = flags.debug || params.log_level <= -4;
-    let mut command = Command::new(executable);
-    command
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .env(TTRPC_ADDRESS_ENV, &params.containerd_ttrpc_address)
-        .args([
-            "-namespace",
-            &params.namespace,
-            "-id",
-            &params.instance_id,
-            "-address",
-            &params.containerd_grpc_address,
-            "-socket",
-            &address,
-        ]);
-    if debug {
-        command.arg("-debug");
-    }
+    let mut session = BootstrapSession::prepare(&params, &cwd, &address, &executable, debug)
+        .map_err(Error::Other)?;
+    let result = async {
+        session.place_helper().map_err(Error::Other)?;
+        let mut command = Command::new(executable);
+        command
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .env(TTRPC_ADDRESS_ENV, &params.containerd_ttrpc_address)
+            .args([
+                "-namespace",
+                &params.namespace,
+                "-id",
+                &params.instance_id,
+                "-address",
+                &params.containerd_grpc_address,
+                "-socket",
+                &address,
+            ]);
+        if debug {
+            command.arg("-debug");
+        }
 
-    let mut child = command.spawn().map_err(|err| Error::IoError {
-        context: "spawn CubeShim server".to_string(),
-        err,
-    })?;
-    #[cfg(target_os = "linux")]
-    containerd_shim::cgroup::set_cgroup_and_oom_score(child.id().unwrap())?;
+        session
+            .configure_child(&mut command)
+            .map_err(Error::Other)?;
 
-    let mut ready_pipe = child
-        .stdout
-        .take()
-        .ok_or_else(|| Error::Other("CubeShim child has no readiness pipe".to_string()))?;
-    io::copy(&mut ready_pipe, &mut io::stderr())
-        .await
-        .map_err(|err| Error::IoError {
-            context: "wait for CubeShim server readiness".to_string(),
+        let mut child = command.spawn().map_err(|err| Error::IoError {
+            context: "spawn CubeShim server".to_string(),
             err,
         })?;
-    if let Some(status) = child.try_wait().map_err(|err| Error::IoError {
-        context: "inspect CubeShim child".to_string(),
-        err,
-    })? {
-        return Err(Error::Other(format!(
-            "CubeShim server exited before readiness: {status}"
-        )));
-    }
+        session.child_spawned();
+        let child_pid = i32::try_from(child.id().ok_or_else(|| {
+            Error::Other("spawned CubeShim server did not report a pid".to_string())
+        })?)
+        .map_err(|error| Error::Other(format!("CubeShim server pid does not fit i32: {error}")))?;
+        session
+            .register_spawned_server(child_pid)
+            .map_err(Error::Other)?;
+        session
+            .wait_server_identity(child_pid)
+            .await
+            .map_err(Error::Other)?;
+        #[cfg(target_os = "linux")]
+        containerd_shim::cgroup::adjust_oom_score(child.id().unwrap())?;
+        session.release_gate().map_err(Error::Other)?;
 
-    fs::write(ADDRESS_FILE, address.as_bytes()).map_err(|err| Error::IoError {
-        context: "persist CubeShim address".to_string(),
-        err,
-    })?;
-    BootstrapResult::ttrpc(address)
-        .write_to(std::io::stdout().lock())
-        .map_err(|err| Error::IoError {
-            context: "write containerd bootstrap result".to_string(),
+        let mut ready_pipe = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::Other("CubeShim child has no readiness pipe".to_string()))?;
+        io::copy(&mut ready_pipe, &mut io::stderr())
+            .await
+            .map_err(|err| Error::IoError {
+                context: "wait for CubeShim server readiness".to_string(),
+                err,
+            })?;
+        if let Some(status) = child.try_wait().map_err(|err| Error::IoError {
+            context: "inspect CubeShim child".to_string(),
+            err,
+        })? {
+            return Err(Error::Other(format!(
+                "CubeShim server exited before readiness: {status}"
+            )));
+        }
+
+        session.restore_helper().map_err(Error::Other)?;
+
+        durable_write_file(Path::new(ADDRESS_FILE), address.as_bytes()).map_err(|err| {
+            Error::IoError {
+                context: "persist CubeShim address".to_string(),
+                err,
+            }
+        })?;
+        let mut stdout = std::io::stdout().lock();
+        BootstrapResult::ttrpc(address)
+            .write_to(&mut stdout)
+            .map_err(|err| Error::IoError {
+                context: "write containerd bootstrap result".to_string(),
+                err,
+            })?;
+        stdout.flush().map_err(|err| Error::IoError {
+            context: "flush containerd bootstrap result".to_string(),
             err,
         })
+    }
+    .await;
+    if let Err(error) = result {
+        let primary = format!("{error}");
+        return match session.abort(&primary).await {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(Error::Other(format!(
+                "{primary}; bootstrap cleanup: {cleanup}"
+            ))),
+        };
+    }
+    Ok(())
 }
 
 async fn delete(runtime_id: &str, flags: Flags) -> Result<(), Error> {
@@ -134,13 +181,15 @@ async fn delete(runtime_id: &str, flags: Flags) -> Result<(), Error> {
     let mut shim = <Service as Shim>::new(runtime_id, &flags, &mut config).await;
     let response = shim.delete_shim().await?;
     let data = response.write_to_bytes()?;
-    std::io::stdout()
-        .lock()
-        .write_all(&data)
-        .map_err(|err| Error::IoError {
-            context: "write delete response".to_string(),
-            err,
-        })
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(&data).map_err(|err| Error::IoError {
+        context: "write delete response".to_string(),
+        err,
+    })?;
+    stdout.flush().map_err(|err| Error::IoError {
+        context: "flush delete response".to_string(),
+        err,
+    })
 }
 
 async fn serve(runtime_id: &str, flags: Flags) -> Result<(), Error> {
@@ -157,6 +206,12 @@ async fn serve(runtime_id: &str, flags: Flags) -> Result<(), Error> {
     let ttrpc_address = env::var(TTRPC_ADDRESS_ENV)
         .map_err(|error| Error::Other(format!("{TTRPC_ADDRESS_ENV} is unavailable: {error}")))?;
 
+    let host_lifecycle = host_cgroup::lifecycle_from_env().map_err(Error::Other)?;
+    let socket_guard = host_lifecycle
+        .as_ref()
+        .map(|lifecycle| lifecycle.acquire_socket_path_guard(&flags.socket))
+        .transpose()
+        .map_err(Error::Other)?;
     prepare_socket(&flags.socket)?;
     let mut config = Config {
         no_reaper: true,
@@ -184,6 +239,12 @@ async fn serve(runtime_id: &str, flags: Flags) -> Result<(), Error> {
         .start()
         .await
         .map_err(|error| Error::Other(format!("start CubeShim ttrpc server: {error}")))?;
+    if let Some(lifecycle) = host_lifecycle {
+        lifecycle
+            .mark_socket_ready(&flags.socket)
+            .map_err(Error::Other)?;
+    }
+    drop(socket_guard);
     signal_server_started()?;
 
     #[cfg(unix)]
@@ -211,7 +272,11 @@ async fn serve(runtime_id: &str, flags: Flags) -> Result<(), Error> {
 
     shim.wait().await;
     server.shutdown().await.unwrap_or_default();
-    remove_socket(&flags.socket);
+    if let Some(lifecycle) = host_cgroup::lifecycle_from_env().map_err(Error::Other)? {
+        lifecycle
+            .request_cleanup("CubeShim server exited gracefully")
+            .map_err(Error::Other)?;
+    }
     Ok(())
 }
 
@@ -256,7 +321,9 @@ fn socket_address(
             path.as_os_str().len()
         )));
     }
-    Ok(format!("unix://{}", path.display()))
+    let address = format!("unix://{}", path.display());
+    let canonical = host_cgroup::unix_socket_path(&address).map_err(Error::InvalidArgument)?;
+    Ok(format!("unix://{}", canonical.display()))
 }
 
 fn prepare_socket(address: &str) -> Result<(), Error> {
@@ -272,23 +339,41 @@ fn prepare_socket(address: &str) -> Result<(), Error> {
         })?;
     }
     if Path::new(path).exists() {
-        if std::os::unix::net::UnixStream::connect(path).is_ok() {
-            return Err(Error::Other(format!(
-                "CubeShim socket is already serving: {address}"
-            )));
-        }
-        fs::remove_file(path).map_err(|err| Error::IoError {
-            context: format!("remove stale CubeShim socket {path}"),
-            err,
-        })?;
+        return Err(Error::Other(format!(
+            "refuse to replace existing CubeShim socket path: {address}"
+        )));
     }
     Ok(())
 }
 
-fn remove_socket(address: &str) {
-    if let Some(path) = address.strip_prefix("unix://") {
-        let _ = fs::remove_file(path);
+pub(crate) fn durable_write_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let temporary = parent.join(format!(
+        ".{}.tmp-{}-{}",
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("address"),
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    let write_result = file.write_all(data).and_then(|()| file.sync_all());
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
     }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    File::open(parent)?.sync_all()
 }
 
 fn signal_server_started() -> Result<(), Error> {
@@ -305,6 +390,7 @@ fn signal_server_started() -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     struct FakeTask;
 
@@ -357,6 +443,27 @@ mod tests {
                 .collect::<std::collections::BTreeSet<_>>(),
             expected
         );
+    }
+
+    #[test]
+    fn socket_prepare_never_replaces_existing_path() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-shim-existing-socket-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("shim.sock");
+        fs::write(&path, b"new-generation-owned").unwrap();
+        let address = format!("unix://{}", path.display());
+
+        assert!(prepare_socket(&address).is_err());
+        let mut contents = Vec::new();
+        File::open(&path)
+            .unwrap()
+            .read_to_end(&mut contents)
+            .unwrap();
+        assert_eq!(contents, b"new-generation-owned");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

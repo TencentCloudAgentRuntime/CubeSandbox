@@ -3,6 +3,7 @@
 //
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,8 +19,8 @@ use containerd_shim::{
         cgroups::metrics::{CPUStat, CPUUsage, MemoryEntry, MemoryStat, Metrics, Throttle},
         protobuf::MessageDyn,
         shim_async::Task,
-        ttrpc::r#async::TtrpcContext,
         ttrpc::Error::Others,
+        ttrpc::{self, r#async::TtrpcContext, Code},
         types::task,
     },
     Context, Error, TtrpcResult,
@@ -33,6 +34,10 @@ use crate::container::resources;
 use crate::container::{container_mgr::ContainerInfo, exec::Tty};
 use crate::log::{stat_defer, Log, LogLevel};
 use crate::sandbox::sb;
+use crate::service::host_cgroup::{
+    lifecycle_from_env, BeginCreateError, Classification, CreateAdmission, CreatePublisherGuard,
+    CreateWaiterGuard, PersistedCreateResult,
+};
 use crate::service::sandbox_srv::{SandboxLifecycle, TaskMode};
 use crate::service::standard_rootfs::{self, PreparedRootfs};
 use crate::service::update_ext;
@@ -60,6 +65,83 @@ fn validate_create_spec_before_rootfs_prepare(
     spec: &mut oci_spec::runtime::Spec,
 ) -> Result<(), String> {
     crate::container::resolve_guest_privileged_bind_sources(spec)
+}
+
+fn task_status(code: Code, message: impl Into<String>) -> ttrpc::Error {
+    ttrpc::Error::RpcStatus(ttrpc::get_status(code, message.into()))
+}
+
+fn task_code_from_name(name: &str) -> Code {
+    match name {
+        "CANCELLED" => Code::CANCELLED,
+        "INVALID_ARGUMENT" => Code::INVALID_ARGUMENT,
+        "NOT_FOUND" => Code::NOT_FOUND,
+        "ALREADY_EXISTS" => Code::ALREADY_EXISTS,
+        "FAILED_PRECONDITION" => Code::FAILED_PRECONDITION,
+        "UNAVAILABLE" => Code::UNAVAILABLE,
+        "INTERNAL" => Code::INTERNAL,
+        _ => Code::UNKNOWN,
+    }
+}
+
+fn task_failure_identity(error: &ttrpc::Error) -> (String, String) {
+    match error {
+        ttrpc::Error::RpcStatus(status) => {
+            (format!("{:?}", status.code()), status.message().to_string())
+        }
+        error => ("UNKNOWN".to_string(), error.to_string()),
+    }
+}
+
+async fn persist_legacy_create_failure(
+    publisher: Option<CreatePublisherGuard>,
+    code: &str,
+    message: &str,
+) -> TtrpcResult<()> {
+    let Some(publisher) = publisher else {
+        return Ok(());
+    };
+    let code = code.to_string();
+    let message = message.to_string();
+    tokio::spawn(async move {
+        publisher.failure_until_durable(&code, &message).await;
+    })
+    .await
+    .map_err(|error| {
+        task_status(
+            Code::INTERNAL,
+            format!("join legacy result publisher: {error}"),
+        )
+    })
+}
+
+async fn persist_legacy_create_result<T>(
+    publisher: Option<CreatePublisherGuard>,
+    result: &TtrpcResult<T>,
+) -> TtrpcResult<()> {
+    let Some(publisher) = publisher else {
+        return Ok(());
+    };
+    let outcome = match result {
+        Ok(_) => None,
+        Err(error) => {
+            let (code, message) = task_failure_identity(error);
+            Some((code, message))
+        }
+    };
+    tokio::spawn(async move {
+        match outcome {
+            Some((code, message)) => publisher.failure_until_durable(&code, &message).await,
+            None => publisher.success_until_durable().await,
+        }
+    })
+    .await
+    .map_err(|error| {
+        task_status(
+            Code::INTERNAL,
+            format!("join legacy result publisher: {error}"),
+        )
+    })
 }
 
 fn normalize_guest_stats(stats: &protoc::agent::StatsContainerResponse) -> Result<Metrics, String> {
@@ -379,41 +461,118 @@ impl Task for TaskService {
             self.log.clone(),
         );
 
-        let task_reservation = self
-            .sandbox_lifecycle
-            .reserve_task_create(&req.id)
-            .await
-            .map_err(|error| Error::Other(format!("Create task before sandbox ready: {error}")))?;
-        let task_mode = task_reservation.mode();
-
         let bundle = req.bundle.as_str();
-        let (spec, resources_v2) = match task_mode {
-            TaskMode::Legacy => (Utils::load_spec(bundle), None),
-            TaskMode::ManagedReady { .. } => {
-                let raw = Utils::read_spec(bundle);
-                match raw {
-                    Ok(raw) => {
-                        let payload = resources::canonicalize_create_config(&raw);
-                        match payload {
-                            Ok(payload) => (Utils::parse_spec(&raw, bundle), Some(payload)),
-                            Err(error) => (Err(error), None),
+        let preliminary_mode =
+            self.sandbox_lifecycle.task_mode().await.map_err(|error| {
+                Error::Other(format!("Create task before sandbox ready: {error}"))
+            })?;
+        let mut host_waiter: Option<CreateWaiterGuard> = None;
+        let mut host_publisher: Option<CreatePublisherGuard> = None;
+        if matches!(preliminary_mode, TaskMode::Legacy) {
+            let lifecycle = lifecycle_from_env().map_err(Error::FailedPreconditionError)?;
+            if let Some(lifecycle) = lifecycle.as_ref() {
+                let fingerprint = req.write_to_bytes().map_err(|error| {
+                    Error::Other(format!("encode legacy CreateTask fingerprint: {error}"))
+                })?;
+                lifecycle
+                    .validate_takeover_bundle(Classification::LegacyTask, Path::new(bundle))
+                    .map_err(Error::FailedPreconditionError)?;
+                let admission = lifecycle
+                    .begin_create(Classification::LegacyTask, &fingerprint)
+                    .map_err(|error| match error {
+                        BeginCreateError::Conflict(message) => {
+                            task_status(Code::ALREADY_EXISTS, message)
                         }
+                        BeginCreateError::Invalid(message) => {
+                            task_status(Code::FAILED_PRECONDITION, message)
+                        }
+                    })?;
+                let waiter = lifecycle.create_waiter_guard();
+                if admission != CreateAdmission::First {
+                    let durable = lifecycle.wait_create_result(Duration::from_secs(45)).await;
+                    if let Err(error) = waiter.finish() {
+                        return Err(task_status(
+                            Code::INTERNAL,
+                            format!("finish legacy CreateTask waiter: {error}"),
+                        ));
                     }
-                    Err(error) => (Err(error), None),
+                    return match durable {
+                        Ok(PersistedCreateResult::Succeeded) => {
+                            let sb = self.sandbox.lock().await;
+                            match sb.get_container_info(&req.id, &String::new()).await {
+                                Ok(_) => Ok(api::CreateTaskResponse {
+                                    pid: sb.pid(),
+                                    ..Default::default()
+                                }),
+                                Err(error) => Err(task_status(
+                                    Code::INTERNAL,
+                                    format!(
+                                        "durable legacy CreateTask success has no matching local container: {error}"
+                                    ),
+                                )),
+                            }
+                        }
+                        Ok(PersistedCreateResult::Failed { code, message }) => {
+                            Err(task_status(task_code_from_name(&code), message))
+                        }
+                        Err(error) => Err(task_status(Code::INTERNAL, error)),
+                    };
                 }
+                host_waiter = Some(waiter);
+                host_publisher = Some(lifecycle.create_publisher_guard());
+                lifecycle.wait_test_failpoint("after-create-commit").await;
+            }
+        }
+
+        let task_reservation = match self.sandbox_lifecycle.reserve_task_create(&req.id).await {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                let message = format!("Create task before sandbox ready: {error}");
+                persist_legacy_create_failure(
+                    host_publisher.take(),
+                    "FAILED_PRECONDITION",
+                    &message,
+                )
+                .await?;
+                if let Some(waiter) = host_waiter.take() {
+                    waiter.finish().map_err(|error| {
+                        task_status(
+                            Code::INTERNAL,
+                            format!("finish rejected legacy CreateTask waiter: {error}"),
+                        )
+                    })?;
+                }
+                return Err(task_status(Code::FAILED_PRECONDITION, message));
             }
         };
-        let mut spec = spec.map_err(|e| {
-            errf!(self.log, "Load spec failed:{}", e.clone());
-            Others(format!("Load spec failed:{}", e))
-        })?;
-        validate_create_spec_before_rootfs_prepare(&mut spec).map_err(|e| {
-            errf!(self.log, "Validate OCI bind sources failed:{}", e);
-            Others(format!("Validate OCI bind sources failed:{}", e))
-        })?;
+        let task_mode = task_reservation.mode().clone();
 
-        let result = async {
-            let mut prepared_rootfs = match task_mode {
+        let result: TtrpcResult<api::CreateTaskResponse> = async {
+            let (spec, resources_v2) = match &task_mode {
+                TaskMode::Legacy => (Utils::load_spec(bundle), None),
+                TaskMode::ManagedReady { .. } => {
+                    let raw = Utils::read_spec(bundle);
+                    match raw {
+                        Ok(raw) => {
+                            let payload = resources::canonicalize_create_config(&raw);
+                            match payload {
+                                Ok(payload) => (Utils::parse_spec(&raw, bundle), Some(payload)),
+                                Err(error) => (Err(error), None),
+                            }
+                        }
+                        Err(error) => (Err(error), None),
+                    }
+                }
+            };
+            let mut spec = spec.map_err(|e| {
+                errf!(self.log, "Load spec failed:{}", e.clone());
+                Others(format!("Load spec failed:{}", e))
+            })?;
+            validate_create_spec_before_rootfs_prepare(&mut spec).map_err(|e| {
+                errf!(self.log, "Validate OCI bind sources failed:{}", e);
+                Others(format!("Validate OCI bind sources failed:{}", e))
+            })?;
+            let mut prepared_rootfs = match &task_mode {
                 TaskMode::Legacy => standard_rootfs::prepare_legacy(
                     &self.sandbox_id,
                     &req.id,
@@ -544,9 +703,18 @@ impl Task for TaskService {
             })
         }
         .await;
-        // Dropping the reservation synchronously releases the task ID and
-        // wakes Stop/Shutdown. This also runs when the Create future is
-        // cancelled, so lifecycle operations cannot wait on a leaked count.
+        persist_legacy_create_result(host_publisher.take(), &result).await?;
+        if let Some(waiter) = host_waiter.take() {
+            waiter.finish().map_err(|error| {
+                task_status(
+                    Code::INTERNAL,
+                    format!("finish legacy CreateTask waiter: {error}"),
+                )
+            })?;
+        }
+        // Publish the external result before releasing the local reservation,
+        // so a same-fingerprint waiter can distinguish completion from a
+        // cancelled RPC. Drop still runs automatically on cancellation.
         drop(task_reservation);
         result
     }

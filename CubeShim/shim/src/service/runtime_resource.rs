@@ -21,15 +21,15 @@ use std::fs;
 use std::io::{IoSliceMut, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
-use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 use tokio::net::UnixStream;
 use tonic::codegen::http::uri::PathAndQuery;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Status};
 use tower::service_fn;
+
+use crate::service::host_cgroup::{lifecycle_from_env, RuntimeOwnerState, RuntimeResourceOwner};
 
 const API_VERSION: u32 = 1;
 const FD_PROTOCOL_VERSION: u32 = 1;
@@ -162,8 +162,14 @@ struct CriDnsConfig {
 
 #[derive(Clone, PartialEq, Message)]
 struct CriLinuxPodSandboxConfig {
+    #[prost(string, tag = "1")]
+    cgroup_parent: String,
     #[prost(message, optional, tag = "2")]
     security_context: Option<CriLinuxSandboxSecurityContext>,
+    #[prost(map = "string, string", tag = "3")]
+    sysctls: HashMap<String, String>,
+    #[prost(message, optional, tag = "4")]
+    overhead: Option<CriLinuxContainerResources>,
     #[prost(message, optional, tag = "5")]
     resources: Option<CriLinuxContainerResources>,
 }
@@ -196,6 +202,26 @@ struct CriLinuxContainerResources {
     cpu_shares: i64,
     #[prost(int64, tag = "4")]
     memory_limit_in_bytes: i64,
+    #[prost(int64, tag = "5")]
+    oom_score_adj: i64,
+    #[prost(string, tag = "6")]
+    cpuset_cpus: String,
+    #[prost(string, tag = "7")]
+    cpuset_mems: String,
+    #[prost(message, repeated, tag = "8")]
+    hugepage_limits: Vec<CriHugepageLimit>,
+    #[prost(map = "string, string", tag = "9")]
+    unified: HashMap<String, String>,
+    #[prost(int64, tag = "10")]
+    memory_swap_limit_in_bytes: i64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct CriHugepageLimit {
+    #[prost(string, tag = "1")]
+    page_size: String,
+    #[prost(uint64, tag = "2")]
+    limit: u64,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -324,6 +350,35 @@ struct ReleaseSandboxResponse {
 }
 
 #[derive(Clone, PartialEq, Message)]
+struct InspectSandboxRequest {
+    #[prost(string, tag = "1")]
+    sandbox_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[repr(i32)]
+enum SandboxResourceState {
+    Unspecified = 0,
+    Preparing = 1,
+    Ready = 2,
+    Releasing = 3,
+    Released = 4,
+    Error = 5,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct InspectSandboxResponse {
+    #[prost(bool, tag = "1")]
+    found: bool,
+    #[prost(enumeration = "SandboxResourceState", tag = "2")]
+    state: i32,
+    #[prost(message, optional, tag = "3")]
+    sandbox: Option<PreparedSandbox>,
+    #[prost(string, tag = "4")]
+    last_error: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
 struct FdHandoffRequestV1 {
     #[prost(uint32, tag = "1")]
     protocol_version: u32,
@@ -378,6 +433,15 @@ pub(crate) struct RuntimeLease {
 }
 
 impl RuntimeLease {
+    pub(crate) fn durable_identity(&self) -> (&str, &str, &str, u64) {
+        (
+            &self.endpoint,
+            &self.sandbox.sandbox_id,
+            &self.sandbox.lease_id,
+            self.sandbox.generation,
+        )
+    }
+
     pub(crate) fn shared_root(&self) -> Result<PathBuf, String> {
         let assets = self
             .sandbox
@@ -385,6 +449,32 @@ impl RuntimeLease {
             .as_ref()
             .ok_or_else(|| "RuntimeResource lease has no assets".to_string())?;
         canonical_runtime_shared_root(Path::new(&assets.shared_root))
+    }
+
+    pub(crate) async fn inspect_exact(&self) -> Result<(), String> {
+        let response = inspect_sandbox(&self.endpoint, &self.sandbox.sandbox_id).await?;
+        validate_exact_inspection(&self.sandbox, &response)
+    }
+
+    pub(crate) fn tap_cleanup_identity(&self) -> Result<String, String> {
+        let network = self
+            .sandbox
+            .network
+            .as_ref()
+            .ok_or_else(|| "RuntimeResource lease has no network attachment".to_string())?;
+        let handoff = network
+            .fd_handoff
+            .as_ref()
+            .ok_or_else(|| "RuntimeResource lease has no FD handoff descriptor".to_string())?;
+        Ok(format!(
+            "provider-release={}:{}:{}:{};network={};handoff={}",
+            self.endpoint,
+            self.sandbox.sandbox_id,
+            self.sandbox.lease_id,
+            self.sandbox.generation,
+            network.network_handle,
+            handoff.endpoint
+        ))
     }
 
     #[cfg(test)]
@@ -501,10 +591,6 @@ impl RuntimeLease {
             })
     }
 
-    fn remove_cleanup_record(&self) -> Result<(), String> {
-        self.remove_cleanup_record_at(&runtime_cleanup_record_path()?)
-    }
-
     pub(crate) async fn acquire_tap(&self) -> Result<std::fs::File, String> {
         preflight_runtime_environment_at(&self.sandbox, Path::new("/dev/kvm"))?;
         let sandbox = self.sandbox.clone();
@@ -514,6 +600,19 @@ impl RuntimeLease {
     }
 
     pub(crate) async fn release(&self) -> Result<(), String> {
+        let lifecycle = lifecycle_from_env()?;
+        let operation = lifecycle
+            .as_ref()
+            .map(|lifecycle| lifecycle.begin_runtime_release())
+            .transpose()?;
+        self.release_at(&runtime_cleanup_record_path()?).await?;
+        if let Some(operation) = operation {
+            operation.mark_released()?;
+        }
+        Ok(())
+    }
+
+    async fn release_at(&self, cleanup_path: &Path) -> Result<(), String> {
         let mut client = RuntimeResourceClient::connect(&self.endpoint).await?;
         let request = ReleaseSandboxRequest {
             sandbox_id: self.sandbox.sandbox_id.clone(),
@@ -530,8 +629,134 @@ impl RuntimeLease {
         if !response.released {
             return Err("Cubelet did not confirm RuntimeResource release".to_string());
         }
-        self.remove_cleanup_record()?;
+        self.remove_cleanup_record_at(cleanup_path)?;
         Ok(())
+    }
+}
+
+async fn inspect_sandbox(
+    endpoint: &str,
+    sandbox_id: &str,
+) -> Result<InspectSandboxResponse, String> {
+    let mut client = RuntimeResourceClient::connect(endpoint).await?;
+    client
+        .unary(
+            InspectSandboxRequest {
+                sandbox_id: sandbox_id.to_string(),
+            },
+            "/cubelet.services.runtime.v1.RuntimeResource/InspectSandbox",
+        )
+        .await
+}
+
+fn validate_exact_inspection(
+    expected: &PreparedSandbox,
+    response: &InspectSandboxResponse,
+) -> Result<(), String> {
+    if !response.found {
+        return Err("RuntimeResource exact readback did not find the sandbox".to_string());
+    }
+    if response.state != SandboxResourceState::Ready as i32 {
+        return Err(format!(
+            "RuntimeResource exact readback state is {:?}: {}",
+            SandboxResourceState::try_from(response.state).ok(),
+            response.last_error
+        ));
+    }
+    if response.sandbox.as_ref() != Some(expected) {
+        return Err("RuntimeResource exact readback identity or handles changed".to_string());
+    }
+    Ok(())
+}
+
+fn validate_intent_inspection(
+    sandbox_id: &str,
+    lease_id: &str,
+    generation: u64,
+    response: &InspectSandboxResponse,
+) -> Result<bool, String> {
+    if !response.found {
+        return Ok(false);
+    }
+    let state = SandboxResourceState::try_from(response.state).map_err(|_| {
+        format!(
+            "RuntimeResource INTENT lookup returned unknown state {}",
+            response.state
+        )
+    })?;
+    if state == SandboxResourceState::Released {
+        // Inspect does not return tombstone identity.  Continue with the exact
+        // ReleaseSandbox tuple below; Cubelet validates lease/generation/key
+        // against the durable tombstone and confirms an exact retry.
+        return Ok(true);
+    }
+    if !matches!(
+        state,
+        SandboxResourceState::Preparing
+            | SandboxResourceState::Ready
+            | SandboxResourceState::Releasing
+    ) {
+        return Err(format!(
+            "RuntimeResource INTENT lookup is not safely releasable in state {state:?}: {}",
+            response.last_error
+        ));
+    }
+    let inspected = response.sandbox.as_ref().ok_or_else(|| {
+        format!(
+            "RuntimeResource INTENT exists in state {state:?} without exact handles: {}",
+            response.last_error
+        )
+    })?;
+    if inspected.sandbox_id != sandbox_id
+        || inspected.lease_id != lease_id
+        || inspected.generation != generation
+    {
+        return Err("RuntimeResource INTENT lookup returned a different lease".to_string());
+    }
+    Ok(true)
+}
+
+pub(crate) async fn release_external_owner(owner: &RuntimeResourceOwner) -> Result<(), String> {
+    if matches!(
+        owner.state(),
+        RuntimeOwnerState::Empty | RuntimeOwnerState::Released
+    ) {
+        return Ok(());
+    }
+    let (endpoint, sandbox_id, lease_id, generation) = owner
+        .release_identity()
+        .ok_or_else(|| "RuntimeResource owner is missing its release identity".to_string())?;
+    if owner.state() == RuntimeOwnerState::Intent {
+        let inspection = inspect_sandbox(endpoint, sandbox_id).await?;
+        if !validate_intent_inspection(sandbox_id, lease_id, generation, &inspection)? {
+            // The durable INTENT was revoked before PrepareSandbox reached the
+            // provider.  InspectSandbox is the non-allocating proof that there
+            // is no resource to release, so the cleanup queue can be acked.
+            return Ok(());
+        }
+    }
+    let sandbox = PreparedSandbox {
+        sandbox_id: sandbox_id.to_string(),
+        lease_id: lease_id.to_string(),
+        generation,
+        ..Default::default()
+    };
+    let mut client = RuntimeResourceClient::connect(endpoint).await?;
+    let response: ReleaseSandboxResponse = client
+        .unary(
+            ReleaseSandboxRequest {
+                sandbox_id: sandbox.sandbox_id.clone(),
+                lease_id: sandbox.lease_id.clone(),
+                generation: sandbox.generation,
+                idempotency_key: release_key(&sandbox),
+            },
+            "/cubelet.services.runtime.v1.RuntimeResource/ReleaseSandbox",
+        )
+        .await?;
+    if response.released {
+        Ok(())
+    } else {
+        Err("Cubelet did not confirm external RuntimeResource release".to_string())
     }
 }
 
@@ -625,44 +850,48 @@ pub(crate) fn handoff_persisted_to_reaper() -> Result<(), String> {
         return Ok(());
     };
     let root = reaper_root()?;
-    let job = reaper_queue::persist_reaper_job_at(&root, &record)?;
+    reaper_queue::persist_reaper_job_at(&root, &record).map(|_| ())
+}
 
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("resolve RuntimeResource reaper executable: {error}"))?;
-    let mut command = Command::new(executable);
-    command
-        .current_dir(&job)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .args([
-            "-namespace",
-            "cube-runtime-reaper",
-            "-id",
-            record.sandbox_id.as_str(),
-            RUNTIME_REAPER_ACTION,
-        ]);
-    // SAFETY: setsid is async-signal-safe and the closure performs no
-    // allocation or other work between fork and exec.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    match command.spawn() {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            if load_cleanup_record_at(&job.join(RUNTIME_CLEANUP_RECORD))?.is_none() {
-                return Ok(());
-            }
-            Err(format!(
-                "spawn RuntimeResource reaper for {}: {error}",
-                record.sandbox_id
-            ))
+pub(crate) async fn scan_persisted_reapers_once() -> Result<(), String> {
+    let root = reaper_root()?;
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("scan RuntimeResource cleanup queue: {error}")),
+    };
+    let mut errors = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let job = entry.path();
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
         }
+        let path = job.join(RUNTIME_CLEANUP_RECORD);
+        let Some(record) = load_cleanup_record_at(&path)? else {
+            continue;
+        };
+        let lease = RuntimeLease {
+            endpoint: record.endpoint,
+            sandbox: PreparedSandbox {
+                sandbox_id: record.sandbox_id,
+                lease_id: record.lease_id,
+                generation: record.generation,
+                ..Default::default()
+            },
+        };
+        match lease.release_at(&path).await {
+            Ok(()) => {
+                if let Err(error) = reaper_queue::remove_reaper_job_directory(&job) {
+                    errors.push(error);
+                }
+            }
+            Err(error) => errors.push(format!("retry {}: {error}", job.display())),
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
     }
 }
 
@@ -752,13 +981,57 @@ pub(crate) fn decode_cri_config(
     }
     let config = CriPodSandboxConfig::decode(value)
         .map_err(|error| format!("decode CRI PodSandboxConfig: {error}"))?;
-    pod_metadata(&config)?;
+    if config.metadata.is_none() {
+        return Err("CRI PodSandboxConfig metadata message is missing".to_string());
+    }
     Ok(config)
 }
 
 fn hash_fingerprint_part(hasher: &mut Sha256, value: &[u8]) {
     hasher.update((value.len() as u64).to_be_bytes());
     hasher.update(value);
+}
+
+fn hash_linux_resources(
+    hasher: &mut Sha256,
+    label: &[u8],
+    resources: Option<&CriLinuxContainerResources>,
+) {
+    hash_fingerprint_part(hasher, label);
+    let Some(resources) = resources else {
+        hash_fingerprint_part(hasher, b"absent");
+        return;
+    };
+    hash_fingerprint_part(hasher, b"present");
+    for value in [
+        resources.cpu_period,
+        resources.cpu_quota,
+        resources.cpu_shares,
+        resources.memory_limit_in_bytes,
+        resources.oom_score_adj,
+        resources.memory_swap_limit_in_bytes,
+    ] {
+        hash_fingerprint_part(hasher, &value.to_be_bytes());
+    }
+    hash_fingerprint_part(hasher, resources.cpuset_cpus.as_bytes());
+    hash_fingerprint_part(hasher, resources.cpuset_mems.as_bytes());
+    let mut hugepages: Vec<_> = resources.hugepage_limits.iter().collect();
+    hugepages.sort_by(|left, right| {
+        left.page_size
+            .cmp(&right.page_size)
+            .then(left.limit.cmp(&right.limit))
+    });
+    hash_fingerprint_part(hasher, &(hugepages.len() as u64).to_be_bytes());
+    for limit in hugepages {
+        hash_fingerprint_part(hasher, limit.page_size.as_bytes());
+        hash_fingerprint_part(hasher, &limit.limit.to_be_bytes());
+    }
+    let mut unified: Vec<_> = resources.unified.iter().collect();
+    unified.sort_by(|left, right| left.0.cmp(right.0));
+    for (key, value) in unified {
+        hash_fingerprint_part(hasher, key.as_bytes());
+        hash_fingerprint_part(hasher, value.as_bytes());
+    }
 }
 
 pub(crate) fn cri_semantic_fingerprint(config: &CriPodSandboxConfig) -> String {
@@ -792,21 +1065,19 @@ pub(crate) fn cri_semantic_fingerprint(config: &CriPodSandboxConfig) -> String {
         hash_fingerprint_part(&mut hasher, key.as_bytes());
         hash_fingerprint_part(&mut hasher, value.as_bytes());
     }
-    if let Some(resources) = config
-        .linux
-        .as_ref()
-        .and_then(|linux| linux.resources.as_ref())
-    {
-        for value in [
-            resources.cpu_period,
-            resources.cpu_quota,
-            resources.cpu_shares,
-            resources.memory_limit_in_bytes,
-        ] {
-            hash_fingerprint_part(&mut hasher, &value.to_be_bytes());
+    if let Some(linux) = config.linux.as_ref() {
+        hash_fingerprint_part(&mut hasher, b"linux-present");
+        hash_fingerprint_part(&mut hasher, linux.cgroup_parent.as_bytes());
+        let mut sysctls: Vec<_> = linux.sysctls.iter().collect();
+        sysctls.sort_by(|left, right| left.0.cmp(right.0));
+        for (key, value) in sysctls {
+            hash_fingerprint_part(&mut hasher, key.as_bytes());
+            hash_fingerprint_part(&mut hasher, value.as_bytes());
         }
+        hash_linux_resources(&mut hasher, b"resources", linux.resources.as_ref());
+        hash_linux_resources(&mut hasher, b"overhead", linux.overhead.as_ref());
     } else {
-        hash_fingerprint_part(&mut hasher, b"no-linux-resources");
+        hash_fingerprint_part(&mut hasher, b"linux-absent");
     }
     if let Some(options) = namespace_options(config) {
         for value in [options.network, options.pid, options.ipc] {
@@ -817,6 +1088,14 @@ pub(crate) fn cri_semantic_fingerprint(config: &CriPodSandboxConfig) -> String {
         hash_fingerprint_part(&mut hasher, b"no-namespace-options");
     }
     format!("{:x}", hasher.finalize())
+}
+
+pub(crate) fn cgroup_parent(config: &CriPodSandboxConfig) -> &str {
+    config
+        .linux
+        .as_ref()
+        .map(|linux| linux.cgroup_parent.as_str())
+        .unwrap_or_default()
 }
 
 fn namespace_options(config: &CriPodSandboxConfig) -> Option<&CriNamespaceOption> {
@@ -966,6 +1245,19 @@ pub(crate) async fn prepare(
     let dns = cri_dns_entries(config.dns_config.as_ref())?;
     let idempotency_key = prepare_key(sandbox_id, generation);
     let expected_lease_id = lease_id_for_prepare(sandbox_id, generation, &idempotency_key);
+    let lifecycle = lifecycle_from_env()?;
+    let runtime_operation = lifecycle
+        .as_ref()
+        .map(|lifecycle| {
+            lifecycle.begin_runtime_intent(&RuntimeResourceOwner::intent(
+                endpoint.clone(),
+                sandbox_id.to_string(),
+                expected_lease_id.clone(),
+                generation,
+                idempotency_key.clone(),
+            ))
+        })
+        .transpose()?;
     let cleanup_lease = RuntimeLease {
         endpoint: endpoint.clone(),
         sandbox: PreparedSandbox {
@@ -996,6 +1288,17 @@ pub(crate) async fn prepare(
             dns,
         }),
     };
+    if let Some(lifecycle) = lifecycle.as_ref() {
+        lifecycle.wait_test_failpoint("pre-runtime-prepare").await;
+    }
+    if let Some(operation) = runtime_operation.as_ref() {
+        // The RuntimeResource INTENT and owner epoch were committed together.
+        // Recheck after every fallible preparation step and immediately before
+        // the allocating RPC. If cleanup revoked us earlier, no side effect is
+        // allowed; if it revokes us later, the durable handoff already carries
+        // this exact INTENT rather than EMPTY.
+        operation.verify()?;
+    }
     let response: PrepareSandboxResponse = match client
         .unary(
             request,
@@ -1004,13 +1307,21 @@ pub(crate) async fn prepare(
         .await
     {
         Ok(response) => response,
-        Err(error) => return Err(release_after_prepare_error(&cleanup_lease, error).await),
+        Err(error) => {
+            return Err(release_after_prepare_error(
+                &cleanup_lease,
+                runtime_operation.as_ref(),
+                error,
+            )
+            .await)
+        }
     };
     let mut sandbox = match response.sandbox {
         Some(sandbox) => sandbox,
         None => {
             return Err(release_after_prepare_error(
                 &cleanup_lease,
+                runtime_operation.as_ref(),
                 "Cubelet returned no prepared sandbox".to_string(),
             )
             .await)
@@ -1019,24 +1330,54 @@ pub(crate) async fn prepare(
     let shared_root = match validate_prepared(sandbox_id, generation, &expected_lease_id, &sandbox)
     {
         Ok(shared_root) => shared_root,
-        Err(error) => return Err(release_after_prepare_error(&cleanup_lease, error).await),
+        Err(error) => {
+            return Err(release_after_prepare_error(
+                &cleanup_lease,
+                runtime_operation.as_ref(),
+                error,
+            )
+            .await)
+        }
     };
     // From this point on both the virtiofs annotation and Task rootfs bridge
     // use the canonical path that was validated as a strict /data/cubelet
     // descendant. Do not retain a server-supplied symlink spelling.
     sandbox.assets.as_mut().unwrap().shared_root = shared_root.display().to_string();
     if let Err(error) = ensure_managed_volume_export_root(&shared_root) {
-        return Err(release_after_prepare_error(&cleanup_lease, error).await);
+        return Err(
+            release_after_prepare_error(&cleanup_lease, runtime_operation.as_ref(), error).await,
+        );
     }
     if let Err(error) = inject_annotations(spec, &resources, &sandbox) {
-        return Err(release_after_prepare_error(&cleanup_lease, error).await);
+        return Err(
+            release_after_prepare_error(&cleanup_lease, runtime_operation.as_ref(), error).await,
+        );
+    }
+    if let Some(operation) = runtime_operation {
+        operation.mark_allocated()?;
     }
     Ok(RuntimeLease { endpoint, sandbox })
 }
 
-async fn release_after_prepare_error(lease: &RuntimeLease, error: String) -> String {
-    match lease.release().await {
-        Ok(()) => error,
+async fn release_after_prepare_error(
+    lease: &RuntimeLease,
+    operation: Option<&crate::service::host_cgroup::LifecycleOperation>,
+    error: String,
+) -> String {
+    let cleanup_path = match runtime_cleanup_record_path() {
+        Ok(path) => path,
+        Err(release_error) => return format!("{error}; release RuntimeResource: {release_error}"),
+    };
+    match lease.release_at(&cleanup_path).await {
+        Ok(()) => match operation
+            .map(|operation| operation.mark_released())
+            .transpose()
+        {
+            Ok(_) => error,
+            Err(release_error) => {
+                format!("{error}; persist RuntimeResource release: {release_error}")
+            }
+        },
         Err(release_error) => {
             format!("{error}; release RuntimeResource: {release_error}")
         }
@@ -2016,6 +2357,85 @@ mod tests {
     }
 
     #[test]
+    fn intent_cleanup_accepts_absent_and_exact_released_tombstone() {
+        let absent = InspectSandboxResponse::default();
+        assert!(!validate_intent_inspection("sandbox-a", "lease-a", 3, &absent).unwrap());
+
+        let released = InspectSandboxResponse {
+            found: true,
+            state: SandboxResourceState::Released as i32,
+            sandbox: None,
+            last_error: String::new(),
+        };
+        assert!(validate_intent_inspection("sandbox-a", "lease-a", 3, &released).unwrap());
+    }
+
+    #[test]
+    fn intent_cleanup_requires_exact_active_lease_and_fails_closed_on_error() {
+        let expected = PreparedSandbox {
+            sandbox_id: "sandbox-a".to_string(),
+            lease_id: "lease-a".to_string(),
+            generation: 3,
+            ..Default::default()
+        };
+        let ready = InspectSandboxResponse {
+            found: true,
+            state: SandboxResourceState::Ready as i32,
+            sandbox: Some(expected.clone()),
+            last_error: String::new(),
+        };
+        assert!(validate_intent_inspection("sandbox-a", "lease-a", 3, &ready).unwrap());
+
+        let mut mismatched = ready;
+        mismatched.sandbox.as_mut().unwrap().lease_id = "other".to_string();
+        assert!(validate_intent_inspection("sandbox-a", "lease-a", 3, &mismatched).is_err());
+        let provider_error = InspectSandboxResponse {
+            found: true,
+            state: SandboxResourceState::Error as i32,
+            sandbox: Some(expected),
+            last_error: "provider inspection failed".to_string(),
+        };
+        assert!(validate_intent_inspection("sandbox-a", "lease-a", 3, &provider_error).is_err());
+    }
+
+    #[test]
+    fn succeeded_readback_requires_ready_and_all_exact_provider_handles() {
+        let expected = PreparedSandbox {
+            sandbox_id: "sandbox-a".to_string(),
+            lease_id: "lease-a".to_string(),
+            generation: 3,
+            assets: Some(RuntimeAssets {
+                kernel_path: "/kernel".to_string(),
+                agent_path: "/agent".to_string(),
+                guest_image_path: "/rootfs".to_string(),
+                shared_root: "/data/cubelet/shared/a".to_string(),
+            }),
+            network: Some(sample_network()),
+        };
+        let exact = InspectSandboxResponse {
+            found: true,
+            state: SandboxResourceState::Ready as i32,
+            sandbox: Some(expected.clone()),
+            last_error: String::new(),
+        };
+        validate_exact_inspection(&expected, &exact).unwrap();
+
+        let mut drifted = exact.clone();
+        drifted
+            .sandbox
+            .as_mut()
+            .unwrap()
+            .network
+            .as_mut()
+            .unwrap()
+            .network_handle = "replacement".to_string();
+        assert!(validate_exact_inspection(&expected, &drifted).is_err());
+        let mut releasing = exact;
+        releasing.state = SandboxResourceState::Releasing as i32;
+        assert!(validate_exact_inspection(&expected, &releasing).is_err());
+    }
+
+    #[test]
     fn cleanup_record_is_durable_and_exact_lease_scoped() {
         let root = std::env::temp_dir().join(format!(
             "cube-runtime-cleanup-record-{}",
@@ -2100,6 +2520,8 @@ mod tests {
             annotations: HashMap::from([("pod.example/key".to_string(), "value".to_string())]),
             hostname: "pod-hostname".to_string(),
             linux: Some(CriLinuxPodSandboxConfig {
+                cgroup_parent: "kubepods-burstable-podabc.slice".to_string(),
+                sysctls: HashMap::new(),
                 security_context: Some(CriLinuxSandboxSecurityContext {
                     namespace_options: Some(CriNamespaceOption {
                         network: 0,
@@ -2113,6 +2535,14 @@ mod tests {
                     cpu_quota: 150_000,
                     cpu_shares: 0,
                     memory_limit_in_bytes: 768 * 1024 * 1024,
+                    ..Default::default()
+                }),
+                overhead: Some(CriLinuxContainerResources {
+                    cpu_period: 100_000,
+                    cpu_quota: 25_000,
+                    memory_limit_in_bytes: 256 * 1024 * 1024,
+                    unified: HashMap::from([("memory.oom.group".to_string(), "1".to_string())]),
+                    ..Default::default()
                 }),
             }),
         }
@@ -2133,6 +2563,78 @@ mod tests {
         assert_eq!(metadata.attempt, 2);
         assert_eq!(decoded.dns_config.unwrap().servers, ["10.96.0.10"]);
         assert_eq!(decoded.hostname, "pod-hostname");
+        assert_eq!(
+            decoded.linux.as_ref().unwrap().cgroup_parent,
+            "kubepods-burstable-podabc.slice"
+        );
+        assert_eq!(
+            decoded
+                .linux
+                .as_ref()
+                .unwrap()
+                .overhead
+                .as_ref()
+                .unwrap()
+                .memory_limit_in_bytes,
+            256 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn cri_fingerprint_covers_parent_and_complete_overhead() {
+        let base = sample_cri();
+        let base_fingerprint = cri_semantic_fingerprint(&base);
+        let mut changed_parent = base.clone();
+        changed_parent
+            .linux
+            .as_mut()
+            .unwrap()
+            .cgroup_parent
+            .push('x');
+        assert_ne!(base_fingerprint, cri_semantic_fingerprint(&changed_parent));
+
+        let mut changed_overhead = base.clone();
+        changed_overhead
+            .linux
+            .as_mut()
+            .unwrap()
+            .overhead
+            .as_mut()
+            .unwrap()
+            .memory_swap_limit_in_bytes = 1;
+        assert_ne!(
+            base_fingerprint,
+            cri_semantic_fingerprint(&changed_overhead)
+        );
+
+        let mut reordered = base.clone();
+        let overhead = reordered.linux.as_mut().unwrap().overhead.as_mut().unwrap();
+        overhead
+            .unified
+            .insert("cpu.weight".to_string(), "100".to_string());
+        let first = cri_semantic_fingerprint(&reordered);
+        let mut same = reordered.clone();
+        let entries = same
+            .linux
+            .as_mut()
+            .unwrap()
+            .overhead
+            .as_mut()
+            .unwrap()
+            .unified
+            .drain()
+            .collect::<Vec<_>>();
+        for (key, value) in entries.into_iter().rev() {
+            same.linux
+                .as_mut()
+                .unwrap()
+                .overhead
+                .as_mut()
+                .unwrap()
+                .unified
+                .insert(key, value);
+        }
+        assert_eq!(first, cri_semantic_fingerprint(&same));
     }
 
     #[test]

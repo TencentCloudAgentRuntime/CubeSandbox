@@ -47,3 +47,5 @@ sha2 = "=0.10.9"
 tonic = { version = "=0.14.4", features = ["transport"] }
 tonic-prost = "=0.14.4"
 tower = { version = "=0.5.2", features = ["util"] }
+cgroups = { package = "cgroups-rs", version = "=0.5.1" }
+zbus = "=5.19.0"

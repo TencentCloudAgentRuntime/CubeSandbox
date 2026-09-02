@@ -13,6 +13,10 @@ use tokio::runtime::Builder;
 //const SHIM_VERSION: &str = env!("GIT_COMMIT_INFO");
 //const CH_VERSION: &str = env!("CH_GIT_COMMIT_INFO");
 fn main() {
+    if let Err(error) = service::early_server_gate() {
+        eprintln!("CubeShim early server gate failed: {error}");
+        unsafe { libc::exit(1) };
+    }
     let mut thread_num = 1;
     let os_args: Vec<_> = std::env::args_os().collect();
     if is_version_request(&os_args[1..]) {

@@ -628,6 +628,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "cgroups-rs",
  "chrono",
  "clap",
  "containerd-shim",
@@ -658,6 +659,7 @@ dependencies = [
  "tower",
  "ttrpc 0.5.8",
  "uuid",
+ "zbus",
 ]
 
 [[package]]

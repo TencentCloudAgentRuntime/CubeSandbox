@@ -1,0 +1,16 @@
+[Unit]
+Description=CubeSandbox shim lifecycle watchdog
+After=local-fs.target
+Before=containerd.service kubelet.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/local/bin/containerd-shim-cube-rs -namespace cube-watchdog -id systemd-probe shim-cgroup-probe
+ExecStart=/usr/local/bin/containerd-shim-cube-rs -namespace cube-watchdog -id node shim-watchdog
+Restart=always
+RestartSec=250ms
+Delegate=yes
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

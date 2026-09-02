@@ -25,6 +25,10 @@ use tokio::time::{sleep, Duration};
 use crate::common::utils::Utils;
 use crate::container::resources::RESOURCE_V2_CAPABILITY;
 use crate::sandbox::sb;
+use crate::service::host_cgroup::{
+    lifecycle_from_env, BeginCreateError, Classification, CreateAdmission, CreatePublisherGuard,
+    LifecycleHandle, PersistedCreateResult, RuntimeOwnerState,
+};
 use crate::service::runtime_resource::{self, RuntimeLease};
 use crate::service::task_srv::TaskService;
 
@@ -128,6 +132,25 @@ enum ShutdownAction {
 }
 
 impl SandboxLifecycle {
+    pub(crate) async fn task_mode(&self) -> Result<TaskMode, String> {
+        let state = self.state.lock().await;
+        match state.phase {
+            Phase::Unmanaged => Ok(TaskMode::Legacy),
+            Phase::Ready => {
+                let runtime = state
+                    .runtime
+                    .as_ref()
+                    .ok_or_else(|| "ready sandbox has no RuntimeResource lease".to_string())?;
+                Ok(TaskMode::ManagedReady {
+                    shared_root: runtime.shared_root()?,
+                })
+            }
+            phase => Err(format!(
+                "sandbox is managed by Sandbox Service but is not ready (phase {phase:?})"
+            )),
+        }
+    }
+
     async fn begin_shutdown(&self) -> ShutdownAction {
         loop {
             let notified = self.changed.notified();
@@ -160,22 +183,7 @@ impl SandboxLifecycle {
         self: &Arc<Self>,
         task_id: &str,
     ) -> Result<TaskCreateReservation, String> {
-        let state = self.state.lock().await;
-        let mode = match state.phase {
-            Phase::Unmanaged => Ok(TaskMode::Legacy),
-            Phase::Ready => {
-                let runtime = state
-                    .runtime
-                    .as_ref()
-                    .ok_or_else(|| "ready sandbox has no RuntimeResource lease".to_string())?;
-                Ok(TaskMode::ManagedReady {
-                    shared_root: runtime.shared_root()?,
-                })
-            }
-            phase => Err(format!(
-                "sandbox is managed by Sandbox Service but is not ready (phase {phase:?})"
-            )),
-        }?;
+        let mode = self.task_mode().await?;
         let inserted = self
             .task_creates
             .lock()
@@ -240,6 +248,7 @@ impl SandboxService {
         mut spec: Spec,
         netns_path: String,
         config: runtime_resource::CriPodSandboxConfig,
+        publisher: CreatePublisherGuard,
     ) {
         let result = match runtime_resource::prepare(&self.id, &netns_path, &config, &mut spec).await {
             Ok(lease) => match self.sandbox.lock().await.init(spec) {
@@ -257,112 +266,108 @@ impl SandboxService {
                 state.phase = Phase::Created;
                 state.runtime = Some(lease);
                 state.last_error = None;
+                drop(state);
+                publisher.success_until_durable().await;
             }
             Err((error, lease)) => {
                 state.phase = Phase::Failed;
                 state.runtime = lease;
                 state.exit_status = 1;
                 state.exited_at = Some(now_timestamp());
-                state.last_error = Some(error);
+                state.last_error = Some(error.clone());
+                drop(state);
+                publisher
+                    .failure_until_durable("FAILED_PRECONDITION", &error)
+                    .await;
             }
         }
-        drop(state);
         self.lifecycle.changed.notify_waiters();
     }
 
-    async fn wait_for_create(&self) -> TtrpcResult<api::CreateSandboxResponse> {
-        loop {
-            let notified = self.lifecycle.changed.notified();
-            let state = self.lifecycle.state.lock().await;
-            match state.phase {
-                Phase::Created | Phase::Starting | Phase::Ready => {
-                    return Ok(api::CreateSandboxResponse::new())
+    async fn validate_durable_create_success(
+        &self,
+        lifecycle: &LifecycleHandle,
+        fingerprint: &[u8],
+    ) -> Result<(), String> {
+        let validation = async {
+            // Linearize the non-allocating provider readback against cleanup.
+            // Cleanup may durably revoke the epoch without this lock, but it
+            // cannot release the provider lease until the operation barrier is
+            // dropped. The post-Inspect verify therefore either observes that
+            // revoke and rejects success, or establishes a success point before
+            // cleanup is allowed to pass the barrier.
+            let readback = lifecycle.begin_create_readback_operation()?;
+            let runtime = {
+                let state = self.lifecycle.state.lock().await;
+                if !matches!(state.phase, Phase::Created | Phase::Starting | Phase::Ready) {
+                    return Err(format!(
+                        "durable CreateSandbox success has local phase {:?}",
+                        state.phase
+                    ));
                 }
-                Phase::Failed => {
-                    return Err(rpc_error(
-                        Code::FAILED_PRECONDITION,
-                        state
-                            .last_error
-                            .clone()
-                            .unwrap_or_else(|| "sandbox create failed".to_string()),
-                    ))
+                if state.create_request.as_deref() != Some(fingerprint) {
+                    return Err(
+                        "durable CreateSandbox success has a different local request".to_string(),
+                    );
                 }
-                Phase::Creating => {
-                    drop(state);
-                    notified.await;
+                if state.sandbox_spec.is_none() {
+                    return Err("durable CreateSandbox success has no local OCI spec".to_string());
                 }
-                phase => {
-                    return Err(rpc_error(
-                        Code::FAILED_PRECONDITION,
-                        format!("sandbox cannot finish create from phase {phase:?}"),
-                    ))
-                }
+                state
+                    .runtime
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "durable CreateSandbox success has no RuntimeResource lease".to_string()
+                    })?
+                    .clone()
+            };
+            if !self.sandbox.lock().await.inited() {
+                return Err(
+                    "durable CreateSandbox success has no initialized Cube sandbox".to_string(),
+                );
             }
+            let runtime_identity = runtime.durable_identity();
+            let owner = lifecycle.runtime_owner()?;
+            if owner.state() != RuntimeOwnerState::Allocated
+                || owner.release_identity()
+                    != Some((
+                        runtime_identity.0,
+                        runtime_identity.1,
+                        runtime_identity.2,
+                        runtime_identity.3,
+                    ))
+            {
+                return Err(
+                    "durable CreateSandbox success does not match the RuntimeResource owner"
+                        .to_string(),
+                );
+            }
+            readback.verify()?;
+            // This is non-allocating. A durable SUCCEEDED retry may never
+            // replay PrepareSandbox; it must prove that the provider still has
+            // exactly the committed lease and handles.
+            runtime.inspect_exact().await?;
+            lifecycle.wait_test_failpoint("after-create-inspect").await;
+            readback.verify()?;
+            Ok(())
         }
+        .await;
+        if let Err(error) = validation {
+            let reason = format!("durable CreateSandbox success exact readback failed: {error}");
+            lifecycle
+                .request_degraded_cleanup(&reason)
+                .map_err(|persist_error| {
+                    format!("{reason}; persist terminal DEGRADED cleanup: {persist_error}")
+                })?;
+            return Err(reason);
+        }
+        Ok(())
     }
 
     async fn run_start(self) {
         let lease = self.lifecycle.state.lock().await.runtime.clone();
         let result = if let Some(lease) = lease {
-            match lease.acquire_tap().await {
-                Ok(tap) => {
-                    let mut sandbox = self.sandbox.lock().await;
-                    sandbox.set_runtime_tap(tap);
-                    let started = async {
-                        Utils::record_pid().map_err(|error| format!("record shim pid: {error}"))?;
-                        sandbox.create_sandbox().await?;
-                        if !sandbox.agent_supports(REQUIRED_SANDBOX_CAPABILITY, 1) {
-                            return Err(format!("guest agent lacks required capability {REQUIRED_SANDBOX_CAPABILITY}>=1"));
-                        }
-                        if !sandbox.agent_supports(RESOURCE_V2_CAPABILITY, 1) {
-                            return Err(format!("guest agent lacks required capability {RESOURCE_V2_CAPABILITY}>=1"));
-                        }
-                        Ok::<(), String>(())
-                    }.await;
-                    match started {
-                        Ok(()) => Ok(()),
-                        Err(error) => {
-                            let rollback_error = sandbox.abort_sandbox().await.err();
-                            if let Some(rollback_error) = rollback_error {
-                                drop(sandbox);
-                                Err(StartFailure {
-                                    error: format!(
-                                        "{error}; rollback VM: {rollback_error}; RuntimeResource release skipped until teardown is confirmed"
-                                    ),
-                                    cleanup: StartCleanup::TeardownUnconfirmed,
-                                })
-                            } else {
-                                sandbox.clear_runtime_tap();
-                                drop(sandbox);
-                                match lease.release().await {
-                                    Ok(()) => Err(StartFailure {
-                                        error,
-                                        cleanup: StartCleanup::Released,
-                                    }),
-                                    Err(release_error) => Err(StartFailure {
-                                        error: format!(
-                                            "{error}; release RuntimeResource: {release_error}"
-                                        ),
-                                        cleanup: StartCleanup::ReleasePending,
-                                    }),
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(error) => match lease.release().await {
-                    Ok(()) => Err(StartFailure {
-                        error: format!("acquire RuntimeResource TAP: {error}"),
-                        cleanup: StartCleanup::Released,
-                    }),
-                    Err(release_error) => Err(StartFailure {
-                        error: format!(
-                            "acquire RuntimeResource TAP: {error}; release RuntimeResource: {release_error}"
-                        ),
-                        cleanup: StartCleanup::ReleasePending,
-                    }),
-                },
-            }
+            self.run_start_with_lease(&lease).await
         } else {
             Err(StartFailure {
                 error: "sandbox has no RuntimeResource lease".to_string(),
@@ -372,7 +377,152 @@ impl SandboxService {
         self.finish_start(result).await;
     }
 
+    async fn run_start_with_lease(&self, lease: &RuntimeLease) -> Result<(), StartFailure> {
+        let lifecycle = match lifecycle_from_env() {
+            Ok(Some(lifecycle)) => lifecycle,
+            Ok(None) => {
+                return Err(release_after_start_failure(
+                    lease,
+                    "managed StartSandbox has no durable Host lifecycle".to_string(),
+                )
+                .await)
+            }
+            Err(error) => {
+                return Err(release_after_start_failure(
+                    lease,
+                    format!("load durable Host lifecycle for StartSandbox: {error}"),
+                )
+                .await)
+            }
+        };
+        let operation = match lifecycle.begin_start_operation() {
+            Ok(operation) => operation,
+            Err(error) => {
+                return Err(release_after_start_failure(
+                    lease,
+                    format!("begin fenced StartSandbox operation: {error}"),
+                )
+                .await)
+            }
+        };
+
+        let tap_cleanup_identity = match lease.tap_cleanup_identity() {
+            Ok(identity) => identity,
+            Err(error) => {
+                drop(operation);
+                return Err(release_after_start_failure(lease, error).await);
+            }
+        };
+        if let Err(error) = operation.mark_tap_intent(&tap_cleanup_identity) {
+            drop(operation);
+            return Err(release_after_start_failure(
+                lease,
+                format!("persist TAP allocation INTENT: {error}"),
+            )
+            .await);
+        }
+        lifecycle.wait_test_failpoint("pre-start-tap").await;
+        if let Err(error) = operation.verify() {
+            drop(operation);
+            return Err(release_after_start_failure(
+                lease,
+                format!("TAP allocation owner was revoked: {error}"),
+            )
+            .await);
+        }
+        let tap = match lease.acquire_tap().await {
+            Ok(tap) => tap,
+            Err(error) => {
+                drop(operation);
+                return Err(release_after_start_failure(
+                    lease,
+                    format!("acquire RuntimeResource TAP: {error}"),
+                )
+                .await);
+            }
+        };
+        if let Err(error) = operation.mark_tap_allocated() {
+            drop(tap);
+            drop(operation);
+            return Err(release_after_start_failure(
+                lease,
+                format!("commit TAP allocation identity: {error}"),
+            )
+            .await);
+        }
+        if let Err(error) = operation.mark_vm_intent() {
+            drop(tap);
+            drop(operation);
+            return Err(release_after_start_failure(
+                lease,
+                format!("persist VM allocation INTENT: {error}"),
+            )
+            .await);
+        }
+        lifecycle.wait_test_failpoint("pre-start-vm").await;
+        if let Err(error) = operation.verify() {
+            drop(tap);
+            drop(operation);
+            return Err(release_after_start_failure(
+                lease,
+                format!("VM allocation owner was revoked: {error}"),
+            )
+            .await);
+        }
+
+        let mut sandbox = self.sandbox.lock().await;
+        sandbox.set_runtime_tap(tap);
+        let started = async {
+            Utils::record_pid().map_err(|error| format!("record shim pid: {error}"))?;
+            operation
+                .verify()
+                .map_err(|error| format!("VM allocation owner was revoked: {error}"))?;
+            sandbox.create_sandbox().await?;
+            operation
+                .mark_vm_allocated()
+                .map_err(|error| format!("commit VM allocation identity: {error}"))?;
+            if !sandbox.agent_supports(REQUIRED_SANDBOX_CAPABILITY, 1) {
+                return Err(format!(
+                    "guest agent lacks required capability {REQUIRED_SANDBOX_CAPABILITY}>=1"
+                ));
+            }
+            if !sandbox.agent_supports(RESOURCE_V2_CAPABILITY, 1) {
+                return Err(format!(
+                    "guest agent lacks required capability {RESOURCE_V2_CAPABILITY}>=1"
+                ));
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        match started {
+            Ok(()) => {
+                drop(sandbox);
+                drop(operation);
+                Ok(())
+            }
+            Err(error) => {
+                let rollback_error = sandbox.abort_sandbox().await.err();
+                if let Some(rollback_error) = rollback_error {
+                    drop(sandbox);
+                    drop(operation);
+                    Err(StartFailure {
+                        error: format!(
+                            "{error}; rollback VM: {rollback_error}; RuntimeResource release skipped until teardown is confirmed"
+                        ),
+                        cleanup: StartCleanup::TeardownUnconfirmed,
+                    })
+                } else {
+                    sandbox.clear_runtime_tap();
+                    drop(sandbox);
+                    drop(operation);
+                    Err(release_after_start_failure(lease, error).await)
+                }
+            }
+        }
+    }
+
     async fn finish_start(&self, result: Result<(), StartFailure>) {
+        let terminal_failure = result.is_err();
         let mut state = self.lifecycle.state.lock().await;
         apply_start_result(&mut state, result);
         let ready = state.phase == Phase::Ready;
@@ -380,6 +530,8 @@ impl SandboxService {
         self.lifecycle.changed.notify_waiters();
         if ready {
             tokio::spawn(self.clone().monitor_vm_exit());
+        } else if terminal_failure {
+            request_external_cleanup_durable("sandbox start failed terminally").await;
         }
     }
 
@@ -399,6 +551,7 @@ impl SandboxService {
                 }
                 drop(state);
                 self.lifecycle.changed.notify_waiters();
+                request_external_cleanup_durable("Cube VM exited unexpectedly").await;
                 return;
             }
         }
@@ -530,8 +683,12 @@ impl SandboxService {
                 state.last_error = Some(error);
             }
         }
+        let terminal_failure = matches!(state.phase, Phase::Failed | Phase::ReleasePending);
         drop(state);
         self.lifecycle.changed.notify_waiters();
+        if terminal_failure {
+            request_external_cleanup_durable("sandbox stop failed terminally").await;
+        }
     }
 
     async fn wait_for_stop(&self) -> TtrpcResult<()> {
@@ -638,10 +795,13 @@ impl SandboxService {
             }
         }
         let shutdown = state.phase == Phase::Shutdown;
+        let terminal_failure = matches!(state.phase, Phase::Failed | Phase::ReleasePending);
         drop(state);
         self.lifecycle.changed.notify_waiters();
         if shutdown {
             self.exit.signal();
+        } else if terminal_failure {
+            request_external_cleanup_durable("sandbox shutdown failed terminally").await;
         }
     }
 
@@ -686,6 +846,19 @@ enum StartCleanup {
 struct StartFailure {
     error: String,
     cleanup: StartCleanup,
+}
+
+async fn release_after_start_failure(lease: &RuntimeLease, error: String) -> StartFailure {
+    match lease.release().await {
+        Ok(()) => StartFailure {
+            error,
+            cleanup: StartCleanup::Released,
+        },
+        Err(release_error) => StartFailure {
+            error: format!("{error}; release RuntimeResource: {release_error}"),
+            cleanup: StartCleanup::ReleasePending,
+        },
+    }
 }
 
 fn apply_start_result(state: &mut LifecycleState, result: Result<(), StartFailure>) {
@@ -866,55 +1039,140 @@ impl Sandbox for SandboxService {
         })?;
         let config = runtime_resource::decode_cri_config(&options.type_url, &options.value)
             .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
-        runtime_resource::shared_pid_namespace(&config)
-            .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
-        if req.netns_path.is_empty() || !Path::new(&req.netns_path).is_absolute() {
-            return Err(rpc_error(
-                Code::INVALID_ARGUMENT,
-                "netns_path must be absolute; host-network sandboxes are not supported",
-            ));
-        }
         let fingerprint =
             create_request_fingerprint(&req, &runtime_resource::cri_semantic_fingerprint(&config));
-        let config_path = Path::new(&req.bundle_path).join("config.json");
-        let mut spec: Spec = if config_path.is_file() {
-            Utils::load_spec(&req.bundle_path).map_err(|error| {
+        let host_lifecycle = lifecycle_from_env()
+            .map_err(|error| rpc_error(Code::FAILED_PRECONDITION, error))?
+            .ok_or_else(|| {
                 rpc_error(
-                    Code::INVALID_ARGUMENT,
-                    format!("load sandbox bundle spec: {error}"),
+                    Code::FAILED_PRECONDITION,
+                    "managed CreateSandbox has no external shim lifecycle",
                 )
-            })?
-        } else {
-            Spec::default()
-        };
-        runtime_resource::merge_cri_annotations(&mut spec, &config, &req.annotations)
-            .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
-        let sandbox_spec =
-            encode_sandbox_spec(&spec).map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
-        let should_create = {
+            })?;
+        host_lifecycle
+            .validate_takeover_bundle(Classification::ManagedSandbox, Path::new(&req.bundle_path))
+            .map_err(|error| rpc_error(Code::FAILED_PRECONDITION, error))?;
+        let admission = host_lifecycle
+            .begin_create(Classification::ManagedSandbox, &fingerprint)
+            .map_err(|error| match error {
+                BeginCreateError::Conflict(message) => rpc_error(Code::ALREADY_EXISTS, message),
+                BeginCreateError::Invalid(message) => rpc_error(Code::FAILED_PRECONDITION, message),
+            })?;
+        let waiter = host_lifecycle.create_waiter_guard();
+
+        if admission == CreateAdmission::First {
+            let publisher = host_lifecycle.create_publisher_guard();
+            host_lifecycle
+                .wait_test_failpoint("after-create-commit")
+                .await;
+            let semantic: TtrpcResult<(Spec, Any)> = (|| {
+                runtime_resource::shared_pid_namespace(&config)
+                    .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
+                if req.netns_path.is_empty() || !Path::new(&req.netns_path).is_absolute() {
+                    return Err(rpc_error(
+                        Code::INVALID_ARGUMENT,
+                        "netns_path must be absolute; host-network sandboxes are not supported",
+                    ));
+                }
+                host_lifecycle
+                    .validate_cri_parent(runtime_resource::cgroup_parent(&config))
+                    .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
+                let config_path = Path::new(&req.bundle_path).join("config.json");
+                let mut spec: Spec = if config_path.is_file() {
+                    Utils::load_spec(&req.bundle_path).map_err(|error| {
+                        rpc_error(
+                            Code::INVALID_ARGUMENT,
+                            format!("load sandbox bundle spec: {error}"),
+                        )
+                    })?
+                } else {
+                    Spec::default()
+                };
+                runtime_resource::merge_cri_annotations(&mut spec, &config, &req.annotations)
+                    .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
+                let sandbox_spec = encode_sandbox_spec(&spec)
+                    .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
+                Ok((spec, sandbox_spec))
+            })();
+            let (spec, sandbox_spec) = match semantic {
+                Ok(values) => values,
+                Err(error) => {
+                    let (code, message) = rpc_failure_identity(&error);
+                    tokio::spawn(async move {
+                        publisher.failure_until_durable(&code, &message).await;
+                    })
+                    .await
+                    .map_err(|join_error| {
+                        rpc_error(
+                            Code::INTERNAL,
+                            format!("join rejected CreateSandbox publisher: {join_error}"),
+                        )
+                    })?;
+                    if let Err(persist_error) = waiter.finish() {
+                        return Err(rpc_error(
+                            Code::INTERNAL,
+                            format!("finish rejected CreateSandbox waiter: {persist_error}"),
+                        ));
+                    }
+                    return Err(error);
+                }
+            };
+
             let mut state = self.lifecycle.state.lock().await;
             match state.phase {
                 Phase::Unmanaged => {
                     state.phase = Phase::Creating;
                     state.create_request = Some(fingerprint.clone());
                     state.sandbox_spec = Some(sandbox_spec);
-                    true
+                    tokio::spawn(
+                        self.clone()
+                            .run_create(spec, req.netns_path, config, publisher),
+                    );
                 }
-                _ if state.create_request.as_deref() == Some(fingerprint.as_slice()) => false,
                 phase => {
-                    return Err(rpc_error(
-                        Code::ALREADY_EXISTS,
-                        format!(
-                            "sandbox was already created in phase {phase:?} with different input"
-                        ),
-                    ))
+                    let error = rpc_error(
+                        Code::INTERNAL,
+                        format!("first durable Create found local phase {phase:?}"),
+                    );
+                    drop(state);
+                    let (code, message) = rpc_failure_identity(&error);
+                    tokio::spawn(async move {
+                        publisher.failure_until_durable(&code, &message).await;
+                    })
+                    .await
+                    .map_err(|join_error| {
+                        rpc_error(
+                            Code::INTERNAL,
+                            format!("join failed CreateSandbox publisher: {join_error}"),
+                        )
+                    })?;
+                    let _ = waiter.finish();
+                    return Err(error);
                 }
             }
-        };
-        if should_create {
-            tokio::spawn(self.clone().run_create(spec, req.netns_path, config));
         }
-        self.wait_for_create().await
+
+        let result = match host_lifecycle
+            .wait_create_result(Duration::from_secs(45))
+            .await
+        {
+            Ok(PersistedCreateResult::Succeeded) => self
+                .validate_durable_create_success(&host_lifecycle, &fingerprint)
+                .await
+                .map(|_| api::CreateSandboxResponse::new())
+                .map_err(|error| rpc_error(Code::INTERNAL, error)),
+            Ok(PersistedCreateResult::Failed { code, message }) => {
+                Err(rpc_error(rpc_code_from_name(&code), message))
+            }
+            Err(error) => Err(rpc_error(Code::INTERNAL, error)),
+        };
+        if let Err(error) = waiter.finish() {
+            return Err(rpc_error(
+                Code::INTERNAL,
+                format!("finish CreateSandbox waiter: {error}"),
+            ));
+        }
+        result
     }
 
     async fn start_sandbox(
@@ -1109,6 +1367,47 @@ fn rpc_error(code: Code, message: impl Into<String>) -> TtrpcError {
         code,
         message.into(),
     ))
+}
+
+fn rpc_failure_identity(error: &TtrpcError) -> (String, String) {
+    match error {
+        TtrpcError::RpcStatus(status) => {
+            (format!("{:?}", status.code()), status.message().to_string())
+        }
+        error => ("UNKNOWN".to_string(), error.to_string()),
+    }
+}
+
+fn rpc_code_from_name(name: &str) -> Code {
+    match name {
+        "CANCELLED" => Code::CANCELLED,
+        "INVALID_ARGUMENT" => Code::INVALID_ARGUMENT,
+        "NOT_FOUND" => Code::NOT_FOUND,
+        "ALREADY_EXISTS" => Code::ALREADY_EXISTS,
+        "FAILED_PRECONDITION" => Code::FAILED_PRECONDITION,
+        "UNAVAILABLE" => Code::UNAVAILABLE,
+        "INTERNAL" => Code::INTERNAL,
+        _ => Code::UNKNOWN,
+    }
+}
+
+async fn request_external_cleanup_durable(reason: &str) {
+    loop {
+        match lifecycle_from_env() {
+            Ok(Some(lifecycle)) => match lifecycle.request_cleanup(reason) {
+                Ok(()) => return,
+                Err(error) => {
+                    eprintln!("request external CubeShim cleanup after {reason}: {error}")
+                }
+            },
+            Ok(None) => return,
+            Err(error) => eprintln!("load external CubeShim lifecycle after {reason}: {error}"),
+        }
+        // Terminal RPC completion is intentionally held until cleanup intent
+        // is durable. If this process dies meanwhile, the independent
+        // watchdog observes the server death and performs the same handoff.
+        sleep(Duration::from_millis(100)).await;
+    }
 }
 
 fn now_timestamp() -> Timestamp {

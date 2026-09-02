@@ -7,28 +7,6 @@ use std::fs;
 use std::path::Path;
 use std::result::Result;
 
-pub fn read_number_from_file(file: &str) -> Result<i32, Error> {
-    let pfile = Path::new(file);
-    let num = match fs::read_to_string(pfile) {
-        Ok(content) => {
-            let n = match content.trim().parse::<i32>() {
-                Ok(n) => n,
-                Err(e) => {
-                    return Err(Error::ParseInt(e));
-                }
-            };
-            n
-        }
-        Err(e) => {
-            return Err(Error::IoError {
-                context: format!("read file[{}] failed", pfile.display()),
-                err: e,
-            });
-        }
-    };
-    Ok(num)
-}
-
 pub fn read_address(file: &str) -> Result<String, Error> {
     let pfile = Path::new(file);
     let sk_file = match fs::read_to_string(pfile) {
