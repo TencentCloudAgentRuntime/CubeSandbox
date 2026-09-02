@@ -2,7 +2,7 @@
 
 ## 当前 Stage
 
-S3.4c.3 `IN_PROGRESS`：实现 RuntimeClass overhead 输入、Host 静态 leaf CPU/memory/PIDs ceiling、controller WAL 与恢复决策；并提前运行 Kubernetes Node E2E/Conformance 诊断基线。
+S3.4c.4 `IN_PROGRESS`：执行云端 Host/Guest 压力、QoS/多容器兼容、故障恢复、survivor 隔离与 exact-baseline 审计，并固定 Kubernetes v1.36.4 E2E/Conformance runner。
 
 ## 基线
 
@@ -10,11 +10,11 @@ S3.4c.3 `IN_PROGRESS`：实现 RuntimeClass overhead 输入、Host 静态 leaf C
 
 ## 已完成
 
-S0、S1、S2.1～S2.4、S3.1～S3.3、S3.4a～S3.4b 与 S3.4c.1～S3.4c.2 全部 `DONE`。S3.4c.2 最终实现 `90edf7bf` 完成 Host placement、takeover/scanner、process fencing 和 exact cleanup；固定测试、完整云端故障矩阵及同一 reviewer 批准均完成。
+S0、S1、S2.1～S2.4、S3.1～S3.3、S3.4a～S3.4b 与 S3.4c.1～S3.4c.3 全部 `DONE`。S3.4c.3 最终实现 `be91f9e0` 完成 RuntimeClass overhead、静态 leaf ceiling、controller WAL/epoch fencing 和 crash recovery；固定测试、完整云端矩阵及同一 reviewer `APPROVE S3.4c.3` 均完成。
 
 ## 未完成
 
-S3.4c.3～S3.4d 尚未完成。S3.4c.3 实现与云证据已闭合，当前只等待同一 reviewer 最终批准；S3.4c.4 压力矩阵尚未开始。极端 unchecked `memory.max` 下调按 `K8S-OQ-017` 跟踪，inactive systemd scope 的 Release 幂等语义按 `K8S-OQ-020` 跟踪。
+S3.4c.4～S3.4d 尚未完成。当前执行 S3.4c.4 压力、故障与兼容矩阵。极端 unchecked `memory.max` 下调按 `K8S-OQ-017` 跟踪，inactive systemd scope 的 Release 幂等语义按 `K8S-OQ-020` 跟踪。
 
 ## 验证
 
@@ -30,4 +30,4 @@ S3.4c.3～S3.4d 尚未完成。S3.4c.3 实现与云证据已闭合，当前只�
 
 ## 下一步
 
-请同一 reviewer 按恢复决策表映射与云证据最终复核 S3.4c.3；明确批准后更新 Stage 为 `DONE`，随即进入 S3.4c.4 压力/兼容矩阵并固定 Kubernetes v1.36.4 E2E/Conformance runner。
+先复核双 Worker 为 `be91f9e0`/`a5c68da0…` 且处于精确零基线；随后按冻结向量执行 BestEffort/Burstable/Guaranteed、多容器/init/sidecar、CPU/内存/PIDs 压力、survivor、resize、服务重启/回收和 exact-baseline 矩阵，记录固定 Kubernetes v1.36.4 runner 结果并交同一 reviewer 审计。
