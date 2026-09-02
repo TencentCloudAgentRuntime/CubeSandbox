@@ -182,10 +182,11 @@ S3.4a 只冻结输入、现状与精确缺口，不把“请求被接受”记�
 
 ## 待关闭
 
-- `K8S-OQ-014`：Host Pod VM 包络的进程归属、计算输入与 overhead 处理。
 - `K8S-OQ-015`：Guest 更新和 Host 包络重算的顺序、幂等键与失败恢复。
 - `K8S-OQ-016`：swap、PIDs、hugepage 的 Guest/Host 分层，以及 ephemeral-storage 的 kubelet 边界。
 - `K8S-OQ-017`：极端 unchecked `memory.max` 下调的阻塞写、RPC deadline 与最终状态对账。
+- `K8S-OQ-021`：默认小 VM 规格下并发启动高内存负载的容量边界与诊断语义。
+- `K8S-OQ-022`：长时间 exec 与资源更新并发时的 Agent 操作通道和状态对账。
 
 ## 额外多节点交互基线（2026-09-02）
 
@@ -221,8 +222,11 @@ P0/P1/P2 均为 0，并明确返回 `APPROVE S3.4c.2`。
 
 状态：`VALIDATING`。Kubernetes v1.36.4 的六 Pod QoS/Pod-level/init/sidecar 矩阵、Host
 CPU/memory/PIDs、Guest 定向 OOM、同 Pod/同节点/跨节点 survivor、压力中 resize、在线
-containerd restart 和双 Worker exact baseline 已完成。实测暴露并由 `90026f59` 修复
-cgroup v2 OOM/exit 通知竞态；最终 Kubernetes 状态为 `OOMKilled/137`。完整数值、invocation、
-失败尝试边界与制品身份见
+containerd restart 和双 Worker exact baseline 已完成。`2a23aa3c` 进一步修复启动阶段
+cgroup v2 OOM armed barrier 和 inactive/已消失 systemd scope 的幂等清理；8 个显式
+2-vCPU/1GiB VM 均在首次命令得到 `OOMKilled/137`，inactive scope 的真实 Kubernetes
+删除无 `FailedKillPod`。六 Pod、九容器的 Guest/Host 原始逐对象证据与 SHA-256 已随 handoff
+保存。默认小 VM 高并发启动和长 exec + resize 的两个边界分别登记为 `K8S-OQ-021`、
+`K8S-OQ-022`，进入 S3.4d，不冒充通过能力。完整数值、invocation、失败尝试边界与制品身份见
 [`s3.4c.4-execution-summary.md`](./s3.4c.4-execution-summary.md)。等待同一 reviewer
 返回 `APPROVE S3.4c DONE`。

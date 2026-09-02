@@ -2,32 +2,57 @@
 
 ## 当前 Stage
 
-S3.4c.4 `VALIDATING`：云端 Host/Guest 压力、QoS/多容器兼容、故障恢复、survivor 隔离与 exact-baseline 审计已通过，等待同一 reviewer 返回 `APPROVE S3.4c DONE`。
+S3.4c.4 `VALIDATING`。实现和云端验收候选已完成，等待同一 reviewer 明确返回
+`APPROVE S3.4c DONE`；未获批准前不得进入 S3.4d。
 
 ## 基线
 
-最后一项已验证实现 commit 为 `90026f590eda8a73f1c3f9021024e3ee3f4896b7`；上一个已完成 Stage 的验收证据 commit 为 `7b9d2afe`。S0 双工作节点当前 CubeShim/Agent/`cube-runtime` SHA-256 为 `a5c68da0…`/`9206e77b…`/`8c17375d…`，`inv-b86h6n067j`/`inv-386h6n05t5` 的完整 manifest 校验通过；Kubernetes v1.36.4 六 Pod 压力矩阵、Guest `OOMKilled/137`、在线 containerd restart、双节点 exact zero 和最终集群健康均通过。
+最后一项已验证实现 commit 为 `2a23aa3cccddcf9c5c0f9e4a4986251ef92dbae2`；上一个已完成
+Stage 的证据 commit 为 `7b9d2afe`。S0 双 Worker 当前 CubeShim/Agent ext4/`cube-runtime`
+SHA-256 为 `f6747958…`/`b7cd4c4b…`/`8c17375d…`；运行时根为
+`/opt/cubesandbox-s0-multinode-runtime-2269a3b3`。
 
 ## 已完成
 
-S0、S1、S2.1～S2.4、S3.1～S3.3、S3.4a～S3.4b 与 S3.4c.1～S3.4c.3 全部 `DONE`。S3.4c.4 候选已完成 QoS/多容器三层数值、Host CPU/memory/PIDs、Guest 定向 OOM、survivor、容量内 resize、containerd restart 和 exact-baseline 矩阵。
+S0、S1、S2.1～S2.4、S3.1～S3.3、S3.4a～S3.4b、S3.4c.1～S3.4c.3 均为
+`DONE`。S3.4c.4 候选已完成：Shim 160/160、OOM notifier 4/4；六 Pod/九容器
+Guest/Host 逐对象证据；Host CPU/memory/PIDs；Guest 正常期和启动阶段 OOM；survivor；
+containerd restart；inactive scope Kubernetes 删除；双 Worker exact zero。
 
 ## 未完成
 
-S3.4c.4 等待 reviewer，S3.4d 尚未开始。极端 unchecked `memory.max` 下调按 `K8S-OQ-017` 跟踪，inactive systemd scope 的 Release 幂等语义按 `K8S-OQ-020` 带入 Kubernetes E2E 删除回归。
+S3.4c.4 reviewer 门禁和 S3.4d。`K8S-OQ-017`、`021`、`022` 在 S3.4d 验证；
+`K8S-OQ-018`～`019` 保持后续范围。容量内 resize 基础路径已通过，但最终组合中的
+“长 exec + resize”超时未记成通过。
 
 ## 验证
 
-`90026f59` 修复 Agent cgroup v2 OOM/exit 事件竞态；固定 builder `inv-386gur0e65` 专项 2/2 并产出 Agent `9206e77b…`。`inv-a86gc90t3r`、`inv-b86gd40042`、`inv-b86gfd0fqf` 完成六 Pod Guest/parent/leaf 矩阵；CPU/PIDs/Host OOM/resize 与在线 containerd restart 全部通过。最终 `inv-386h170wa5` 为 `OOMKilled/137` 且三类 survivor 稳定，`inv-086h2egmq0`/`inv-086h2f0c1g` 双 Worker 精确归零，`inv-386h37gkc2` 集群健康。详见 [S3.4c.4 候选摘要](./evidence/s3.4/s3.4c.4-execution-summary.md)。
+原始 Guest/Host 证据为 `inv-686i7a0qux`、`inv-686i7a0quv`、`inv-386i7ags0q`，文件
+与 SHA-256 见 [S3.4c.4 摘要](./evidence/s3.4/s3.4c.4-execution-summary.md)。
+`inv-886i0qgtq9` 启动即 OOM 8/8 为 `OOMKilled/137`；
+`inv-v86i55g64g`/`inv-b86i5egc5x` 完成 inactive scope 删除；
+`inv-a86ig40cbx`/`inv-086ig5gp25` 双 Worker 精确归零；`inv-886iicgsqw` 证明
+nodes 3/3 Ready、无临时 namespace/Failed Pod、apiserver ready；
+`inv-886iicgsqu`/`inv-986iicgw96` 完成最终制品审计。
 
 ## 阻塞
 
-无外部阻塞，也无待用户决策。S0 集群保持 3/3 Ready 且两个 Worker 为精确零基线。`K8S-OQ-014` 已由三层压力证据关闭；`K8S-OQ-015`～`017` 在 S3.4d 继续组合/边界验证，`K8S-OQ-018`～`019` 保持后续范围。历史 inactive scope Release 偶发项本轮未复现，以非阻断 `K8S-OQ-020` 进入 Kubernetes E2E。
+无外部阻塞或待用户决策。默认小 VM 高并发启动出现 `ReleasePending`，证据不足以归因 Host
+OOM，记录为 `K8S-OQ-021`；containerd restart 后长 CPU exec 与 resize 并发发生 ttrpc/passfd
+超时，记录为 `K8S-OQ-022`。两轮异常均已清理至 exact zero。inactive scope 语义已由
+`2a23aa3c` 和定向云端回归关闭为 `K8S-OQ-020=DECIDED`。
 
 ## 受保护路径
 
-`CubeShim/`、`Cubelet/`、`agent/`、`deploy/kubernetes/runtimeclass/`、`deploy/kubernetes/smoke/`、`tests/e2e/kubernetes-runtime/` 和本 handoff bundle。云端只操作本 PoC 创建的 CVM/自建 Kubernetes、额外 TKE `cls-1oqe2py4` 及其节点 `ins-h06xpkbw`、`ins-lus07026`，以及私有 COS `cubesandbox-k8s-poc-20260831-1251707795`；现有证据、构建产物和回滚副本不覆盖，名称带“勿删”的资源不得删除。
+`CubeShim/`、`Cubelet/`、`agent/`、`deploy/kubernetes/runtimeclass/`、
+`deploy/kubernetes/smoke/`、`tests/e2e/kubernetes-runtime/` 和本 handoff bundle。
+云端仅操作本 PoC 创建的资源；名称带“勿删”的 CVM/TKE 不得删除。现有证据、构建产物和
+回滚副本不得覆盖，handoff 不记录凭证。
 
 ## 下一步
 
-复核 `90026f59` 候选证据并取得同一 reviewer 的 `APPROVE S3.4c DONE`。批准后更新 S3.4c.4/S3.4c 为 `DONE`，启动 S3.4d 双层资源与非 cgroup 支持矩阵；S3.4 关闭后立即运行固定 Kubernetes v1.36.4 E2E/Conformance runner。
+1. reviewer 独立复核 `2a23aa3c`、三份 raw 证据、OOM/scope 竞态和失败边界。
+2. 仅在取得 `APPROVE S3.4c DONE` 后更新 S3.4c 状态并启动 S3.4d。
+3. S3.4d 优先复现 `K8S-OQ-021/022`，完成双层资源、swap/hugepage/PIDs 和
+   ephemeral-storage 支持矩阵。
+4. S3.4 关闭后立即运行固定 Kubernetes v1.36.4 E2E/Conformance runner。

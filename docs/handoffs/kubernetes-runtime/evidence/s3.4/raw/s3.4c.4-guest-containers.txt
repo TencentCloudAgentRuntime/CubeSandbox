@@ -1,0 +1,81 @@
+S34C4_GUEST_RAW_BEGIN namespace=cubesandbox-s34c4-validation kubernetes=v1.36.4
+POD_IDENTITY name=be-cpu uid=f97d8512-72a1-452e-9965-2fea6cc8ed4e node=cubesandbox-s0-worker ip=10.244.1.25 qos=BestEffort phase=Running
+POD_IDENTITY name=burst-pids uid=d7db3755-724c-424c-9ec7-59368db975ef node=vm-200-13-ubuntu ip=10.244.2.176 qos=Burstable phase=Running
+POD_IDENTITY name=guaranteed-multi uid=ed4d5029-934a-489b-905f-e9037e47b68e node=cubesandbox-s0-worker ip=10.244.1.61 qos=Guaranteed phase=Running
+POD_IDENTITY name=podlevel uid=06cafdb2-a4e5-429d-a38e-bc5008a8ec9f node=vm-200-13-ubuntu ip=10.244.2.146 qos=Guaranteed phase=Running
+POD_IDENTITY name=guest-oom uid=408f948b-d5c2-4bdd-9d9a-129274265dec node=vm-200-13-ubuntu ip=10.244.2.131 qos=Guaranteed phase=Running
+POD_IDENTITY name=resize-pressure uid=4292a4c2-fa2f-40a7-9f4e-73b24e367e7b node=cubesandbox-s0-worker ip=10.244.1.228 qos=Guaranteed phase=Running
+GUEST_CONTAINER pod=be-cpu pod_uid=f97d8512-72a1-452e-9965-2fea6cc8ed4e kind=app role=application name=app container_id=containerd://37fe5c97c312179d77d84af4d035d7c03712350b796b51f231731e5455a62c2e readback_sha256=42d7830c38fb63098ccb29c3ffd09dec9de06f49429741d25b45f6cfc6a7a38f
+cgroup=0::/kubepods-besteffort-podf97d8512_72a1_452e_9965_2fea6cc8ed4e.slice:cri-containerd:37fe5c97c312179d77d84af4d035d7c03712350b796b51f231731e5455a62c2e/runtime;
+cpu.max=max 100000
+cpu.weight=1
+memory.max=max
+memory.oom.group=1
+memory.swap.max=0
+pids.max=max
+GUEST_CONTAINER pod=burst-pids pod_uid=d7db3755-724c-424c-9ec7-59368db975ef kind=app role=application name=app container_id=containerd://040fc5241e9ea718ccd2bfcb4145df4b10f52428f026e7ba2c08423bde932efd readback_sha256=02210a8eb2d79b67d8a082967e855320788df54da2f7ddf3139cfc6a3cab851f
+cgroup=0::/kubepods-burstable-podd7db3755_724c_424c_9ec7_59368db975ef.slice:cri-containerd:040fc5241e9ea718ccd2bfcb4145df4b10f52428f026e7ba2c08423bde932efd/runtime;
+cpu.max=max 100000
+cpu.weight=29
+memory.max=max
+memory.oom.group=1
+memory.swap.max=0
+pids.max=max
+GUEST_CONTAINER pod=guaranteed-multi pod_uid=ed4d5029-934a-489b-905f-e9037e47b68e kind=init role=restartable-init name=sidecar container_id=containerd://bc15db2db84eabee8a0c788da2912b792b7428835ec33b2fc07273e39f90cd2c readback_sha256=36c263740850dce46c20bb852a26a7dbd00c940babc65668f5f227fb2b5d5f15
+cgroup=0::/kubepods-poded4d5029_934a_489b_905f_e9037e47b68e.slice:cri-containerd:bc15db2db84eabee8a0c788da2912b792b7428835ec33b2fc07273e39f90cd2c/runtime;
+cpu.max=10000 100000
+cpu.weight=17
+memory.max=67108864
+memory.oom.group=1
+memory.swap.max=0
+pids.max=max
+GUEST_CONTAINER pod=guaranteed-multi pod_uid=ed4d5029-934a-489b-905f-e9037e47b68e kind=init role=classic-init name=classic container_id=containerd://cdf4c03906fa8841634d64c1e56bf6e873facbd2a8d35b126d12ea85d4fd002f state=terminated exit_code=0 readback_sha256=a664cf368de4d45475ca3e7d241caef3240ae00e859c176ca615e2842e865942
+role=classic-init
+cgroup=0::/kubepods-poded4d5029_934a_489b_905f_e9037e47b68e.slice:cri-containerd:cdf4c03906fa8841634d64c1e56bf6e873facbd2a8d35b126d12ea85d4fd002f/runtime
+cpu.max=50000 100000
+cpu.weight=59
+memory.max=268435456
+memory.oom.group=1
+memory.swap.max=0
+pids.max=max
+GUEST_CONTAINER pod=guaranteed-multi pod_uid=ed4d5029-934a-489b-905f-e9037e47b68e kind=app role=application name=app container_id=containerd://9a684e5a2edecb2f6339a343ee65b40c7af028e40995c59f6c7136267e211ae1 readback_sha256=bd56c82f02164e80e30e658c93fcc0ff7f255c693386d0d3f15a187ca98f5739
+cgroup=0::/kubepods-poded4d5029_934a_489b_905f_e9037e47b68e.slice:cri-containerd:9a684e5a2edecb2f6339a343ee65b40c7af028e40995c59f6c7136267e211ae1/runtime;
+cpu.max=30000 100000
+cpu.weight=40
+memory.max=201326592
+memory.oom.group=1
+memory.swap.max=0
+pids.max=max
+GUEST_CONTAINER pod=podlevel pod_uid=06cafdb2-a4e5-429d-a38e-bc5008a8ec9f kind=app role=application name=app container_id=containerd://db21f815c3bcb01457d6384eed7af7172d49fa2a3c175c97e02c6e963c516781 readback_sha256=5a5b377f56f1059c81e6e553e7be872ba40dbda545e40c8645aa87a648fb13ee
+cgroup=0::/kubepods-pod06cafdb2_a4e5_429d_a38e_bc5008a8ec9f.slice:cri-containerd:db21f815c3bcb01457d6384eed7af7172d49fa2a3c175c97e02c6e963c516781/runtime;
+cpu.max=70000 100000
+cpu.weight=76
+memory.max=402653184
+memory.oom.group=1
+memory.swap.max=0
+pids.max=max
+GUEST_CONTAINER pod=guest-oom pod_uid=408f948b-d5c2-4bdd-9d9a-129274265dec kind=app role=application-offender name=offender container_id=containerd://c2e5afe04c1b1172e2d7e74ab67a7febf308a3f8056b8334d080687d4d5f8cb4 readback_sha256=4fa02862fe0eb8400a6e9459e301349089f9ba7129357c2051c063c6b7f6f89b
+cgroup=0::/kubepods-pod408f948b_d5c2_4bdd_9d9a_129274265dec.slice:cri-containerd:c2e5afe04c1b1172e2d7e74ab67a7febf308a3f8056b8334d080687d4d5f8cb4/runtime;
+cpu.max=10000 100000
+cpu.weight=17
+memory.max=67108864
+memory.oom.group=1
+memory.swap.max=0
+pids.max=max
+GUEST_CONTAINER pod=guest-oom pod_uid=408f948b-d5c2-4bdd-9d9a-129274265dec kind=app role=application-survivor name=survivor container_id=containerd://867cd1e334158552102031074f73a6b44b6cda4d5dd9064ccc38b4894a75cee4 readback_sha256=a6f5680a847ad2cd23d45e5c5fbcea6b6ccc9a60c6ae5130698b996500ed770a
+cgroup=0::/kubepods-pod408f948b_d5c2_4bdd_9d9a_129274265dec.slice:cri-containerd:867cd1e334158552102031074f73a6b44b6cda4d5dd9064ccc38b4894a75cee4/runtime;
+cpu.max=10000 100000
+cpu.weight=17
+memory.max=134217728
+memory.oom.group=1
+memory.swap.max=0
+pids.max=max
+GUEST_CONTAINER pod=resize-pressure pod_uid=4292a4c2-fa2f-40a7-9f4e-73b24e367e7b kind=app role=application name=app container_id=containerd://8b1abd2d392d48b0a4a90946d49322dabcd61f2996901e0ad22fec0b5972cde5 readback_sha256=3c01cdd5d7706104dbf517d2b71033410afa14b8b5b79e887650f37db24cbb26
+cgroup=0::/kubepods-pod4292a4c2_fa2f_40a7_9f4e_73b24e367e7b.slice:cri-containerd:8b1abd2d392d48b0a4a90946d49322dabcd61f2996901e0ad22fec0b5972cde5/runtime;
+cpu.max=30000 100000
+cpu.weight=40
+memory.max=201326592
+memory.oom.group=1
+memory.swap.max=0
+pids.max=max
+S34C4_GUEST_RAW_OK pods=6 containers=9 classic_init_self_saved=true
