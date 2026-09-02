@@ -2761,7 +2761,7 @@ fn canonical_controller_value(file: &str, raw: &str) -> Result<String, String> {
             }
             Ok(format!("{} {}", fields[0], fields[1]))
         }
-        "memory.max" | "pids.max" => {
+        "memory.max" => {
             if fields.len() != 1 {
                 return Err(format!("{file} must contain one value: {raw:?}"));
             }
@@ -2769,6 +2769,24 @@ fn canonical_controller_value(file: &str, raw: &str) -> Result<String, String> {
                 fields[0]
                     .parse::<u64>()
                     .map_err(|error| format!("parse {file} value {}: {error}", fields[0]))?;
+            }
+            Ok(fields[0].to_string())
+        }
+        "pids.max" => {
+            if fields.len() != 1 {
+                return Err(format!("{file} must contain one value: {raw:?}"));
+            }
+            if fields[0] == "max" {
+                return Ok(fields[0].to_string());
+            }
+            let value = fields[0]
+                .parse::<u64>()
+                .map_err(|error| format!("parse {file} value {}: {error}", fields[0]))?;
+            if value > runtime_resource::LINUX_PIDS_MAX_LIMIT {
+                return Err(format!(
+                    "pids.max {value} exceeds Linux numeric limit {}",
+                    runtime_resource::LINUX_PIDS_MAX_LIMIT
+                ));
             }
             Ok(fields[0].to_string())
         }
@@ -6219,10 +6237,39 @@ mod tests {
         );
         assert!(canonical_controller_value("cpu.max", "125000").is_err());
         assert!(canonical_controller_value("memory.oom.group", "2").is_err());
+        assert!(canonical_controller_value(
+            "pids.max",
+            &(runtime_resource::LINUX_PIDS_MAX_LIMIT + 1).to_string()
+        )
+        .is_err());
         fs::write(root.join("pids.current"), "513").unwrap();
         assert!(preflight_controller_targets(&root, &journal.steps)
             .unwrap_err()
             .contains("pids.current"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn controller_preflight_rejects_invalid_pids_target_without_controller_writes() {
+        let (root, mut journal) = controller_fixture();
+        journal.steps[1].target = u64::MAX.to_string();
+        let before = journal
+            .steps
+            .iter()
+            .map(|step| {
+                (
+                    step.file.clone(),
+                    fs::read_to_string(root.join(&step.file)).unwrap(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        assert!(preflight_controller_targets(&root, &journal.steps)
+            .unwrap_err()
+            .contains("exceeds Linux numeric limit"));
+        for (file, expected) in before {
+            assert_eq!(fs::read_to_string(root.join(file)).unwrap(), expected);
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -7028,6 +7075,51 @@ mod tests {
         let owner: HostCgroupOwner = read_json(&handle.directory.join(HOST_OWNER_FILE)).unwrap();
         assert_eq!(owner.state, HostOwnerState::Empty);
         assert!(matches!(owner.target, HostTarget::Pending { .. }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_v12_rejects_adversarial_cri_collection_collision() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-host-cgroup-v12-cri-collision-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let handle = pending_socket_ready_fixture(&root);
+        let id = "a".repeat(64);
+        handle
+            .update_record(|record| {
+                record.namespace = "k8s.io".to_string();
+                record.instance_id = id.clone();
+                Ok(())
+            })
+            .unwrap();
+        let mut owner: HostCgroupOwner =
+            read_json(&handle.directory.join(HOST_OWNER_FILE)).unwrap();
+        owner.namespace = "k8s.io".to_string();
+        owner.instance_id = id;
+        atomic_write_json(&handle.directory.join(HOST_OWNER_FILE), &owner).unwrap();
+
+        let (first, conflicting) =
+            runtime_resource::cri_collection_collision_regression_fingerprints();
+        assert_ne!(first, conflicting);
+        assert_eq!(
+            handle
+                .begin_managed_create(&root, "system.slice", first.as_bytes())
+                .unwrap(),
+            CreateAdmission::First
+        );
+        let durable = handle.read_record().unwrap();
+        assert!(matches!(
+            handle.begin_managed_create(&root, "user.slice", conflicting.as_bytes()),
+            Err(BeginCreateError::Conflict(_))
+        ));
+        let after_conflict = handle.read_record().unwrap();
+        assert_eq!(after_conflict.target, durable.target);
+        assert_eq!(
+            after_conflict.create_fingerprint,
+            durable.create_fingerprint
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

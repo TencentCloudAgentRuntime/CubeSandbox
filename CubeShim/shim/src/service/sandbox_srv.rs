@@ -1006,36 +1006,48 @@ fn hash_create_part(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(value);
 }
 
+fn hash_create_field(hasher: &mut Sha256, label: &[u8], value: &[u8]) {
+    hash_create_part(hasher, label);
+    hash_create_part(hasher, value);
+}
+
 fn create_request_fingerprint(
     request: &api::CreateSandboxRequest,
     cri_fingerprint: &str,
 ) -> Vec<u8> {
     let mut hasher = Sha256::new();
-    for value in [
-        request.sandbox_id.as_bytes(),
-        request.bundle_path.as_bytes(),
-        request.netns_path.as_bytes(),
+    hash_create_part(&mut hasher, b"create-sandbox-request-v2");
+    hash_create_field(&mut hasher, b"sandbox-id", request.sandbox_id.as_bytes());
+    hash_create_field(&mut hasher, b"bundle-path", request.bundle_path.as_bytes());
+    hash_create_field(&mut hasher, b"netns-path", request.netns_path.as_bytes());
+    hash_create_field(
+        &mut hasher,
+        b"cri-semantic-fingerprint",
         cri_fingerprint.as_bytes(),
-    ] {
-        hash_create_part(&mut hasher, value);
-    }
+    );
+    hash_create_part(&mut hasher, b"rootfs");
     hash_create_part(&mut hasher, &(request.rootfs.len() as u64).to_be_bytes());
     for mount in &request.rootfs {
-        for value in [
-            mount.type_.as_bytes(),
-            mount.source.as_bytes(),
-            mount.target.as_bytes(),
-        ] {
-            hash_create_part(&mut hasher, value);
-        }
+        hash_create_part(&mut hasher, b"mount");
+        hash_create_field(&mut hasher, b"type", mount.type_.as_bytes());
+        hash_create_field(&mut hasher, b"source", mount.source.as_bytes());
+        hash_create_field(&mut hasher, b"target", mount.target.as_bytes());
+        hash_create_part(&mut hasher, b"options");
         hash_create_part(&mut hasher, &(mount.options.len() as u64).to_be_bytes());
         for option in &mount.options {
+            hash_create_part(&mut hasher, b"option");
             hash_create_part(&mut hasher, option.as_bytes());
         }
     }
+    hash_create_part(&mut hasher, b"annotations");
+    hash_create_part(
+        &mut hasher,
+        &(request.annotations.len() as u64).to_be_bytes(),
+    );
     let mut annotations: Vec<_> = request.annotations.iter().collect();
     annotations.sort_by(|left, right| left.0.cmp(right.0));
     for (key, value) in annotations {
+        hash_create_part(&mut hasher, b"entry");
         hash_create_part(&mut hasher, key.as_bytes());
         hash_create_part(&mut hasher, value.as_bytes());
     }

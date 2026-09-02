@@ -57,6 +57,9 @@ const RUNTIME_REAPER_ROOT_ENV: &str = "CUBE_RUNTIME_RESOURCE_REAPER_DIR";
 const DEFAULT_RUNTIME_REAPER_ROOT: &str = "/data/cubelet/runtime-resource-reaper";
 const RUNTIMECLASS_OVERHEAD_CONFIG_ENV: &str = "CUBE_RUNTIMECLASS_OVERHEAD_CONFIG";
 const DEFAULT_RUNTIMECLASS_OVERHEAD_CONFIG: &str = "/etc/cubesandbox/runtimeclass-overhead.json";
+// Linux 6.6 on the supported x86_64 PoC nodes defines PIDS_MAX as
+// PID_MAX_LIMIT + 1 and rejects numeric pids.max values >= PIDS_MAX.
+pub(crate) const LINUX_PIDS_MAX_LIMIT: u64 = 4_194_304;
 pub(crate) const RUNTIME_REAPER_ACTION: &str = "runtime-resource-reaper";
 pub(crate) const MANAGED_VOLUME_EXPORT_DIR: &str = "volumes";
 pub(crate) const MANAGED_VOLUME_VIRTIOFS_ID: &str = "cubeVolumes";
@@ -1026,6 +1029,36 @@ fn hash_fingerprint_part(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(value);
 }
 
+fn hash_fingerprint_field(hasher: &mut Sha256, label: &[u8], value: &[u8]) {
+    hash_fingerprint_part(hasher, label);
+    hash_fingerprint_part(hasher, value);
+}
+
+fn hash_fingerprint_string_list(hasher: &mut Sha256, label: &[u8], values: &[String]) {
+    hash_fingerprint_part(hasher, label);
+    hash_fingerprint_part(hasher, &(values.len() as u64).to_be_bytes());
+    for value in values {
+        hash_fingerprint_part(hasher, b"item");
+        hash_fingerprint_part(hasher, value.as_bytes());
+    }
+}
+
+fn hash_fingerprint_string_map(
+    hasher: &mut Sha256,
+    label: &[u8],
+    values: &HashMap<String, String>,
+) {
+    hash_fingerprint_part(hasher, label);
+    hash_fingerprint_part(hasher, &(values.len() as u64).to_be_bytes());
+    let mut entries: Vec<_> = values.iter().collect();
+    entries.sort_by(|left, right| left.0.cmp(right.0));
+    for (key, value) in entries {
+        hash_fingerprint_part(hasher, b"entry");
+        hash_fingerprint_part(hasher, key.as_bytes());
+        hash_fingerprint_part(hasher, value.as_bytes());
+    }
+}
+
 fn hash_linux_resources(
     hasher: &mut Sha256,
     label: &[u8],
@@ -1037,91 +1070,125 @@ fn hash_linux_resources(
         return;
     };
     hash_fingerprint_part(hasher, b"present");
-    for value in [
-        resources.cpu_period,
-        resources.cpu_quota,
-        resources.cpu_shares,
-        resources.memory_limit_in_bytes,
-        resources.oom_score_adj,
-        resources.memory_swap_limit_in_bytes,
+    for (field, value) in [
+        (b"cpu-period".as_slice(), resources.cpu_period),
+        (b"cpu-quota".as_slice(), resources.cpu_quota),
+        (b"cpu-shares".as_slice(), resources.cpu_shares),
+        (
+            b"memory-limit-in-bytes".as_slice(),
+            resources.memory_limit_in_bytes,
+        ),
+        (b"oom-score-adj".as_slice(), resources.oom_score_adj),
+        (
+            b"memory-swap-limit-in-bytes".as_slice(),
+            resources.memory_swap_limit_in_bytes,
+        ),
     ] {
-        hash_fingerprint_part(hasher, &value.to_be_bytes());
+        hash_fingerprint_field(hasher, field, &value.to_be_bytes());
     }
-    hash_fingerprint_part(hasher, resources.cpuset_cpus.as_bytes());
-    hash_fingerprint_part(hasher, resources.cpuset_mems.as_bytes());
+    hash_fingerprint_field(hasher, b"cpuset-cpus", resources.cpuset_cpus.as_bytes());
+    hash_fingerprint_field(hasher, b"cpuset-mems", resources.cpuset_mems.as_bytes());
     let mut hugepages: Vec<_> = resources.hugepage_limits.iter().collect();
     hugepages.sort_by(|left, right| {
         left.page_size
             .cmp(&right.page_size)
             .then(left.limit.cmp(&right.limit))
     });
+    hash_fingerprint_part(hasher, b"hugepage-limits");
     hash_fingerprint_part(hasher, &(hugepages.len() as u64).to_be_bytes());
     for limit in hugepages {
-        hash_fingerprint_part(hasher, limit.page_size.as_bytes());
-        hash_fingerprint_part(hasher, &limit.limit.to_be_bytes());
+        hash_fingerprint_part(hasher, b"hugepage-limit");
+        hash_fingerprint_field(hasher, b"page-size", limit.page_size.as_bytes());
+        hash_fingerprint_field(hasher, b"limit", &limit.limit.to_be_bytes());
     }
-    let mut unified: Vec<_> = resources.unified.iter().collect();
-    unified.sort_by(|left, right| left.0.cmp(right.0));
-    for (key, value) in unified {
-        hash_fingerprint_part(hasher, key.as_bytes());
-        hash_fingerprint_part(hasher, value.as_bytes());
-    }
+    hash_fingerprint_string_map(hasher, b"unified", &resources.unified);
 }
 
 pub(crate) fn cri_semantic_fingerprint(config: &CriPodSandboxConfig) -> String {
     let mut hasher = Sha256::new();
-    hash_fingerprint_part(&mut hasher, config.hostname.as_bytes());
+    hash_fingerprint_part(&mut hasher, b"cri-pod-sandbox-semantic-v2");
+    hash_fingerprint_field(&mut hasher, b"hostname", config.hostname.as_bytes());
+    hash_fingerprint_part(&mut hasher, b"metadata");
     if let Some(metadata) = &config.metadata {
-        for value in [
-            metadata.name.as_bytes(),
-            metadata.uid.as_bytes(),
-            metadata.namespace.as_bytes(),
-            &metadata.attempt.to_be_bytes(),
-        ] {
-            hash_fingerprint_part(&mut hasher, value);
-        }
+        hash_fingerprint_part(&mut hasher, b"present");
+        hash_fingerprint_field(&mut hasher, b"name", metadata.name.as_bytes());
+        hash_fingerprint_field(&mut hasher, b"uid", metadata.uid.as_bytes());
+        hash_fingerprint_field(&mut hasher, b"namespace", metadata.namespace.as_bytes());
+        hash_fingerprint_field(&mut hasher, b"attempt", &metadata.attempt.to_be_bytes());
     } else {
-        hash_fingerprint_part(&mut hasher, b"no-metadata");
+        hash_fingerprint_part(&mut hasher, b"absent");
     }
+    hash_fingerprint_part(&mut hasher, b"dns-config");
     if let Some(dns) = &config.dns_config {
-        for values in [&dns.servers, &dns.searches, &dns.options] {
-            hash_fingerprint_part(&mut hasher, &(values.len() as u64).to_be_bytes());
-            for value in values {
-                hash_fingerprint_part(&mut hasher, value.as_bytes());
-            }
-        }
+        hash_fingerprint_part(&mut hasher, b"present");
+        hash_fingerprint_string_list(&mut hasher, b"servers", &dns.servers);
+        hash_fingerprint_string_list(&mut hasher, b"searches", &dns.searches);
+        hash_fingerprint_string_list(&mut hasher, b"options", &dns.options);
     } else {
-        hash_fingerprint_part(&mut hasher, b"no-dns");
+        hash_fingerprint_part(&mut hasher, b"absent");
     }
-    let mut annotations: Vec<_> = config.annotations.iter().collect();
-    annotations.sort_by(|left, right| left.0.cmp(right.0));
-    for (key, value) in annotations {
-        hash_fingerprint_part(&mut hasher, key.as_bytes());
-        hash_fingerprint_part(&mut hasher, value.as_bytes());
-    }
+    hash_fingerprint_string_map(&mut hasher, b"annotations", &config.annotations);
+    hash_fingerprint_part(&mut hasher, b"linux");
     if let Some(linux) = config.linux.as_ref() {
-        hash_fingerprint_part(&mut hasher, b"linux-present");
-        hash_fingerprint_part(&mut hasher, linux.cgroup_parent.as_bytes());
-        let mut sysctls: Vec<_> = linux.sysctls.iter().collect();
-        sysctls.sort_by(|left, right| left.0.cmp(right.0));
-        for (key, value) in sysctls {
-            hash_fingerprint_part(&mut hasher, key.as_bytes());
-            hash_fingerprint_part(&mut hasher, value.as_bytes());
-        }
+        hash_fingerprint_part(&mut hasher, b"present");
+        hash_fingerprint_field(
+            &mut hasher,
+            b"cgroup-parent",
+            linux.cgroup_parent.as_bytes(),
+        );
+        hash_fingerprint_string_map(&mut hasher, b"sysctls", &linux.sysctls);
         hash_linux_resources(&mut hasher, b"resources", linux.resources.as_ref());
         hash_linux_resources(&mut hasher, b"overhead", linux.overhead.as_ref());
     } else {
-        hash_fingerprint_part(&mut hasher, b"linux-absent");
+        hash_fingerprint_part(&mut hasher, b"absent");
     }
+    hash_fingerprint_part(&mut hasher, b"namespace-options");
     if let Some(options) = namespace_options(config) {
-        for value in [options.network, options.pid, options.ipc] {
-            hash_fingerprint_part(&mut hasher, &value.to_be_bytes());
+        hash_fingerprint_part(&mut hasher, b"present");
+        for (field, value) in [
+            (b"network".as_slice(), options.network),
+            (b"pid".as_slice(), options.pid),
+            (b"ipc".as_slice(), options.ipc),
+        ] {
+            hash_fingerprint_field(&mut hasher, field, &value.to_be_bytes());
         }
-        hash_fingerprint_part(&mut hasher, options.target_id.as_bytes());
+        hash_fingerprint_field(&mut hasher, b"target-id", options.target_id.as_bytes());
     } else {
-        hash_fingerprint_part(&mut hasher, b"no-namespace-options");
+        hash_fingerprint_part(&mut hasher, b"absent");
     }
     format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+pub(crate) fn cri_collection_collision_regression_fingerprints() -> (String, String) {
+    let metadata = Some(CriPodSandboxMetadata {
+        name: "collision-pod".to_string(),
+        uid: "collision-uid".to_string(),
+        namespace: "default".to_string(),
+        attempt: 0,
+    });
+    let left = CriPodSandboxConfig {
+        metadata: metadata.clone(),
+        annotations: HashMap::from([("linux-present".to_string(), "user.slice".to_string())]),
+        linux: Some(CriLinuxPodSandboxConfig {
+            cgroup_parent: "system.slice".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let right = CriPodSandboxConfig {
+        metadata,
+        linux: Some(CriLinuxPodSandboxConfig {
+            cgroup_parent: "user.slice".to_string(),
+            sysctls: HashMap::from([("linux-present".to_string(), "system.slice".to_string())]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    (
+        cri_semantic_fingerprint(&left),
+        cri_semantic_fingerprint(&right),
+    )
 }
 
 pub(crate) fn cgroup_parent(config: &CriPodSandboxConfig) -> &str {
@@ -2058,6 +2125,12 @@ fn validate_runtimeclass_overhead_config(
             "RuntimeClass overhead minimum CPU, memory, and Host PIDs must be non-zero".to_string(),
         );
     }
+    if config.host_pids_max > LINUX_PIDS_MAX_LIMIT {
+        return Err(format!(
+            "RuntimeClass Host PIDs {} exceeds Linux numeric pids.max limit {LINUX_PIDS_MAX_LIMIT}",
+            config.host_pids_max
+        ));
+    }
     Ok(())
 }
 
@@ -2870,6 +2943,15 @@ mod tests {
     }
 
     #[test]
+    fn cri_fingerprint_frames_collection_domains_against_v12_collision() {
+        // With the legacy untagged encoding these two requests produced the
+        // same sequence after DNS: an annotation entry could be reinterpreted
+        // as the Linux presence marker/parent and a sysctl entry.
+        let (left, right) = cri_collection_collision_regression_fingerprints();
+        assert_ne!(left, right);
+    }
+
+    #[test]
     fn cri_v1_options_reject_wrong_type_and_missing_identity() {
         assert!(decode_cri_config("other.Type", &[1]).is_err());
         let empty = CriPodSandboxConfig::default().encode_to_vec();
@@ -3245,5 +3327,27 @@ mod tests {
             r#"{"schema_version":1,"minimum_cpu_millicores":250,"minimum_memory_bytes":268435456,"host_pids_max":512,"unknown":true}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn runtimeclass_node_policy_rejects_pids_above_linux_limit_before_controller_io() {
+        let config = ceiling_config(CriLinuxContainerResources::default(), default_overhead());
+        let mut node = poc_overhead_config();
+        node.host_pids_max = LINUX_PIDS_MAX_LIMIT;
+        assert_eq!(
+            host_resource_ceiling_with_config(&config, &HashMap::new(), &node)
+                .unwrap()
+                .pids_max,
+            LINUX_PIDS_MAX_LIMIT.to_string()
+        );
+
+        for invalid in [LINUX_PIDS_MAX_LIMIT + 1, u64::MAX] {
+            node.host_pids_max = invalid;
+            assert!(
+                host_resource_ceiling_with_config(&config, &HashMap::new(), &node)
+                    .unwrap_err()
+                    .contains("exceeds Linux numeric pids.max limit")
+            );
+        }
     }
 }
