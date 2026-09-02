@@ -6957,7 +6957,7 @@ mod tests {
             let calls = Arc::new(AtomicUsize::new(0));
             let property_calls = Arc::clone(&calls);
             let replacement = leaf.clone();
-            let replacement_target = root.join("replacement-leaf");
+            let retired = root.join("retired-leaf");
             let reset = Arc::new(AtomicBool::new(false));
             let reset_call = Arc::clone(&reset);
             let error = cleanup_systemd_target_with(
@@ -6967,12 +6967,10 @@ mod tests {
                 Some(&identity),
                 move || {
                     if property_calls.fetch_add(1, Ordering::AcqRel) == 0 {
-                        fs::remove_dir_all(&replacement).unwrap();
-                        fs::create_dir(&replacement_target).unwrap();
-                        fs::write(replacement_target.join("cgroup.events"), "populated 0\n")
-                            .unwrap();
-                        fs::write(replacement_target.join("cgroup.procs"), "").unwrap();
-                        std::os::unix::fs::symlink(&replacement_target, &replacement).unwrap();
+                        fs::rename(&replacement, &retired).unwrap();
+                        fs::create_dir(&replacement).unwrap();
+                        fs::write(replacement.join("cgroup.events"), "populated 0\n").unwrap();
+                        fs::write(replacement.join("cgroup.procs"), "").unwrap();
                         Err("injected systemctl show collection race".to_string())
                     } else {
                         Ok(HashMap::from([(
