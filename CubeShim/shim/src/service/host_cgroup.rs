@@ -1526,122 +1526,175 @@ impl LifecycleHandle {
 
     fn commit_host_placement(&self, managed: bool) -> Result<(), String> {
         let _operation_lock = self.operation_lock()?;
-        let _record_lock = self.record_lock()?;
-        let mut record = self.read_record()?;
         let expected = if managed {
             Classification::ManagedSandbox
         } else {
             Classification::LegacyTask
         };
-        if record.phase == LifecyclePhase::ContainerdCommitted {
-            if record.classification != expected {
-                return Err("committed takeover classification changed".to_string());
+        let owner_path = self.directory.join(HOST_OWNER_FILE);
+        let (registered, claim_epoch, target) = {
+            // Keep record.lock only around validation and the durable Host
+            // INTENT. The scanner must be able to revoke this epoch while a
+            // systemd/cgroupfs placement call is stuck.
+            let _record_lock = self.record_lock()?;
+            let mut record = self.read_record()?;
+            if record.phase == LifecyclePhase::ContainerdCommitted {
+                if record.classification != expected {
+                    return Err("committed takeover classification changed".to_string());
+                }
+                return Ok(());
             }
-            return Ok(());
+            if record.phase != LifecyclePhase::TakeoverClaimed
+                || record.classification != expected
+                || record.operation_owner.kind != OwnerKind::Server
+                || record.operation_owner.revoked_epoch.is_some()
+                || record.create_state != CreateState::InProgress
+            {
+                return Err(format!(
+                    "Host placement requires an unfenced claimed {:?} server with an IN_PROGRESS Create, found {:?}/{:?}/{:?}/{:?}/revoked={:?}",
+                    expected,
+                    record.phase,
+                    record.classification,
+                    record.operation_owner.kind,
+                    record.create_state,
+                    record.operation_owner.revoked_epoch
+                ));
+            }
+            let registered = record
+                .server
+                .as_ref()
+                .ok_or_else(|| "claimed takeover has no registered server".to_string())?
+                .clone();
+            let server = current_claim_server_identity()?;
+            if !immutable_identity_matches(&registered, &server)
+                || !immutable_identity_matches(&record.operation_owner.identity, &server)
+            {
+                return Err("Host placement caller does not match claimed server".to_string());
+            }
+            if !takeover_cgroup_allowed(&record, &server.cgroup) {
+                return Err(format!(
+                    "claimed server is outside both Host placement locations: {}",
+                    server.cgroup
+                ));
+            }
+
+            let mut host_owner = self.read_host_owner()?;
+            if host_owner.generation != record.generation
+                || host_owner.namespace != record.namespace
+                || host_owner.instance_id != record.instance_id
+                || host_owner.original_cgroup != record.helper.cgroup
+            {
+                return Err("Host owner identity differs from claimed lifecycle".to_string());
+            }
+
+            if managed {
+                if !record.target.managed() {
+                    return Err("managed claim has no managed Host target".to_string());
+                }
+                match host_owner.state {
+                    HostOwnerState::Empty => {
+                        if !matches!(host_owner.target, HostTarget::Pending { .. }) {
+                            return Err(
+                                "EMPTY Host owner unexpectedly has a concrete target".to_string()
+                            );
+                        }
+                        host_owner.state = HostOwnerState::Intent;
+                        host_owner.target = record.target.clone();
+                        host_owner.server = Some(server);
+                        // This INTENT precedes every external Host mutation.
+                        atomic_write_json(&owner_path, &host_owner)?;
+                    }
+                    HostOwnerState::Intent => {
+                        if !host_owner.target.same_location(&record.target)
+                            || host_owner
+                                .server
+                                .as_ref()
+                                .is_none_or(|owner| !immutable_identity_matches(owner, &registered))
+                        {
+                            return Err(
+                                "Host INTENT differs from the durable takeover claim".to_string()
+                            );
+                        }
+                    }
+                    HostOwnerState::Allocated => {
+                        if !host_owner.target.same_location(&record.target) {
+                            return Err("allocated Host owner target changed".to_string());
+                        }
+                    }
+                }
+            } else {
+                if host_owner.state != HostOwnerState::Empty
+                    || !matches!(host_owner.target, HostTarget::Pending { .. })
+                    || !matches!(record.target, HostTarget::Legacy { .. })
+                {
+                    return Err("legacy takeover must retain an EMPTY Host owner".to_string());
+                }
+                verify_target_membership(&record.target, server.pid, true)?;
+                record.server = Some(server.clone());
+                record.operation_owner.identity = server;
+                record.phase = LifecyclePhase::ContainerdCommitted;
+                record.sequence = record
+                    .sequence
+                    .checked_add(1)
+                    .ok_or_else(|| "lifecycle sequence overflow".to_string())?;
+                atomic_write_json(&self.directory.join(RECORD_FILE), &record)?;
+                return Ok(());
+            }
+            (
+                registered,
+                record.operation_owner.epoch,
+                record.target.clone(),
+            )
+        };
+
+        let mut server = current_claim_server_identity()?;
+        if server.cgroup != target.cgroup() {
+            create_and_join_target(&target, server.pid)?;
         }
+        server = current_claim_server_identity()?;
+        if !immutable_identity_matches(&registered, &server) {
+            return Err("server identity changed during Host placement".to_string());
+        }
+        verify_target_membership(&target, server.pid, true)?;
+        let leaf_path = Path::new("/sys/fs/cgroup").join(target.cgroup().trim_start_matches('/'));
+        let leaf_identity = file_identity(&leaf_path)?;
+
+        // Re-enter record.lock only after the external placement completed.
+        // A scanner may have revoked the claim in the meantime; in that case
+        // leave the durable INTENT for cleanup and publish no ALLOCATED/commit.
+        let _record_lock = self.record_lock()?;
+        let mut record = self.read_record()?;
         if record.phase != LifecyclePhase::TakeoverClaimed
             || record.classification != expected
-            || record.operation_owner.kind != OwnerKind::Server
             || record.create_state != CreateState::InProgress
+            || record.operation_owner.kind != OwnerKind::Server
+            || record.operation_owner.epoch != claim_epoch
+            || record.operation_owner.revoked_epoch.is_some()
+            || !immutable_identity_matches(&record.operation_owner.identity, &registered)
+            || !record.target.same_location(&target)
         {
-            return Err(format!(
-                "Host placement requires claimed {:?} server with an IN_PROGRESS Create, found {:?}/{:?}/{:?}/{:?}",
-                expected,
-                record.phase,
-                record.classification,
-                record.operation_owner.kind,
-                record.create_state
-            ));
+            return Err("Host placement claim was revoked or changed during mutation".to_string());
         }
-        let registered = record
-            .server
-            .as_ref()
-            .ok_or_else(|| "claimed takeover has no registered server".to_string())?;
-        let mut server = current_claim_server_identity()?;
-        if !immutable_identity_matches(registered, &server)
-            || !immutable_identity_matches(&record.operation_owner.identity, &server)
-        {
-            return Err("Host placement caller does not match claimed server".to_string());
+        if !immutable_identity_matches(record.server.as_ref().unwrap_or(&registered), &server) {
+            return Err("registered server identity changed during Host placement".to_string());
         }
-        if !takeover_cgroup_allowed(&record, &server.cgroup) {
-            return Err(format!(
-                "claimed server is outside both Host placement locations: {}",
-                server.cgroup
-            ));
-        }
-
-        let owner_path = self.directory.join(HOST_OWNER_FILE);
+        verify_target_membership(&record.target, server.pid, true)?;
         let mut host_owner = self.read_host_owner()?;
         if host_owner.generation != record.generation
-            || host_owner.namespace != record.namespace
-            || host_owner.instance_id != record.instance_id
-            || host_owner.original_cgroup != record.helper.cgroup
+            || host_owner.state == HostOwnerState::Empty
+            || !host_owner.target.same_location(&record.target)
+            || host_owner
+                .server
+                .as_ref()
+                .is_none_or(|owner| !immutable_identity_matches(owner, &server))
         {
-            return Err("Host owner identity differs from claimed lifecycle".to_string());
+            return Err("Host owner changed during placement".to_string());
         }
-
-        if managed {
-            if !record.target.managed() {
-                return Err("managed claim has no managed Host target".to_string());
-            }
-            match host_owner.state {
-                HostOwnerState::Empty => {
-                    if !matches!(host_owner.target, HostTarget::Pending { .. }) {
-                        return Err(
-                            "EMPTY Host owner unexpectedly has a concrete target".to_string()
-                        );
-                    }
-                    host_owner.state = HostOwnerState::Intent;
-                    host_owner.target = record.target.clone();
-                    host_owner.server = Some(server.clone());
-                    // The INTENT is the WAL for every later Host mutation.
-                    atomic_write_json(&owner_path, &host_owner)?;
-                }
-                HostOwnerState::Intent => {
-                    if !host_owner.target.same_location(&record.target)
-                        || host_owner
-                            .server
-                            .as_ref()
-                            .is_none_or(|owner| !immutable_identity_matches(owner, &server))
-                    {
-                        return Err(
-                            "Host INTENT differs from the durable takeover claim".to_string()
-                        );
-                    }
-                }
-                HostOwnerState::Allocated => {
-                    if !host_owner.target.same_location(&record.target) {
-                        return Err("allocated Host owner target changed".to_string());
-                    }
-                }
-            }
-
-            if server.cgroup != record.target.cgroup() {
-                create_and_join_target(&record.target, server.pid)?;
-            }
-            server = current_claim_server_identity()?;
-            if !immutable_identity_matches(registered, &server) {
-                return Err("server identity changed during Host placement".to_string());
-            }
-            verify_target_membership(&record.target, server.pid, true)?;
-            let leaf_path =
-                Path::new("/sys/fs/cgroup").join(record.target.cgroup().trim_start_matches('/'));
-            let leaf_identity = file_identity(&leaf_path)?;
-            record.target.set_leaf_identity(leaf_identity.clone());
-            host_owner.target.set_leaf_identity(leaf_identity);
-            host_owner.server = Some(server.clone());
-            host_owner.state = HostOwnerState::Allocated;
-            atomic_write_json(&owner_path, &host_owner)?;
-        } else {
-            if host_owner.state != HostOwnerState::Empty
-                || !matches!(host_owner.target, HostTarget::Pending { .. })
-                || !matches!(record.target, HostTarget::Legacy { .. })
-            {
-                return Err("legacy takeover must retain an EMPTY Host owner".to_string());
-            }
-            verify_target_membership(&record.target, server.pid, true)?;
-        }
-
+        record.target.set_leaf_identity(leaf_identity.clone());
+        host_owner.target.set_leaf_identity(leaf_identity);
+        host_owner.server = Some(server.clone());
+        host_owner.state = HostOwnerState::Allocated;
+        atomic_write_json(&owner_path, &host_owner)?;
         record.server = Some(server.clone());
         record.operation_owner.identity = server;
         record.phase = LifecyclePhase::ContainerdCommitted;
@@ -1650,10 +1703,7 @@ impl LifecycleHandle {
             .checked_add(1)
             .ok_or_else(|| "lifecycle sequence overflow".to_string())?;
         atomic_write_json(&self.directory.join(RECORD_FILE), &record)?;
-        if managed {
-            verify_target_membership(&record.target, std::process::id() as i32, true)?;
-        }
-        Ok(())
+        verify_target_membership(&record.target, std::process::id() as i32, true)
     }
 
     pub(crate) fn finish_create_success(&self) -> Result<(), String> {
@@ -2013,7 +2063,11 @@ impl LifecycleHandle {
         observed_cgroup: Option<&str>,
     ) -> Result<bool, String> {
         let observed = observed_cgroup.map(containment_identity).transpose()?;
-        let _operation_lock = self.operation_lock()?;
+        // Fault publication is the fencing edge. It must not wait for an
+        // in-flight provider operation that already holds operation.lock:
+        // persist FAILED and revoke that operation's epoch under record.lock
+        // first. Cleanup later waits on operation.lock after both owner
+        // handoffs are durable.
         let _record_lock = self.record_lock()?;
         let mut record = self.read_record()?;
         if !same_scanner_snapshot(snapshot, &record) {
@@ -2033,6 +2087,11 @@ impl LifecycleHandle {
         if record.containment_breach.is_none() {
             record.containment_breach = observed;
         }
+        let old_epoch = record.operation_owner.epoch;
+        record.operation_owner.epoch = old_epoch
+            .checked_add(1)
+            .ok_or_else(|| "operation owner epoch overflow".to_string())?;
+        record.operation_owner.revoked_epoch = Some(old_epoch);
         record.create_state = CreateState::Failed;
         record.failure = Some(FailureResult {
             code: code.to_string(),
@@ -2056,7 +2115,9 @@ impl LifecycleHandle {
         observed_cgroup: Option<&str>,
     ) -> Result<bool, String> {
         let observed = observed_cgroup.map(containment_identity).transpose()?;
-        let _operation_lock = self.operation_lock()?;
+        // Revoke and transition to cleanup under record.lock before waiting
+        // for any operation barrier. This keeps a stuck provider RPC from
+        // blocking durable fencing and owner handoff.
         let _record_lock = self.record_lock()?;
         let mut record = self.read_record()?;
         if !same_scanner_snapshot(snapshot, &record) {
@@ -3167,10 +3228,28 @@ fn observe_process(expected: &ProcessIdentity) -> Result<ProcessObservation, Str
     let pidfd = unsafe { OwnedFd::from_raw_fd(raw) };
     let actual = match process_identity_for_expected(expected) {
         Ok(actual) => actual,
-        Err(_error) if !Path::new(&format!("/proc/{}", expected.pid)).exists() => {
-            return Ok(ProcessObservation::Gone)
+        Err(identity_error) => {
+            let process_path = PathBuf::from(format!("/proc/{}", expected.pid));
+            match process_path.try_exists() {
+                Ok(exists) => {
+                    let presence = if exists {
+                        ProcPresence::Present
+                    } else {
+                        ProcPresence::Missing
+                    };
+                    if process_identity_failure_means_gone(presence) {
+                        return Ok(ProcessObservation::Gone);
+                    }
+                    return Err(identity_error);
+                }
+                Err(proc_error) => {
+                    return Err(format!(
+                    "{identity_error}; inspect {} after live pidfd identity error: {proc_error}",
+                    process_path.display()
+                ))
+                }
+            }
         }
-        Err(error) => return Err(error),
     };
     if !immutable_identity_matches(expected, &actual) {
         return Ok(ProcessObservation::Reused);
@@ -3185,6 +3264,10 @@ fn observe_process(expected: &ProcessIdentity) -> Result<ProcessObservation, Str
 fn pidfd_open_failure_means_gone(error: &std::io::Error, presence: ProcPresence) -> bool {
     error.raw_os_error() == Some(libc::ESRCH)
         || (error.raw_os_error() == Some(libc::EINVAL) && presence == ProcPresence::Missing)
+}
+
+fn process_identity_failure_means_gone(presence: ProcPresence) -> bool {
+    presence == ProcPresence::Missing
 }
 
 fn immutable_process_is_live(expected: &ProcessIdentity) -> Result<bool, String> {
@@ -3203,29 +3286,8 @@ async fn converge_cleanup(handle: &LifecycleHandle, queue: &Path) -> Result<(), 
         .map(|error| format!("Host target identity reconciliation: {error}"));
     ensure_cleanup_handoff(handle, queue)?;
     ensure_scanner_owner(handle)?;
-    // Revoke is already durable before this barrier. A stale server may have
-    // verified its epoch immediately before revoke while holding the operation
-    // lock; wait for that in-flight allocate/release to finish before enabling
-    // the independent RuntimeResource cleanup consumer. No new forward owner
-    // can start once phase/epoch have changed.
-    {
-        let _operation_barrier = handle.operation_lock()?;
-        let _record_lock = handle.record_lock()?;
-        let barrier_record = handle.read_record()?;
-        if barrier_record.operation_owner.kind != OwnerKind::Scanner
-            || !matches!(
-                barrier_record.phase,
-                LifecyclePhase::CleanupOwnersDurable | LifecyclePhase::ServerStopped
-            )
-        {
-            return Err("cleanup operation barrier lost scanner ownership".to_string());
-        }
-    }
-    let barrier_generation = handle.read_record()?.generation;
-    mark_runtime_cleanup_ready(queue, &barrier_generation)?;
     let mut record = handle.read_record()?;
     if record.phase == LifecyclePhase::CleanupOwnersDurable {
-        let mut server_stopped = true;
         if let Some(server) = record.server.as_ref() {
             match observe_process(server)? {
                 ProcessObservation::Gone | ProcessObservation::Reused => {}
@@ -3245,15 +3307,8 @@ async fn converge_cleanup(handle: &LifecycleHandle, queue: &Path) -> Result<(), 
                         && current.phase == LifecyclePhase::CleanupOwnersDurable
                         && current.containment_breach.is_some();
                     signal_exact_process(server, &pidfd, breach_is_durable)?;
-                    server_stopped = false;
                 }
             }
-        }
-        if !server_stopped {
-            return match host_reconcile_error {
-                Some(error) => Err(error),
-                None => Ok(()),
-            };
         }
         handle.update_record(|current| {
             if current.phase == LifecyclePhase::CleanupOwnersDurable {
@@ -3261,12 +3316,29 @@ async fn converge_cleanup(handle: &LifecycleHandle, queue: &Path) -> Result<(), 
             }
             Ok(())
         })?;
-        mark_host_cleanup_ready(queue, &record.generation)?;
         record = handle.read_record()?;
     }
     if record.phase != LifecyclePhase::ServerStopped {
         return Ok(());
     }
+
+    // Revocation and both owner handoffs are durable, and the exact server has
+    // now exited. Its death releases any operation.lock held across a stuck
+    // provider RPC. Cross that barrier only after signalling/waiting, then
+    // enable the independent cleanup consumers; no forward owner can start in
+    // SERVER_STOPPED.
+    {
+        let _operation_barrier = handle.operation_lock()?;
+        let _record_lock = handle.record_lock()?;
+        let barrier_record = handle.read_record()?;
+        if barrier_record.operation_owner.kind != OwnerKind::Scanner
+            || barrier_record.phase != LifecyclePhase::ServerStopped
+        {
+            return Err("cleanup operation barrier lost stopped scanner ownership".to_string());
+        }
+    }
+    mark_runtime_cleanup_ready(queue, &record.generation)?;
+    mark_host_cleanup_ready(queue, &record.generation)?;
     let host_pending = cleanup_queue_path(queue, HOST_QUEUE_DIRECTORY, &record.generation).exists();
     let runtime_pending =
         cleanup_queue_path(queue, RUNTIME_QUEUE_DIRECTORY, &record.generation).exists();
@@ -5037,7 +5109,8 @@ mod tests {
     use oci_spec::runtime::{LinuxBuilder, SpecBuilder};
     use std::os::unix::net::UnixListener;
     use std::process::Command as ProcessCommand;
-    use std::sync::{Arc, Barrier};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc, Barrier};
     use std::thread;
 
     fn params(namespace: &str, id: &str) -> BootstrapParams {
@@ -6001,6 +6074,209 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn scanner_fences_and_handoffs_before_waiting_for_operation_barrier() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-host-cgroup-scanner-fence-before-barrier-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let queue = root.join("queue");
+        fs::create_dir_all(queue.join(HOST_QUEUE_DIRECTORY)).unwrap();
+        fs::create_dir_all(queue.join(RUNTIME_QUEUE_DIRECTORY)).unwrap();
+        let handle = lifecycle_fixture(&root, LifecyclePhase::ContainerdCommitted);
+        let server = process_identity(std::process::id() as i32).unwrap();
+        handle
+            .update_record(|record| {
+                record.operation_owner = OperationOwner {
+                    kind: OwnerKind::Server,
+                    epoch: 17,
+                    identity: server,
+                    revoked_epoch: None,
+                };
+                record.create_state = CreateState::InProgress;
+                Ok(())
+            })
+            .unwrap();
+        let operation = handle
+            .begin_runtime_intent(&RuntimeResourceOwner::intent(
+                "/run/cubelet.sock".to_string(),
+                "sandbox".to_string(),
+                "lease".to_string(),
+                1,
+                "allocation".to_string(),
+            ))
+            .unwrap();
+
+        let snapshot = handle.read_record().unwrap();
+        let publisher = handle.clone();
+        let (published_tx, published_rx) = mpsc::channel();
+        let publish_thread = thread::spawn(move || {
+            published_tx
+                .send(publisher.scanner_publish_failure_if_current(
+                    &snapshot,
+                    "DEADLINE_EXCEEDED",
+                    "provider operation stuck",
+                    None,
+                ))
+                .unwrap();
+        });
+        assert!(published_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("scanner failure publication waited for operation.lock")
+            .unwrap());
+        publish_thread.join().unwrap();
+
+        let failed = handle.read_record().unwrap();
+        assert_eq!(failed.create_state, CreateState::Failed);
+        assert_eq!(failed.operation_owner.epoch, 18);
+        assert_eq!(failed.operation_owner.revoked_epoch, Some(17));
+        assert!(operation.verify().is_err());
+
+        let cleanup = handle.clone();
+        let cleanup_queue = queue.clone();
+        let (handoff_tx, handoff_rx) = mpsc::channel();
+        let handoff_thread = thread::spawn(move || {
+            let result = (|| {
+                let current = cleanup.read_record()?;
+                if !cleanup.scanner_request_cleanup_if_current(
+                    &current,
+                    "provider operation stuck",
+                    None,
+                )? {
+                    return Err("scanner cleanup snapshot unexpectedly changed".to_string());
+                }
+                ensure_cleanup_handoff(&cleanup, &cleanup_queue)?;
+                Ok(cleanup.read_record()?.phase)
+            })();
+            handoff_tx.send(result).unwrap();
+        });
+        assert_eq!(
+            handoff_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("scanner owner handoff waited for operation.lock")
+                .unwrap(),
+            LifecyclePhase::CleanupOwnersDurable
+        );
+        handoff_thread.join().unwrap();
+
+        let queued: RuntimeCleanupJob = read_json(&cleanup_queue_path(
+            &queue,
+            RUNTIME_QUEUE_DIRECTORY,
+            "fixture-generation",
+        ))
+        .unwrap();
+        assert_eq!(queued.owner.state(), RuntimeOwnerState::Intent);
+        assert!(!queued.ready_for_cleanup);
+        drop(operation);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_signals_stuck_server_before_operation_barrier() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-host-cgroup-signal-before-barrier-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let queue = root.join("queue");
+        fs::create_dir_all(queue.join(HOST_QUEUE_DIRECTORY)).unwrap();
+        fs::create_dir_all(queue.join(RUNTIME_QUEUE_DIRECTORY)).unwrap();
+        let handle = lifecycle_fixture(&root, LifecyclePhase::ContainerdCommitted);
+        let mut child = ProcessCommand::new("sleep").arg("5").spawn().unwrap();
+        let child_identity = process_identity(child.id() as i32).unwrap();
+        handle
+            .update_record(|record| {
+                record.server = Some(child_identity.clone());
+                record.target = HostTarget::Legacy {
+                    cgroup: child_identity.cgroup.clone(),
+                };
+                record.operation_owner = OperationOwner {
+                    kind: OwnerKind::Server,
+                    epoch: 23,
+                    identity: child_identity.clone(),
+                    revoked_epoch: None,
+                };
+                record.create_state = CreateState::Failed;
+                record.failure = Some(FailureResult {
+                    code: "DEADLINE_EXCEEDED".to_string(),
+                    message: "provider operation stuck".to_string(),
+                    published_at_ms: unix_time_ms().unwrap(),
+                    waiter_count: 0,
+                    drained: true,
+                });
+                Ok(())
+            })
+            .unwrap();
+        let runtime_owner = RuntimeResourceOwner::intent(
+            "/run/cubelet.sock".to_string(),
+            "sandbox".to_string(),
+            "lease".to_string(),
+            1,
+            "allocation".to_string(),
+        );
+        let mut runtime_owner = runtime_owner;
+        runtime_owner.generation_id = "fixture-generation".to_string();
+        atomic_write_json(&handle.directory.join(RUNTIME_OWNER_FILE), &runtime_owner).unwrap();
+
+        let child_dead = Arc::new(AtomicBool::new(false));
+        let reaped = Arc::clone(&child_dead);
+        let reaper = thread::spawn(move || {
+            child.wait().unwrap();
+            reaped.store(true, Ordering::Release);
+        });
+        let lock_handle = handle.clone();
+        let lock_released = Arc::clone(&child_dead);
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            let operation_lock = lock_handle.operation_lock().unwrap();
+            locked_tx.send(()).unwrap();
+            while !lock_released.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            drop(operation_lock);
+        });
+        locked_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let snapshot = handle.read_record().unwrap();
+        assert!(handle
+            .scanner_request_cleanup_if_current(&snapshot, "provider operation stuck", None)
+            .unwrap());
+        ensure_cleanup_handoff(&handle, &queue).unwrap();
+        assert_eq!(
+            handle.read_record().unwrap().phase,
+            LifecyclePhase::CleanupOwnersDurable
+        );
+
+        let started = std::time::Instant::now();
+        converge_cleanup(&handle, &queue).await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cleanup waited for operation.lock before signalling the server"
+        );
+        reaper.join().unwrap();
+        holder.join().unwrap();
+        assert_eq!(
+            handle.read_record().unwrap().phase,
+            LifecyclePhase::ServerStopped
+        );
+        let host: HostCleanupJob = read_json(&cleanup_queue_path(
+            &queue,
+            HOST_QUEUE_DIRECTORY,
+            "fixture-generation",
+        ))
+        .unwrap();
+        let runtime: RuntimeCleanupJob = read_json(&cleanup_queue_path(
+            &queue,
+            RUNTIME_QUEUE_DIRECTORY,
+            "fixture-generation",
+        ))
+        .unwrap();
+        assert!(host.ready_for_cleanup);
+        assert!(runtime.ready_for_cleanup);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn dropped_create_waiter_never_publishes_operation_result() {
         let root = std::env::temp_dir().join(format!(
@@ -6446,6 +6722,9 @@ mod tests {
             &eperm,
             ProcPresence::Missing
         ));
+        assert!(process_identity_failure_means_gone(ProcPresence::Missing));
+        assert!(!process_identity_failure_means_gone(ProcPresence::Present));
+        assert!(!process_identity_failure_means_gone(ProcPresence::Unknown));
     }
 
     #[test]
