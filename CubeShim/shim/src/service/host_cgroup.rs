@@ -28,7 +28,7 @@ use zbus::zvariant::Value as ZbusValue;
 use crate::service::bootstrap::BootstrapParams;
 use crate::service::runtime_resource;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const DEFAULT_LIFECYCLE_ROOT: &str = "/data/cubelet/shim-lifecycle";
 const LIFECYCLE_ROOT_ENV: &str = "CUBE_SHIM_LIFECYCLE_ROOT";
 const LIFECYCLE_DIR_ENV: &str = "CUBE_SHIM_LIFECYCLE_DIR";
@@ -59,6 +59,7 @@ const SANDBOX_ID_ANNOTATION: &str = "io.kubernetes.cri.sandbox-id";
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum Classification {
+    Pending,
     ManagedSandbox,
     LegacyTask,
 }
@@ -69,6 +70,7 @@ enum LifecyclePhase {
     Prepared,
     ServerIdentified,
     SocketReady,
+    TakeoverClaimed,
     ContainerdCommitted,
     CleanupRequired,
     CleanupOwnersDurable,
@@ -150,6 +152,9 @@ struct OperationOwner {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "manager", rename_all = "snake_case")]
 enum HostTarget {
+    Pending {
+        original_cgroup: String,
+    },
     Systemd {
         oci_path: String,
         slice: String,
@@ -172,6 +177,7 @@ enum HostTarget {
 impl HostTarget {
     fn cgroup(&self) -> &str {
         match self {
+            Self::Pending { original_cgroup } => original_cgroup,
             Self::Systemd { cgroup, .. }
             | Self::Cgroupfs { cgroup, .. }
             | Self::Legacy { cgroup } => cgroup,
@@ -179,7 +185,7 @@ impl HostTarget {
     }
 
     fn managed(&self) -> bool {
-        !matches!(self, Self::Legacy { .. })
+        matches!(self, Self::Systemd { .. } | Self::Cgroupfs { .. })
     }
 
     fn leaf_identity(&self) -> Option<&FileIdentity> {
@@ -187,7 +193,7 @@ impl HostTarget {
             Self::Systemd { leaf_identity, .. } | Self::Cgroupfs { leaf_identity, .. } => {
                 leaf_identity.as_ref()
             }
-            Self::Legacy { .. } => None,
+            Self::Pending { .. } | Self::Legacy { .. } => None,
         }
     }
 
@@ -196,7 +202,7 @@ impl HostTarget {
             Self::Systemd { leaf_identity, .. } | Self::Cgroupfs { leaf_identity, .. } => {
                 *leaf_identity = Some(identity);
             }
-            Self::Legacy { .. } => {}
+            Self::Pending { .. } | Self::Legacy { .. } => {}
         }
     }
 
@@ -208,12 +214,20 @@ impl HostTarget {
             | Self::Cgroupfs {
                 parent_identity, ..
             } => Some(parent_identity),
-            Self::Legacy { .. } => None,
+            Self::Pending { .. } | Self::Legacy { .. } => None,
         }
     }
 
     fn same_location(&self, other: &Self) -> bool {
         match (self, other) {
+            (
+                Self::Pending {
+                    original_cgroup: left,
+                },
+                Self::Pending {
+                    original_cgroup: right,
+                },
+            ) => left == right,
             (
                 Self::Systemd {
                     oci_path: left_oci,
@@ -297,6 +311,7 @@ struct LifecycleRecord {
     bundle: String,
     bundle_identity: FileIdentity,
     created_at_ms: u128,
+    takeover_claimed_at_ms: Option<u128>,
     launch_nonce_sha256: String,
     expected_server_path: String,
     expected_server_executable: FileIdentity,
@@ -322,8 +337,18 @@ struct HostCgroupOwner {
     generation: String,
     namespace: String,
     instance_id: String,
+    state: HostOwnerState,
     target: HostTarget,
     original_cgroup: String,
+    server: Option<ProcessIdentity>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum HostOwnerState {
+    Empty,
+    Intent,
+    Allocated,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -619,6 +644,22 @@ fn publish_create_result_once(
     handle: &LifecycleHandle,
     result: &PersistedCreateResult,
 ) -> Result<(), String> {
+    let current = match handle.current_create_result() {
+        Ok(current) => current,
+        Err(_error) if !handle.directory.join(RECORD_FILE).exists() => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if let Some(existing) = current {
+        if &existing != result {
+            eprintln!(
+                "Create result publication lost ownership to durable terminal result: intended={result:?} durable={existing:?}"
+            );
+        }
+        // The scanner may take over an abandoned IN_PROGRESS result before
+        // cleanup.  Once any terminal result is durable it is authoritative;
+        // the superseded publisher must stop rather than retry forever.
+        return Ok(());
+    }
     match result {
         PersistedCreateResult::Succeeded => handle.finish_create_success(),
         PersistedCreateResult::Failed { code, message } => {
@@ -857,6 +898,10 @@ impl LifecycleOperation {
 }
 
 impl LifecycleHandle {
+    pub(crate) fn classification(&self) -> Result<Classification, String> {
+        Ok(self.read_record()?.classification)
+    }
+
     pub(crate) fn acquire_socket_path_guard(
         &self,
         address: &str,
@@ -1023,6 +1068,7 @@ impl LifecycleHandle {
             bundle: bundle.display().to_string(),
             bundle_identity,
             created_at_ms: unix_time_ms()?,
+            takeover_claimed_at_ms: None,
             launch_nonce_sha256: sha256_hex(nonce),
             expected_server_path: executable.display().to_string(),
             expected_server_executable: file_identity(&executable)?,
@@ -1050,8 +1096,10 @@ impl LifecycleHandle {
             generation: generation.clone(),
             namespace: params.namespace.clone(),
             instance_id: params.instance_id.clone(),
+            state: HostOwnerState::Empty,
             target,
             original_cgroup: record.helper.cgroup.clone(),
+            server: None,
         };
         atomic_write_json(&directory.join(HOST_OWNER_FILE), &host_owner)?;
         atomic_write_json(
@@ -1090,7 +1138,25 @@ impl LifecycleHandle {
     }
 
     fn read_record(&self) -> Result<LifecycleRecord, String> {
-        read_json(&self.directory.join(RECORD_FILE))
+        let record: LifecycleRecord = read_json(&self.directory.join(RECORD_FILE))?;
+        if record.schema_version != SCHEMA_VERSION || record.generation.is_empty() {
+            return Err(format!(
+                "lifecycle record has unsupported schema or empty generation: {}/{}",
+                record.schema_version, record.generation
+            ));
+        }
+        Ok(record)
+    }
+
+    fn read_host_owner(&self) -> Result<HostCgroupOwner, String> {
+        let owner: HostCgroupOwner = read_json(&self.directory.join(HOST_OWNER_FILE))?;
+        if owner.schema_version != SCHEMA_VERSION || owner.generation.is_empty() {
+            return Err(format!(
+                "Host owner has unsupported schema or empty generation: {}/{}",
+                owner.schema_version, owner.generation
+            ));
+        }
+        Ok(owner)
     }
 
     fn update_record(
@@ -1235,36 +1301,103 @@ impl LifecycleHandle {
         Ok(())
     }
 
-    pub(crate) fn begin_create(
+    pub(crate) fn begin_managed_create(
         &self,
-        expected: Classification,
+        bundle: &Path,
+        cgroup_parent: &str,
         fingerprint: &[u8],
     ) -> Result<CreateAdmission, BeginCreateError> {
-        let fingerprint = sha256_hex(fingerprint);
-        let server = server_process_identity(std::process::id() as i32)
+        let record = self.read_record().map_err(BeginCreateError::Invalid)?;
+        validate_takeover_bundle_identity(&record, bundle).map_err(BeginCreateError::Invalid)?;
+        if record.namespace != "k8s.io" {
+            return Err(BeginCreateError::Invalid(
+                "managed sandbox requires bootstrap namespace k8s.io".to_string(),
+            ));
+        }
+        validate_containerd_id(&record.instance_id).map_err(BeginCreateError::Invalid)?;
+        let target = target_from_cri_parent(cgroup_parent, &record.instance_id)
             .map_err(BeginCreateError::Invalid)?;
+        self.claim_create(Classification::ManagedSandbox, target, fingerprint)
+    }
+
+    pub(crate) fn begin_legacy_create(
+        &self,
+        bundle: &Path,
+        instance_id: &str,
+        fingerprint: &[u8],
+    ) -> Result<CreateAdmission, BeginCreateError> {
+        let record = self.read_record().map_err(BeginCreateError::Invalid)?;
+        validate_containerd_id(instance_id).map_err(BeginCreateError::Invalid)?;
+        if instance_id != record.instance_id {
+            return Err(BeginCreateError::Invalid(format!(
+                "legacy CreateTask id {instance_id} does not match bootstrap {}",
+                record.instance_id
+            )));
+        }
+        let bundle = validate_takeover_bundle_identity(&record, bundle)
+            .map_err(BeginCreateError::Invalid)?;
+        let spec = load_spec(&bundle).map_err(BeginCreateError::Invalid)?;
+        let params = BootstrapParams {
+            namespace: record.namespace.clone(),
+            instance_id: record.instance_id.clone(),
+            ..Default::default()
+        };
+        let (classification, target) = classify_and_target(&spec, &params, &record.helper.cgroup)
+            .map_err(BeginCreateError::Invalid)?;
+        if classification != Classification::LegacyTask {
+            return Err(BeginCreateError::Invalid(
+                "CreateTask cannot claim a managed Sandbox lifecycle".to_string(),
+            ));
+        }
+        self.claim_create(classification, target, fingerprint)
+    }
+
+    fn claim_create(
+        &self,
+        expected: Classification,
+        target: HostTarget,
+        fingerprint: &[u8],
+    ) -> Result<CreateAdmission, BeginCreateError> {
+        let _operation_lock = self.operation_lock().map_err(BeginCreateError::Invalid)?;
+        let fingerprint = sha256_hex(fingerprint);
+        let server = current_claim_server_identity().map_err(BeginCreateError::Invalid)?;
         let mut admission = CreateAdmission::First;
-        self.update_record(|record| {
-            if record.classification != expected {
-                return Err(format!(
-                    "takeover RPC classification {:?} does not match {:?}",
-                    expected, record.classification
-                ));
-            }
-            if record.phase == LifecyclePhase::ContainerdCommitted {
+        let mut commit_attempted = false;
+        let mut intended_sequence = None;
+        let mut intended_waiters = None;
+        let update = self.update_record(|record| {
+            if matches!(
+                record.phase,
+                LifecyclePhase::TakeoverClaimed | LifecyclePhase::ContainerdCommitted
+            ) {
+                if record.classification != expected || !record.target.same_location(&target) {
+                    return Err(format!(
+                        "CONFLICT: takeover RPC {:?} does not match durable {:?}",
+                        expected, record.classification
+                    ));
+                }
                 if record.create_fingerprint.as_deref() == Some(fingerprint.as_str()) {
                     let owner = &record.operation_owner.identity;
                     if record.operation_owner.kind != OwnerKind::Server
                         || !immutable_identity_matches(owner, &server)
-                        || owner.cgroup != record.target.cgroup()
-                        || server.cgroup != record.target.cgroup()
                     {
+                        return Err("retry caller or claimed server identity changed".to_string());
+                    }
+                    if record.phase == LifecyclePhase::ContainerdCommitted {
+                        if owner.cgroup != record.target.cgroup()
+                            || server.cgroup != record.target.cgroup()
+                        {
+                            return Err(
+                                "retry caller or committed owner containment identity changed"
+                                    .to_string(),
+                            );
+                        }
+                        verify_target_membership(&record.target, server.pid, true)?;
+                    } else if !takeover_cgroup_allowed(record, &server.cgroup) {
                         return Err(
-                            "retry caller or committed owner containment identity changed"
-                                .to_string(),
+                            "retry caller is outside both claimed Host locations".to_string()
                         );
                     }
-                    verify_target_membership(&record.target, server.pid, true)?;
                     record.create_waiters = record
                         .create_waiters
                         .checked_add(1)
@@ -1277,6 +1410,14 @@ impl LifecycleHandle {
                             return Err("committed Create has no durable state".to_string())
                         }
                     };
+                    intended_sequence = Some(
+                        record
+                            .sequence
+                            .checked_add(1)
+                            .ok_or_else(|| "lifecycle sequence overflow".to_string())?,
+                    );
+                    intended_waiters = Some(record.create_waiters);
+                    commit_attempted = true;
                     return Ok(());
                 }
                 return Err(
@@ -1289,6 +1430,13 @@ impl LifecycleHandle {
                     record.phase
                 ));
             }
+            if record.classification != Classification::Pending
+                || !matches!(record.target, HostTarget::Pending { .. })
+            {
+                return Err(
+                    "unclaimed lifecycle has a concrete classification or target".to_string(),
+                );
+            }
             let registered = record
                 .server
                 .as_ref()
@@ -1299,9 +1447,15 @@ impl LifecycleHandle {
             if registered.cgroup != record.target.cgroup()
                 || server.cgroup != record.target.cgroup()
             {
-                return Err("takeover caller is outside the exact Host target".to_string());
+                return Err("first takeover caller left the bootstrap cgroup".to_string());
             }
             verify_target_membership(&record.target, server.pid, true)?;
+            if expected == Classification::ManagedSandbox && target.leaf_identity().is_some() {
+                return Err(format!(
+                    "refuse to reuse an existing managed Host leaf {}",
+                    target.cgroup()
+                ));
+            }
             let old_epoch = record.operation_owner.epoch;
             record.operation_owner = OperationOwner {
                 kind: OwnerKind::Server,
@@ -1311,47 +1465,188 @@ impl LifecycleHandle {
                 identity: server.clone(),
                 revoked_epoch: None,
             };
-            record.phase = LifecyclePhase::ContainerdCommitted;
+            record.classification = expected;
+            record.target = target.clone();
+            record.phase = LifecyclePhase::TakeoverClaimed;
+            record.takeover_claimed_at_ms = Some(unix_time_ms()?);
             record.create_state = CreateState::InProgress;
             record.create_fingerprint = Some(fingerprint.clone());
             record.create_waiters = 1;
+            intended_sequence = Some(
+                record
+                    .sequence
+                    .checked_add(1)
+                    .ok_or_else(|| "lifecycle sequence overflow".to_string())?,
+            );
+            intended_waiters = Some(record.create_waiters);
+            commit_attempted = true;
             Ok(())
-        })
-        .map_err(|error| {
-            if let Some(message) = error.strip_prefix("CONFLICT: ") {
+        });
+        if let Err(error) = update {
+            // rename(2) may have committed the exact claim even when the
+            // following directory fsync reports an error.  While the unique
+            // operation lock is still held, read back the record and complete
+            // the parent fsync.  The current caller retains First/retry
+            // ownership; it must never strand an ownerless IN_PROGRESS claim.
+            if commit_attempted {
+                let _record_lock = self.record_lock().map_err(BeginCreateError::Invalid)?;
+                let durable = self.read_record().map_err(BeginCreateError::Invalid)?;
+                let exact = matches!(
+                    durable.phase,
+                    LifecyclePhase::TakeoverClaimed | LifecyclePhase::ContainerdCommitted
+                ) && durable.classification == expected
+                    && durable.target.same_location(&target)
+                    && durable.create_fingerprint.as_deref() == Some(fingerprint.as_str())
+                    && durable.operation_owner.kind == OwnerKind::Server
+                    && immutable_identity_matches(&durable.operation_owner.identity, &server)
+                    && durable.create_state != CreateState::None
+                    && Some(durable.sequence) == intended_sequence
+                    && Some(durable.create_waiters) == intended_waiters;
+                if exact {
+                    sync_directory(&self.directory).map_err(BeginCreateError::Invalid)?;
+                    return Ok(admission);
+                }
+            }
+            return Err(if let Some(message) = error.strip_prefix("CONFLICT: ") {
                 BeginCreateError::Conflict(message.to_string())
             } else {
                 BeginCreateError::Invalid(error)
-            }
-        })?;
+            });
+        }
         Ok(admission)
     }
 
-    pub(crate) fn validate_takeover_bundle(
-        &self,
-        expected: Classification,
-        bundle: &Path,
-    ) -> Result<(), String> {
-        let record = self.read_record()?;
-        let bundle = fs::canonicalize(bundle).map_err(|error| {
-            format!("canonicalize takeover bundle {}: {error}", bundle.display())
-        })?;
-        if file_identity(&bundle)? != record.bundle_identity
-            || bundle.display().to_string() != record.bundle
-        {
-            return Err("takeover bundle identity does not match PREPARED".to_string());
-        }
-        let spec = load_spec(&bundle)?;
-        let params = BootstrapParams {
-            namespace: record.namespace.clone(),
-            instance_id: record.instance_id.clone(),
-            ..Default::default()
+    pub(crate) fn commit_legacy_takeover(&self) -> Result<(), String> {
+        self.commit_host_placement(false)
+    }
+
+    pub(crate) fn place_managed_server(&self) -> Result<(), String> {
+        self.commit_host_placement(true)
+    }
+
+    fn commit_host_placement(&self, managed: bool) -> Result<(), String> {
+        let _operation_lock = self.operation_lock()?;
+        let _record_lock = self.record_lock()?;
+        let mut record = self.read_record()?;
+        let expected = if managed {
+            Classification::ManagedSandbox
+        } else {
+            Classification::LegacyTask
         };
-        let (classification, target) = classify_and_target(&spec, &params, &record.helper.cgroup)?;
-        if classification != expected || target != record.target {
-            return Err(
-                "takeover classification or Host target changed after PREPARED".to_string(),
-            );
+        if record.phase == LifecyclePhase::ContainerdCommitted {
+            if record.classification != expected {
+                return Err("committed takeover classification changed".to_string());
+            }
+            return Ok(());
+        }
+        if record.phase != LifecyclePhase::TakeoverClaimed
+            || record.classification != expected
+            || record.operation_owner.kind != OwnerKind::Server
+        {
+            return Err(format!(
+                "Host placement requires claimed {:?} server, found {:?}/{:?}/{:?}",
+                expected, record.phase, record.classification, record.operation_owner.kind
+            ));
+        }
+        let registered = record
+            .server
+            .as_ref()
+            .ok_or_else(|| "claimed takeover has no registered server".to_string())?;
+        let mut server = current_claim_server_identity()?;
+        if !immutable_identity_matches(registered, &server)
+            || !immutable_identity_matches(&record.operation_owner.identity, &server)
+        {
+            return Err("Host placement caller does not match claimed server".to_string());
+        }
+        if !takeover_cgroup_allowed(&record, &server.cgroup) {
+            return Err(format!(
+                "claimed server is outside both Host placement locations: {}",
+                server.cgroup
+            ));
+        }
+
+        let owner_path = self.directory.join(HOST_OWNER_FILE);
+        let mut host_owner = self.read_host_owner()?;
+        if host_owner.generation != record.generation
+            || host_owner.namespace != record.namespace
+            || host_owner.instance_id != record.instance_id
+            || host_owner.original_cgroup != record.helper.cgroup
+        {
+            return Err("Host owner identity differs from claimed lifecycle".to_string());
+        }
+
+        if managed {
+            if !record.target.managed() {
+                return Err("managed claim has no managed Host target".to_string());
+            }
+            match host_owner.state {
+                HostOwnerState::Empty => {
+                    if !matches!(host_owner.target, HostTarget::Pending { .. }) {
+                        return Err(
+                            "EMPTY Host owner unexpectedly has a concrete target".to_string()
+                        );
+                    }
+                    host_owner.state = HostOwnerState::Intent;
+                    host_owner.target = record.target.clone();
+                    host_owner.server = Some(server.clone());
+                    // The INTENT is the WAL for every later Host mutation.
+                    atomic_write_json(&owner_path, &host_owner)?;
+                }
+                HostOwnerState::Intent => {
+                    if !host_owner.target.same_location(&record.target)
+                        || host_owner
+                            .server
+                            .as_ref()
+                            .is_none_or(|owner| !immutable_identity_matches(owner, &server))
+                    {
+                        return Err(
+                            "Host INTENT differs from the durable takeover claim".to_string()
+                        );
+                    }
+                }
+                HostOwnerState::Allocated => {
+                    if !host_owner.target.same_location(&record.target) {
+                        return Err("allocated Host owner target changed".to_string());
+                    }
+                }
+            }
+
+            if server.cgroup != record.target.cgroup() {
+                create_and_join_target(&record.target, server.pid)?;
+            }
+            server = current_claim_server_identity()?;
+            if !immutable_identity_matches(registered, &server) {
+                return Err("server identity changed during Host placement".to_string());
+            }
+            verify_target_membership(&record.target, server.pid, true)?;
+            let leaf_path =
+                Path::new("/sys/fs/cgroup").join(record.target.cgroup().trim_start_matches('/'));
+            let leaf_identity = file_identity(&leaf_path)?;
+            record.target.set_leaf_identity(leaf_identity.clone());
+            host_owner.target.set_leaf_identity(leaf_identity);
+            host_owner.server = Some(server.clone());
+            host_owner.state = HostOwnerState::Allocated;
+            atomic_write_json(&owner_path, &host_owner)?;
+        } else {
+            if host_owner.state != HostOwnerState::Empty
+                || !matches!(host_owner.target, HostTarget::Pending { .. })
+                || !matches!(record.target, HostTarget::Legacy { .. })
+            {
+                return Err("legacy takeover must retain an EMPTY Host owner".to_string());
+            }
+            verify_target_membership(&record.target, server.pid, true)?;
+        }
+
+        record.server = Some(server.clone());
+        record.operation_owner.identity = server;
+        record.phase = LifecyclePhase::ContainerdCommitted;
+        record.sequence = record
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| "lifecycle sequence overflow".to_string())?;
+        atomic_write_json(&self.directory.join(RECORD_FILE), &record)?;
+        if managed {
+            verify_target_membership(&record.target, std::process::id() as i32, true)?;
         }
         Ok(())
     }
@@ -1382,9 +1677,12 @@ impl LifecycleHandle {
 
     pub(crate) fn finish_create_failure(&self, code: &str, message: &str) -> Result<(), String> {
         self.update_record(|record| {
-            if record.phase != LifecyclePhase::ContainerdCommitted {
+            if !matches!(
+                record.phase,
+                LifecyclePhase::TakeoverClaimed | LifecyclePhase::ContainerdCommitted
+            ) {
                 return Err(format!(
-                    "failed Create requires CONTAINERD_COMMITTED, found {:?}",
+                    "failed Create requires TAKEOVER_CLAIMED or CONTAINERD_COMMITTED, found {:?}",
                     record.phase
                 ));
             }
@@ -1519,7 +1817,7 @@ impl LifecycleHandle {
                     .display()
                     .to_string()
             }
-            HostTarget::Legacy { .. } => {
+            HostTarget::Pending { .. } | HostTarget::Legacy { .. } => {
                 return Err("managed lifecycle unexpectedly uses a legacy Host target".to_string())
             }
         };
@@ -1605,7 +1903,7 @@ impl LifecycleHandle {
     fn persist_leaf_identity(&self, identity: FileIdentity) -> Result<(), String> {
         let _record_lock = self.record_lock()?;
         let mut record = self.read_record()?;
-        let mut owner: HostCgroupOwner = read_json(&self.directory.join(HOST_OWNER_FILE))?;
+        let mut owner = self.read_host_owner()?;
         if record.generation != owner.generation || !record.target.same_location(&owner.target) {
             return Err("Host owner identity changed while recording leaf".to_string());
         }
@@ -1643,6 +1941,106 @@ impl LifecycleHandle {
             return Ok(());
         }
         atomic_write_bytes(&self.directory.join(CLEANUP_REASON_FILE), reason.as_bytes())
+    }
+
+    fn scanner_publish_failure_if_current(
+        &self,
+        snapshot: &LifecycleRecord,
+        code: &str,
+        message: &str,
+        observed_cgroup: Option<&str>,
+    ) -> Result<bool, String> {
+        let observed = observed_cgroup.map(containment_identity).transpose()?;
+        let _operation_lock = self.operation_lock()?;
+        let _record_lock = self.record_lock()?;
+        let mut record = self.read_record()?;
+        if !same_scanner_snapshot(snapshot, &record) {
+            return Ok(false);
+        }
+        if record.create_state != CreateState::InProgress
+            || !matches!(
+                record.phase,
+                LifecyclePhase::TakeoverClaimed | LifecyclePhase::ContainerdCommitted
+            )
+        {
+            return Err(format!(
+                "scanner failure takeover requires active Create, found {:?}/{:?}",
+                record.phase, record.create_state
+            ));
+        }
+        if record.containment_breach.is_none() {
+            record.containment_breach = observed;
+        }
+        record.create_state = CreateState::Failed;
+        record.failure = Some(FailureResult {
+            code: code.to_string(),
+            message: message.to_string(),
+            published_at_ms: unix_time_ms()?,
+            waiter_count: record.create_waiters,
+            drained: record.create_waiters == 0,
+        });
+        record.sequence = record
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| "lifecycle sequence overflow".to_string())?;
+        atomic_write_json(&self.directory.join(RECORD_FILE), &record)?;
+        Ok(true)
+    }
+
+    fn scanner_request_cleanup_if_current(
+        &self,
+        snapshot: &LifecycleRecord,
+        reason: &str,
+        observed_cgroup: Option<&str>,
+    ) -> Result<bool, String> {
+        let observed = observed_cgroup.map(containment_identity).transpose()?;
+        let _operation_lock = self.operation_lock()?;
+        let _record_lock = self.record_lock()?;
+        let mut record = self.read_record()?;
+        if !same_scanner_snapshot(snapshot, &record) {
+            return Ok(false);
+        }
+        if matches!(
+            record.phase,
+            LifecyclePhase::TakeoverClaimed | LifecyclePhase::ContainerdCommitted
+        ) {
+            if record.create_state == CreateState::None {
+                return Err("scanner found claimed lifecycle without Create state".to_string());
+            }
+            if record.create_state == CreateState::InProgress {
+                return Err("scanner cannot revoke an IN_PROGRESS Create before publishing its durable failure".to_string());
+            }
+            if record.create_state == CreateState::Failed && !create_failure_cleanup_ready(&record)?
+            {
+                return Ok(false);
+            }
+        }
+        if record.phase == LifecyclePhase::Done {
+            return Ok(false);
+        }
+        if record.containment_breach.is_none() {
+            record.containment_breach = observed;
+        }
+        if !matches!(
+            record.phase,
+            LifecyclePhase::CleanupRequired
+                | LifecyclePhase::CleanupOwnersDurable
+                | LifecyclePhase::ServerStopped
+        ) {
+            let old_epoch = record.operation_owner.epoch;
+            record.operation_owner.epoch = old_epoch
+                .checked_add(1)
+                .ok_or_else(|| "operation owner epoch overflow".to_string())?;
+            record.operation_owner.revoked_epoch = Some(old_epoch);
+            record.phase = LifecyclePhase::CleanupRequired;
+        }
+        record.sequence = record
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| "lifecycle sequence overflow".to_string())?;
+        atomic_write_json(&self.directory.join(RECORD_FILE), &record)?;
+        atomic_write_bytes(&self.directory.join(CLEANUP_REASON_FILE), reason.as_bytes())?;
+        Ok(true)
     }
 
     pub(crate) fn request_degraded_cleanup(&self, reason: &str) -> Result<(), String> {
@@ -1762,15 +2160,14 @@ impl BootstrapSession {
         executable: &Path,
         debug: bool,
     ) -> Result<Self, String> {
-        let spec = load_spec(bundle)?;
         let original_cgroup = current_process_cgroup(std::process::id() as i32)?;
-        let (classification, target) = classify_and_target(&spec, params, &original_cgroup)?;
-        if classification == Classification::ManagedSandbox && target.leaf_identity().is_some() {
-            return Err(format!(
-                "refuse to reuse an existing managed Host leaf {}",
-                target.cgroup()
-            ));
-        }
+        // A containerd Sandbox bundle deliberately has no OCI config.json at
+        // bootstrap time.  Persist an unclassified lifecycle and let the
+        // first identity-bound CreateSandbox/CreateTask RPC claim its kind.
+        let classification = Classification::Pending;
+        let target = HostTarget::Pending {
+            original_cgroup: original_cgroup.clone(),
+        };
         verify_watchdog_service()?;
         let nonce = random_nonce()?;
         let root = lifecycle_root()?;
@@ -2196,7 +2593,12 @@ async fn scan_host_cleanup_queue_once(queue: &Path) -> Result<(), String> {
             &job.owner.generation,
             Path::new(&job.lifecycle_root),
         );
-        let host_result = cleanup_host_target(&job.owner.target);
+        let host_result = match job.owner.state {
+            HostOwnerState::Empty => Ok(()),
+            HostOwnerState::Intent | HostOwnerState::Allocated => {
+                cleanup_host_target(&job.owner.target)
+            }
+        };
         match (socket_result, host_result) {
             (Ok(()), Ok(())) => Ok(()),
             (socket, host) => {
@@ -2366,6 +2768,20 @@ where
     }
 }
 
+fn same_scanner_snapshot(snapshot: &LifecycleRecord, current: &LifecycleRecord) -> bool {
+    snapshot.generation == current.generation
+        && snapshot.sequence == current.sequence
+        && snapshot.phase == current.phase
+}
+
+fn create_failure_cleanup_ready(record: &LifecycleRecord) -> Result<bool, String> {
+    let failure = record
+        .failure
+        .as_ref()
+        .ok_or_else(|| "FAILED Create has no durable failure result".to_string())?;
+    Ok(failure.drained || unix_time_ms()?.saturating_sub(failure.published_at_ms) >= 30_000)
+}
+
 async fn scan_lifecycle(handle: &LifecycleHandle, queue: &Path) -> Result<(), String> {
     let mut record = match handle.read_record() {
         Ok(record) => record,
@@ -2385,8 +2801,11 @@ async fn scan_lifecycle(handle: &LifecycleHandle, queue: &Path) -> Result<(), St
 
     let helper_alive = immutable_process_is_live(&record.helper)?;
     let server_observation = record.server.as_ref().map(observe_process).transpose()?;
-    let precommit_expired =
-        unix_time_ms()?.saturating_sub(record.created_at_ms) >= PRECOMMIT_GRACE.as_millis();
+    let now = unix_time_ms()?;
+    let precommit_expired = now.saturating_sub(record.created_at_ms) >= PRECOMMIT_GRACE.as_millis();
+    let takeover_expired = record
+        .takeover_claimed_at_ms
+        .is_some_and(|claimed| now.saturating_sub(claimed) >= PRECOMMIT_GRACE.as_millis());
     let server_dead = matches!(
         &server_observation,
         Some(ProcessObservation::Gone | ProcessObservation::Reused)
@@ -2400,50 +2819,95 @@ async fn scan_lifecycle(handle: &LifecycleHandle, queue: &Path) -> Result<(), St
         _ => None,
     };
 
+    let bootstrap_abandoned = match record.phase {
+        LifecyclePhase::Prepared | LifecyclePhase::ServerIdentified => !helper_alive,
+        LifecyclePhase::SocketReady => precommit_expired,
+        _ => false,
+    };
     if matches!(
         record.phase,
         LifecyclePhase::Prepared | LifecyclePhase::ServerIdentified | LifecyclePhase::SocketReady
-    ) && ((!helper_alive || precommit_expired) || containment_breach.is_some())
+    ) && (bootstrap_abandoned || containment_breach.is_some())
     {
         if let Some(observed) = containment_breach.as_deref() {
-            handle.request_containment_cleanup(observed, "pre-commit server containment breach")?;
+            handle.scanner_request_cleanup_if_current(
+                &record,
+                "pre-commit server containment breach",
+                Some(observed),
+            )?;
         } else {
-            handle.request_cleanup("pre-commit helper died or timed out")?;
+            handle.scanner_request_cleanup_if_current(
+                &record,
+                "pre-commit helper died or timed out",
+                None,
+            )?;
         }
-    } else if record.phase == LifecyclePhase::ContainerdCommitted
-        && (server_dead
-            || containment_breach.is_some()
-            || (record.create_state == CreateState::Failed
-                && record.failure.as_ref().is_some_and(|failure| {
-                    failure.drained
-                        || unix_time_ms()
-                            .map(|now| now.saturating_sub(failure.published_at_ms) >= 30_000)
-                            .unwrap_or(false)
-                })))
-    {
-        if let Some(observed) = containment_breach.as_deref() {
-            handle.request_containment_cleanup(observed, "committed server containment breach")?;
-        } else if server_dead {
-            handle.request_cleanup("committed server exited")?;
-        } else {
-            handle.request_cleanup("Create RPC failed and drained")?;
-        }
-    } else if record.phase == LifecyclePhase::ContainerdCommitted {
-        if let Some(ProcessObservation::Exact {
-            identity,
-            containment_ok: true,
-            ..
-        }) = server_observation
+    } else if matches!(
+        record.phase,
+        LifecyclePhase::TakeoverClaimed | LifecyclePhase::ContainerdCommitted
+    ) {
+        let invalid_containment = containment_breach.as_deref().filter(|observed| {
+            record.phase != LifecyclePhase::TakeoverClaimed
+                || !takeover_cgroup_allowed(&record, observed)
+        });
+        let claim_timed_out = record.phase == LifecyclePhase::TakeoverClaimed && takeover_expired;
+        let terminal_fault = server_dead || claim_timed_out || invalid_containment.is_some();
+        let failure_ready =
+            record.create_state == CreateState::Failed && create_failure_cleanup_ready(&record)?;
+
+        if terminal_fault && record.create_state == CreateState::InProgress {
+            let (code, message) = if server_dead {
+                ("INTERNAL", "CubeShim server exited during Create")
+            } else if invalid_containment.is_some() {
+                ("INTERNAL", "CubeShim server left both claimed Host cgroups")
+            } else {
+                ("DEADLINE_EXCEEDED", "Host placement claim timed out")
+            };
+            handle.scanner_publish_failure_if_current(
+                &record,
+                code,
+                message,
+                invalid_containment,
+            )?;
+        } else if failure_ready
+            || (terminal_fault
+                && matches!(
+                    record.create_state,
+                    CreateState::Succeeded | CreateState::None
+                ))
         {
-            if let Err(error) = verify_target_membership(&record.target, identity.pid, true) {
-                handle.request_cleanup(&format!(
-                    "committed Host target monitoring failed: {error}"
-                ))?;
+            let reason = if invalid_containment.is_some() {
+                "committed server containment breach"
+            } else if server_dead {
+                "committed server exited"
+            } else if claim_timed_out {
+                "Host placement claim timed out"
+            } else {
+                "Create RPC failed and drained"
+            };
+            handle.scanner_request_cleanup_if_current(&record, reason, invalid_containment)?;
+        } else if record.phase == LifecyclePhase::ContainerdCommitted {
+            if let Some(ProcessObservation::Exact {
+                identity,
+                containment_ok: true,
+                ..
+            }) = &server_observation
+            {
+                if let Err(error) = verify_target_membership(&record.target, identity.pid, true) {
+                    let message = format!("committed Host target monitoring failed: {error}");
+                    if record.create_state == CreateState::InProgress {
+                        handle.scanner_publish_failure_if_current(
+                            &record, "INTERNAL", &message, None,
+                        )?;
+                    } else {
+                        handle.scanner_request_cleanup_if_current(&record, &message, None)?;
+                    }
+                } else {
+                    return Ok(());
+                }
             } else {
                 return Ok(());
             }
-        } else {
-            return Ok(());
         }
     }
 
@@ -2776,11 +3240,11 @@ fn ensure_scanner_owner(handle: &LifecycleHandle) -> Result<(), String> {
 
 fn reconcile_host_target_identity(handle: &LifecycleHandle) -> Result<(), String> {
     let record = handle.read_record()?;
-    if !record.target.managed() || record.target.leaf_identity().is_some() {
+    let host_owner = handle.read_host_owner()?;
+    if host_owner.state == HostOwnerState::Empty {
         return Ok(());
     }
-    let host_owner: HostCgroupOwner = read_json(&handle.directory.join(HOST_OWNER_FILE))?;
-    if !record.target.same_location(&host_owner.target) {
+    if !record.target.managed() || !record.target.same_location(&host_owner.target) {
         return Err("Host owner location differs from lifecycle record".to_string());
     }
     let leaf_path =
@@ -2795,24 +3259,52 @@ fn reconcile_host_target_identity(handle: &LifecycleHandle) -> Result<(), String
     if file_identity(leaf_path.parent().unwrap())? != *parent_identity {
         return Err("cannot adopt Host leaf after parent identity changed".to_string());
     }
-    let identity = if let Some(identity) = host_owner.target.leaf_identity().cloned() {
-        identity
-    } else {
-        for pid in cgroup_pids(&leaf_path)? {
-            let known = (pid == record.helper.pid && immutable_process_is_live(&record.helper)?)
-                || record.server.as_ref().is_some_and(|server| {
-                    pid == server.pid && immutable_process_is_live(server).unwrap_or(false)
-                });
-            if !known {
+    let actual = file_identity(&leaf_path)?;
+    let record_identity = record.target.leaf_identity();
+    let owner_identity = host_owner.target.leaf_identity();
+    match (record_identity, owner_identity) {
+        (Some(recorded), Some(owned)) => {
+            if recorded != owned || recorded != &actual {
                 return Err(format!(
-                    "refuse to adopt Host leaf {} containing unknown pid {pid}",
+                    "Host leaf identity differs across durable owners or live path: {}",
                     leaf_path.display()
                 ));
             }
+            Ok(())
         }
-        file_identity(&leaf_path)?
-    };
-    handle.persist_leaf_identity(identity)
+        (Some(recorded), None) => {
+            if recorded != &actual {
+                return Err(format!(
+                    "lifecycle Host leaf identity differs from live path: {}",
+                    leaf_path.display()
+                ));
+            }
+            handle.persist_leaf_identity(actual)
+        }
+        (None, Some(owned)) => {
+            if owned != &actual {
+                return Err(format!(
+                    "Host owner leaf identity differs from live path: {}",
+                    leaf_path.display()
+                ));
+            }
+            handle.persist_leaf_identity(actual)
+        }
+        (None, None) => {
+            for pid in cgroup_pids(&leaf_path)? {
+                let known = host_owner.server.as_ref().is_some_and(|server| {
+                    pid == server.pid && immutable_process_is_live(server).unwrap_or(false)
+                });
+                if !known {
+                    return Err(format!(
+                        "refuse to adopt Host leaf {} containing unknown pid {pid}",
+                        leaf_path.display()
+                    ));
+                }
+            }
+            handle.persist_leaf_identity(actual)
+        }
+    }
 }
 
 fn cgroup_pids(path: &Path) -> Result<Vec<i32>, String> {
@@ -3094,7 +3586,7 @@ fn wait_pidfd(pidfd: &OwnedFd, pid: i32, timeout: Duration) -> Result<(), String
 
 fn cleanup_host_target(target: &HostTarget) -> Result<(), String> {
     match target {
-        HostTarget::Legacy { .. } => Ok(()),
+        HostTarget::Pending { .. } | HostTarget::Legacy { .. } => Ok(()),
         HostTarget::Cgroupfs {
             cgroup,
             parent_identity,
@@ -3465,11 +3957,12 @@ fn phase_rank(phase: LifecyclePhase) -> u8 {
         LifecyclePhase::Prepared => 0,
         LifecyclePhase::ServerIdentified => 1,
         LifecyclePhase::SocketReady => 2,
-        LifecyclePhase::ContainerdCommitted => 3,
-        LifecyclePhase::CleanupRequired => 4,
-        LifecyclePhase::CleanupOwnersDurable => 5,
-        LifecyclePhase::ServerStopped => 6,
-        LifecyclePhase::Done => 7,
+        LifecyclePhase::TakeoverClaimed => 3,
+        LifecyclePhase::ContainerdCommitted => 4,
+        LifecyclePhase::CleanupRequired => 5,
+        LifecyclePhase::CleanupOwnersDurable => 6,
+        LifecyclePhase::ServerStopped => 7,
+        LifecyclePhase::Done => 8,
     }
 }
 
@@ -3479,6 +3972,43 @@ fn load_spec(bundle: &Path) -> Result<Spec, String> {
         .map_err(|error| format!("read sandbox OCI spec {}: {error}", path.display()))?;
     serde_json::from_slice(&data)
         .map_err(|error| format!("decode sandbox OCI spec {}: {error}", path.display()))
+}
+
+fn validate_takeover_bundle_identity(
+    record: &LifecycleRecord,
+    bundle: &Path,
+) -> Result<PathBuf, String> {
+    let bundle = fs::canonicalize(bundle)
+        .map_err(|error| format!("canonicalize takeover bundle {}: {error}", bundle.display()))?;
+    if file_identity(&bundle)? != record.bundle_identity
+        || bundle.display().to_string() != record.bundle
+    {
+        return Err("takeover bundle identity does not match PREPARED".to_string());
+    }
+    Ok(bundle)
+}
+
+fn takeover_cgroup_allowed(record: &LifecycleRecord, cgroup: &str) -> bool {
+    let original = record.helper.cgroup.as_str();
+    match record.classification {
+        Classification::ManagedSandbox => cgroup == original || cgroup == record.target.cgroup(),
+        Classification::LegacyTask | Classification::Pending => cgroup == original,
+    }
+}
+
+fn target_from_cri_parent(parent: &str, instance_id: &str) -> Result<HostTarget, String> {
+    validate_containerd_id(instance_id)?;
+    let parent = parent.trim();
+    if parent.is_empty() {
+        return Err("managed CRI cgroup_parent is empty".to_string());
+    }
+    let target = if !parent.contains('/') && parent.ends_with(".slice") {
+        PathBuf::from(format!("{parent}:cri-containerd:{instance_id}"))
+    } else {
+        let relative = normalized_cgroup_relative(Path::new(parent))?;
+        PathBuf::from("/").join(relative).join(instance_id)
+    };
+    parse_host_target(&target, instance_id)
 }
 
 fn classify_and_target(
@@ -3719,7 +4249,7 @@ fn create_and_join_target(target: &HostTarget, pid: i32) -> Result<(), String> {
             sync_directory(path.parent().unwrap())?;
             move_process_to(cgroup, pid)
         }
-        HostTarget::Legacy { .. } => Ok(()),
+        HostTarget::Pending { .. } | HostTarget::Legacy { .. } => Ok(()),
     }
 }
 
@@ -3913,6 +4443,18 @@ fn server_process_identity(pid: i32) -> Result<ProcessIdentity, String> {
     let nonce_hash = process_launch_nonce_hash(pid)?
         .ok_or_else(|| format!("server process {pid} has no {LAUNCH_NONCE_ENV}"))?;
     capture_process_identity(pid, Some(nonce_hash))
+}
+
+#[cfg(not(test))]
+fn current_claim_server_identity() -> Result<ProcessIdentity, String> {
+    server_process_identity(std::process::id() as i32)
+}
+
+#[cfg(test)]
+fn current_claim_server_identity() -> Result<ProcessIdentity, String> {
+    // Unit tests run inside Cargo's harness rather than the exec'd shim
+    // server. Production builds always require the launch nonce above.
+    process_identity(std::process::id() as i32)
 }
 
 fn process_identity_for_expected(expected: &ProcessIdentity) -> Result<ProcessIdentity, String> {
@@ -4522,6 +5064,7 @@ mod tests {
             bundle: root.display().to_string(),
             bundle_identity: file_identity(root).unwrap(),
             created_at_ms: unix_time_ms().unwrap(),
+            takeover_claimed_at_ms: None,
             launch_nonce_sha256: sha256_hex(b"fixture"),
             expected_server_path: "/fixture/server".to_string(),
             expected_server_executable: identity.executable.clone(),
@@ -4558,8 +5101,10 @@ mod tests {
                 generation: generation.clone(),
                 namespace: "fixture".to_string(),
                 instance_id: "fixture".to_string(),
+                state: HostOwnerState::Empty,
                 target,
                 original_cgroup: record.helper.cgroup.clone(),
+                server: None,
             },
         )
         .unwrap();
@@ -4569,6 +5114,454 @@ mod tests {
         )
         .unwrap();
         LifecycleHandle { directory }
+    }
+
+    fn pending_socket_ready_fixture(root: &Path) -> LifecycleHandle {
+        let handle = lifecycle_fixture(root, LifecyclePhase::SocketReady);
+        let server = process_identity(std::process::id() as i32).unwrap();
+        handle
+            .update_record(|record| {
+                record.classification = Classification::Pending;
+                record.target = HostTarget::Pending {
+                    original_cgroup: server.cgroup.clone(),
+                };
+                record.server = Some(server.clone());
+                record.operation_owner = OperationOwner {
+                    kind: OwnerKind::Helper,
+                    epoch: 1,
+                    identity: server.clone(),
+                    revoked_epoch: None,
+                };
+                Ok(())
+            })
+            .unwrap();
+        let mut owner: HostCgroupOwner =
+            read_json(&handle.directory.join(HOST_OWNER_FILE)).unwrap();
+        owner.state = HostOwnerState::Empty;
+        owner.target = HostTarget::Pending {
+            original_cgroup: server.cgroup,
+        };
+        owner.server = None;
+        atomic_write_json(&handle.directory.join(HOST_OWNER_FILE), &owner).unwrap();
+        handle
+    }
+
+    #[test]
+    fn managed_first_rpc_claims_without_sandbox_config_json() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-host-cgroup-pending-managed-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let handle = pending_socket_ready_fixture(&root);
+        assert!(!root.join("config.json").exists());
+
+        let id = "a".repeat(64);
+        handle
+            .update_record(|record| {
+                record.namespace = "k8s.io".to_string();
+                record.instance_id = id.clone();
+                Ok(())
+            })
+            .unwrap();
+        let mut owner: HostCgroupOwner =
+            read_json(&handle.directory.join(HOST_OWNER_FILE)).unwrap();
+        owner.namespace = "k8s.io".to_string();
+        owner.instance_id = id;
+        atomic_write_json(&handle.directory.join(HOST_OWNER_FILE), &owner).unwrap();
+
+        assert_eq!(
+            handle
+                .begin_managed_create(&root, "system.slice", b"managed-create")
+                .unwrap(),
+            CreateAdmission::First
+        );
+        let record = handle.read_record().unwrap();
+        assert_eq!(record.phase, LifecyclePhase::TakeoverClaimed);
+        assert_eq!(record.classification, Classification::ManagedSandbox);
+        assert!(record.target.managed());
+        assert_eq!(
+            handle
+                .begin_managed_create(&root, "system.slice", b"managed-create")
+                .unwrap(),
+            CreateAdmission::RetryInProgress
+        );
+        assert!(matches!(
+            handle.begin_managed_create(&root, "system.slice", b"different-create"),
+            Err(BeginCreateError::Conflict(_))
+        ));
+        fs::write(
+            root.join("config.json"),
+            serde_json::to_vec(&spec(HashMap::new(), None)).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            handle.begin_legacy_create(&root, &"a".repeat(64), b"managed-create"),
+            Err(BeginCreateError::Conflict(_))
+        ));
+        let owner: HostCgroupOwner = read_json(&handle.directory.join(HOST_OWNER_FILE)).unwrap();
+        assert_eq!(owner.state, HostOwnerState::Empty);
+        assert!(matches!(owner.target, HostTarget::Pending { .. }));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn first_rpc_claim_is_retryable_across_every_atomic_record_stage() {
+        for stage in ["temp", "file-fsync", "rename", "parent-fsync"] {
+            let root = std::env::temp_dir().join(format!(
+                "cube-host-cgroup-claim-{stage}-{}",
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir(&root).unwrap();
+            let handle = pending_socket_ready_fixture(&root);
+            let id = "b".repeat(64);
+            handle
+                .update_record(|record| {
+                    record.namespace = "k8s.io".to_string();
+                    record.instance_id = id.clone();
+                    Ok(())
+                })
+                .unwrap();
+            let mut owner = handle.read_host_owner().unwrap();
+            owner.namespace = "k8s.io".to_string();
+            owner.instance_id = id;
+            atomic_write_json(&handle.directory.join(HOST_OWNER_FILE), &owner).unwrap();
+            File::create(atomic_write_failpoint_path(
+                &handle.directory.join(RECORD_FILE),
+                stage,
+            ))
+            .unwrap();
+
+            let first = handle.begin_managed_create(&root, "system.slice", b"managed-create");
+            let durable_phase = handle.read_record().unwrap().phase;
+            let retry = handle
+                .begin_managed_create(&root, "system.slice", b"managed-create")
+                .unwrap();
+            if stage == "parent-fsync" {
+                assert_eq!(first.unwrap(), CreateAdmission::First);
+                assert_eq!(durable_phase, LifecyclePhase::TakeoverClaimed);
+                assert_eq!(retry, CreateAdmission::RetryInProgress);
+            } else {
+                assert!(first.is_err());
+                assert_eq!(durable_phase, LifecyclePhase::SocketReady);
+                assert_eq!(retry, CreateAdmission::First);
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn retry_waiter_is_counted_exactly_once_across_atomic_record_stages() {
+        for stage in ["temp", "file-fsync", "rename", "parent-fsync"] {
+            let root = std::env::temp_dir().join(format!(
+                "cube-host-cgroup-retry-waiter-{stage}-{}",
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir(&root).unwrap();
+            let handle = pending_socket_ready_fixture(&root);
+            let id = "f".repeat(64);
+            handle
+                .update_record(|record| {
+                    record.namespace = "k8s.io".to_string();
+                    record.instance_id = id.clone();
+                    Ok(())
+                })
+                .unwrap();
+            let mut owner = handle.read_host_owner().unwrap();
+            owner.namespace = "k8s.io".to_string();
+            owner.instance_id = id;
+            atomic_write_json(&handle.directory.join(HOST_OWNER_FILE), &owner).unwrap();
+            assert_eq!(
+                handle
+                    .begin_managed_create(&root, "system.slice", b"managed-create")
+                    .unwrap(),
+                CreateAdmission::First
+            );
+            let before = handle.read_record().unwrap();
+            assert_eq!(before.create_waiters, 1);
+            File::create(atomic_write_failpoint_path(
+                &handle.directory.join(RECORD_FILE),
+                stage,
+            ))
+            .unwrap();
+
+            let retry = handle.begin_managed_create(&root, "system.slice", b"managed-create");
+            let after = handle.read_record().unwrap();
+            if stage == "parent-fsync" {
+                assert_eq!(retry.unwrap(), CreateAdmission::RetryInProgress);
+                assert_eq!(after.sequence, before.sequence + 1);
+                assert_eq!(after.create_waiters, 2);
+            } else {
+                assert!(retry.is_err());
+                assert_eq!(after.sequence, before.sequence);
+                assert_eq!(after.create_waiters, 1);
+                assert_eq!(
+                    handle
+                        .begin_managed_create(&root, "system.slice", b"managed-create")
+                        .unwrap(),
+                    CreateAdmission::RetryInProgress
+                );
+                assert_eq!(handle.read_record().unwrap().create_waiters, 2);
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn scanner_cannot_revoke_a_newer_first_rpc_claim() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-host-cgroup-stale-scanner-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let handle = pending_socket_ready_fixture(&root);
+        let id = "c".repeat(64);
+        handle
+            .update_record(|record| {
+                record.namespace = "k8s.io".to_string();
+                record.instance_id = id.clone();
+                Ok(())
+            })
+            .unwrap();
+        let mut owner = handle.read_host_owner().unwrap();
+        owner.namespace = "k8s.io".to_string();
+        owner.instance_id = id;
+        atomic_write_json(&handle.directory.join(HOST_OWNER_FILE), &owner).unwrap();
+        let stale = handle.read_record().unwrap();
+
+        assert_eq!(
+            handle
+                .begin_managed_create(&root, "system.slice", b"managed-create")
+                .unwrap(),
+            CreateAdmission::First
+        );
+        assert!(!handle
+            .scanner_request_cleanup_if_current(&stale, "stale timeout", None)
+            .unwrap());
+        let current = handle.read_record().unwrap();
+        assert_eq!(current.phase, LifecyclePhase::TakeoverClaimed);
+        assert_eq!(current.create_state, CreateState::InProgress);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_sandbox_and_task_claim_have_one_durable_winner() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-host-cgroup-claim-race-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let handle = pending_socket_ready_fixture(&root);
+        let id = "e".repeat(64);
+        handle
+            .update_record(|record| {
+                record.namespace = "k8s.io".to_string();
+                record.instance_id = id.clone();
+                Ok(())
+            })
+            .unwrap();
+        let mut owner = handle.read_host_owner().unwrap();
+        owner.namespace = "k8s.io".to_string();
+        owner.instance_id = id.clone();
+        atomic_write_json(&handle.directory.join(HOST_OWNER_FILE), &owner).unwrap();
+        fs::write(
+            root.join("config.json"),
+            serde_json::to_vec(&spec(HashMap::new(), None)).unwrap(),
+        )
+        .unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let managed_handle = handle.clone();
+        let managed_root = root.clone();
+        let managed_barrier = barrier.clone();
+        let managed = std::thread::spawn(move || {
+            managed_barrier.wait();
+            managed_handle.begin_managed_create(&managed_root, "system.slice", b"managed-create")
+        });
+        let legacy_handle = handle.clone();
+        let legacy_root = root.clone();
+        let legacy_id = id.clone();
+        let legacy_barrier = barrier.clone();
+        let legacy = std::thread::spawn(move || {
+            legacy_barrier.wait();
+            legacy_handle.begin_legacy_create(&legacy_root, &legacy_id, b"legacy-create")
+        });
+        barrier.wait();
+        let results = [managed.join().unwrap(), legacy.join().unwrap()];
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Ok(CreateAdmission::First)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(BeginCreateError::Conflict(_))))
+                .count(),
+            1
+        );
+        let record = handle.read_record().unwrap();
+        assert_eq!(record.phase, LifecyclePhase::TakeoverClaimed);
+        assert_eq!(record.create_state, CreateState::InProgress);
+        assert_eq!(record.create_waiters, 1);
+        assert_eq!(
+            handle.read_host_owner().unwrap().state,
+            HostOwnerState::Empty
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn scanner_publishes_failure_before_cleaning_abandoned_claim() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-host-cgroup-scanner-result-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let queue = root.join("queue");
+        fs::create_dir_all(queue.join(HOST_QUEUE_DIRECTORY)).unwrap();
+        fs::create_dir_all(queue.join(RUNTIME_QUEUE_DIRECTORY)).unwrap();
+        let handle = pending_socket_ready_fixture(&root);
+        let id = "d".repeat(64);
+        handle
+            .update_record(|record| {
+                record.namespace = "k8s.io".to_string();
+                record.instance_id = id.clone();
+                Ok(())
+            })
+            .unwrap();
+        let mut owner = handle.read_host_owner().unwrap();
+        owner.namespace = "k8s.io".to_string();
+        owner.instance_id = id;
+        atomic_write_json(&handle.directory.join(HOST_OWNER_FILE), &owner).unwrap();
+        handle
+            .begin_managed_create(&root, "system.slice", b"managed-create")
+            .unwrap();
+        handle
+            .update_record(|record| {
+                record.takeover_claimed_at_ms = Some(0);
+                Ok(())
+            })
+            .unwrap();
+
+        scan_lifecycle(&handle, &queue).await.unwrap();
+        let failed = handle.read_record().unwrap();
+        assert_eq!(failed.phase, LifecyclePhase::TakeoverClaimed);
+        assert_eq!(failed.create_state, CreateState::Failed);
+        assert_eq!(
+            handle.current_create_result().unwrap(),
+            Some(PersistedCreateResult::Failed {
+                code: "DEADLINE_EXCEEDED".to_string(),
+                message: "Host placement claim timed out".to_string(),
+            })
+        );
+        publish_create_result_once(&handle, &PersistedCreateResult::Succeeded).unwrap();
+        assert_eq!(
+            handle.read_record().unwrap().create_state,
+            CreateState::Failed
+        );
+
+        handle.finish_create_waiter().unwrap();
+        let drained = handle.read_record().unwrap();
+        assert!(handle
+            .scanner_request_cleanup_if_current(&drained, "claim timed out", None)
+            .unwrap());
+        assert_eq!(
+            handle.read_record().unwrap().phase,
+            LifecyclePhase::CleanupRequired
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_schema_is_required_for_lifecycle_and_host_owner() {
+        let root =
+            std::env::temp_dir().join(format!("cube-host-cgroup-schema-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let handle = lifecycle_fixture(&root, LifecyclePhase::SocketReady);
+        let mut record = handle.read_record().unwrap();
+        record.schema_version = SCHEMA_VERSION - 1;
+        atomic_write_json(&handle.directory.join(RECORD_FILE), &record).unwrap();
+        assert!(handle.read_record().is_err());
+
+        record.schema_version = SCHEMA_VERSION;
+        atomic_write_json(&handle.directory.join(RECORD_FILE), &record).unwrap();
+        let mut owner = handle.read_host_owner().unwrap();
+        owner.schema_version = SCHEMA_VERSION - 1;
+        atomic_write_json(&handle.directory.join(HOST_OWNER_FILE), &owner).unwrap();
+        assert!(handle.read_host_owner().is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_first_rpc_claims_only_with_real_task_spec() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-host-cgroup-pending-legacy-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let handle = pending_socket_ready_fixture(&root);
+        assert!(handle
+            .begin_legacy_create(&root, "fixture", b"legacy")
+            .is_err());
+        fs::write(
+            root.join("config.json"),
+            serde_json::to_vec(&spec(HashMap::new(), None)).unwrap(),
+        )
+        .unwrap();
+        assert!(handle
+            .begin_legacy_create(&root, "wrong", b"legacy")
+            .is_err());
+        assert_eq!(
+            handle
+                .begin_legacy_create(&root, "fixture", b"legacy")
+                .unwrap(),
+            CreateAdmission::First
+        );
+        handle.commit_legacy_takeover().unwrap();
+        let record = handle.read_record().unwrap();
+        assert_eq!(record.phase, LifecyclePhase::ContainerdCommitted);
+        assert_eq!(record.classification, Classification::LegacyTask);
+        let owner: HostCgroupOwner = read_json(&handle.directory.join(HOST_OWNER_FILE)).unwrap();
+        assert_eq!(owner.state, HostOwnerState::Empty);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn socket_ready_does_not_treat_normal_helper_exit_as_abandonment() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-host-cgroup-helper-exit-grace-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let queue = root.join("queue");
+        fs::create_dir_all(queue.join(HOST_QUEUE_DIRECTORY)).unwrap();
+        fs::create_dir_all(queue.join(RUNTIME_QUEUE_DIRECTORY)).unwrap();
+        let handle = lifecycle_fixture(&root, LifecyclePhase::SocketReady);
+        let mut child = ProcessCommand::new("sleep").arg("1").spawn().unwrap();
+        let child_identity = process_identity(child.id() as i32).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let server = process_identity(std::process::id() as i32).unwrap();
+        handle
+            .update_record(|record| {
+                record.helper = child_identity;
+                record.server = Some(server.clone());
+                record.target = HostTarget::Legacy {
+                    cgroup: server.cgroup.clone(),
+                };
+                Ok(())
+            })
+            .unwrap();
+
+        scan_lifecycle(&handle, &queue).await.unwrap();
+        assert_eq!(
+            handle.read_record().unwrap().phase,
+            LifecyclePhase::SocketReady
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4817,10 +5810,12 @@ mod tests {
                 generation: generation.clone(),
                 namespace: "fixture".to_string(),
                 instance_id: "fixture".to_string(),
+                state: HostOwnerState::Empty,
                 target: HostTarget::Legacy {
                     cgroup: current_process_cgroup(std::process::id() as i32).unwrap(),
                 },
                 original_cgroup: current_process_cgroup(std::process::id() as i32).unwrap(),
+                server: None,
             },
             socket: SocketIdentity {
                 path: root.join("absent.sock").display().to_string(),
@@ -4949,6 +5944,7 @@ mod tests {
                 generation: generation.clone(),
                 namespace: "fixture".to_string(),
                 instance_id: "fixture".to_string(),
+                state: HostOwnerState::Allocated,
                 target: HostTarget::Cgroupfs {
                     oci_path: "/fixture".to_string(),
                     cgroup: "/fixture/managed-leaf".to_string(),
@@ -4956,6 +5952,7 @@ mod tests {
                     leaf_identity: Some(file_identity(&leaf).unwrap()),
                 },
                 original_cgroup: "/fixture".to_string(),
+                server: None,
             },
             socket: SocketIdentity {
                 path: socket.display().to_string(),
@@ -5353,7 +6350,11 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        // Leave the Host owner at its original Legacy target to force a
+        let mut owner: HostCgroupOwner =
+            read_json(&handle.directory.join(HOST_OWNER_FILE)).unwrap();
+        owner.state = HostOwnerState::Intent;
+        atomic_write_json(&handle.directory.join(HOST_OWNER_FILE), &owner).unwrap();
+        // Leave the Host owner at its original target to force a
         // reconciliation error while keeping both canonical owner files valid.
         let error = converge_cleanup(&handle, &queue).await.unwrap_err();
         assert!(error.contains("Host target identity reconciliation"));

@@ -26,8 +26,8 @@ use crate::common::utils::Utils;
 use crate::container::resources::RESOURCE_V2_CAPABILITY;
 use crate::sandbox::sb;
 use crate::service::host_cgroup::{
-    lifecycle_from_env, BeginCreateError, Classification, CreateAdmission, CreatePublisherGuard,
-    LifecycleHandle, PersistedCreateResult, RuntimeOwnerState,
+    lifecycle_from_env, BeginCreateError, CreateAdmission, CreatePublisherGuard, LifecycleHandle,
+    PersistedCreateResult, RuntimeOwnerState,
 };
 use crate::service::runtime_resource::{self, RuntimeLease};
 use crate::service::task_srv::TaskService;
@@ -132,6 +132,23 @@ enum ShutdownAction {
 }
 
 impl SandboxLifecycle {
+    pub(crate) async fn managed_task_mode(&self) -> Result<TaskMode, String> {
+        let state = self.state.lock().await;
+        if state.phase != Phase::Ready {
+            return Err(format!(
+                "managed Sandbox is not ready (phase {:?})",
+                state.phase
+            ));
+        }
+        let runtime = state
+            .runtime
+            .as_ref()
+            .ok_or_else(|| "ready sandbox has no RuntimeResource lease".to_string())?;
+        Ok(TaskMode::ManagedReady {
+            shared_root: runtime.shared_root()?,
+        })
+    }
+
     pub(crate) async fn task_mode(&self) -> Result<TaskMode, String> {
         let state = self.state.lock().await;
         match state.phase {
@@ -1049,11 +1066,12 @@ impl Sandbox for SandboxService {
                     "managed CreateSandbox has no external shim lifecycle",
                 )
             })?;
-        host_lifecycle
-            .validate_takeover_bundle(Classification::ManagedSandbox, Path::new(&req.bundle_path))
-            .map_err(|error| rpc_error(Code::FAILED_PRECONDITION, error))?;
         let admission = host_lifecycle
-            .begin_create(Classification::ManagedSandbox, &fingerprint)
+            .begin_managed_create(
+                Path::new(&req.bundle_path),
+                runtime_resource::cgroup_parent(&config),
+                &fingerprint,
+            )
             .map_err(|error| match error {
                 BeginCreateError::Conflict(message) => rpc_error(Code::ALREADY_EXISTS, message),
                 BeginCreateError::Invalid(message) => rpc_error(Code::FAILED_PRECONDITION, message),
@@ -1062,6 +1080,17 @@ impl Sandbox for SandboxService {
 
         if admission == CreateAdmission::First {
             let publisher = host_lifecycle.create_publisher_guard();
+            if let Err(error) = host_lifecycle.place_managed_server() {
+                let message = format!("place CubeShim server in Host Pod cgroup: {error}");
+                publisher.failure_until_durable("INTERNAL", &message).await;
+                waiter.finish().map_err(|finish_error| {
+                    rpc_error(
+                        Code::INTERNAL,
+                        format!("finish failed Host placement waiter: {finish_error}"),
+                    )
+                })?;
+                return Err(rpc_error(Code::INTERNAL, message));
+            }
             host_lifecycle
                 .wait_test_failpoint("after-create-commit")
                 .await;

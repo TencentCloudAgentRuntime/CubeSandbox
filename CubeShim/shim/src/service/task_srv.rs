@@ -462,23 +462,35 @@ impl Task for TaskService {
         );
 
         let bundle = req.bundle.as_str();
-        let preliminary_mode =
-            self.sandbox_lifecycle.task_mode().await.map_err(|error| {
+        let lifecycle = lifecycle_from_env().map_err(Error::FailedPreconditionError)?;
+        let preliminary_mode = match lifecycle.as_ref() {
+            Some(lifecycle)
+                if lifecycle
+                    .classification()
+                    .map_err(Error::FailedPreconditionError)?
+                    == Classification::ManagedSandbox =>
+            {
+                self.sandbox_lifecycle
+                    .managed_task_mode()
+                    .await
+                    .map_err(|error| {
+                        Error::Other(format!("Create task before sandbox ready: {error}"))
+                    })?
+            }
+            Some(_) => TaskMode::Legacy,
+            None => self.sandbox_lifecycle.task_mode().await.map_err(|error| {
                 Error::Other(format!("Create task before sandbox ready: {error}"))
-            })?;
+            })?,
+        };
         let mut host_waiter: Option<CreateWaiterGuard> = None;
         let mut host_publisher: Option<CreatePublisherGuard> = None;
         if matches!(preliminary_mode, TaskMode::Legacy) {
-            let lifecycle = lifecycle_from_env().map_err(Error::FailedPreconditionError)?;
             if let Some(lifecycle) = lifecycle.as_ref() {
                 let fingerprint = req.write_to_bytes().map_err(|error| {
                     Error::Other(format!("encode legacy CreateTask fingerprint: {error}"))
                 })?;
-                lifecycle
-                    .validate_takeover_bundle(Classification::LegacyTask, Path::new(bundle))
-                    .map_err(Error::FailedPreconditionError)?;
                 let admission = lifecycle
-                    .begin_create(Classification::LegacyTask, &fingerprint)
+                    .begin_legacy_create(Path::new(bundle), &req.id, &fingerprint)
                     .map_err(|error| match error {
                         BeginCreateError::Conflict(message) => {
                             task_status(Code::ALREADY_EXISTS, message)
@@ -520,6 +532,20 @@ impl Task for TaskService {
                 }
                 host_waiter = Some(waiter);
                 host_publisher = Some(lifecycle.create_publisher_guard());
+                if let Err(error) = lifecycle.commit_legacy_takeover() {
+                    let message = format!("commit legacy CreateTask takeover: {error}");
+                    persist_legacy_create_failure(host_publisher.take(), "INTERNAL", &message)
+                        .await?;
+                    if let Some(waiter) = host_waiter.take() {
+                        waiter.finish().map_err(|finish_error| {
+                            task_status(
+                                Code::INTERNAL,
+                                format!("finish failed legacy takeover waiter: {finish_error}"),
+                            )
+                        })?;
+                    }
+                    return Err(task_status(Code::INTERNAL, message));
+                }
                 lifecycle.wait_test_failpoint("after-create-commit").await;
             }
         }
