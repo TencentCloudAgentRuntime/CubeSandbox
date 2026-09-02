@@ -18,7 +18,7 @@ S3.4c.2～S3.4d 尚未全部完成。S3.4c.2 还需 sibling containment/PID 诱�
 
 ## 验证
 
-`fe2f47cb` 由同一 reviewer 复审为 P0/P1=0 并 `APPROVE THIS FIX`；`inv-085uf4g092` 固定构建 50/50，`inv-885uk4gin4` 部署并通过本 build/boot 的 systemd 200 次 gate，`inv-985umh0f8d` 真实 RuntimeClass Pod 启停/日志/exec/Host leaf/exact cleanup 通过。`inv-v85umsgm7x` 证明 shim SIGKILL 后 durable FAILED、epoch fence、未 drain waiter 保留 30.698 秒后 exact cleanup。`inv-685vvwg356` 证明显式 120 秒客户端 timeout 下 live Delete 后五秒内 RuntimeResource=EMPTY、epoch 2→3，release 后收敛；其中诊断 ERR trap 对预期 `wait rc=1` 打出误报文字，但任务 exit=0 且最终验收行通过，需干净重跑替换该证据。额外两节点 TKE `cls-1oqe2py4` 已 Ready；`inv-a85win0n3a` 的 Deployment 5/5、StatefulSet 3/3 与全 Pod HTTP/curl 验收通过，该环境只作为默认 containerd 多节点基线，不冒充 Cube RuntimeClass 证据。
+`fe2f47cb` 由同一 reviewer 复审为 P0/P1=0 并 `APPROVE THIS FIX`；`inv-085uf4g092` 固定构建 50/50，`inv-885uk4gin4` 部署并通过本 build/boot 的 systemd 200 次 gate，`inv-985umh0f8d` 真实 RuntimeClass Pod 启停/日志/exec/Host leaf/exact cleanup 通过。`inv-v85umsgm7x` 证明 shim SIGKILL 后 durable FAILED、epoch fence、未 drain waiter 保留 30.698 秒后 exact cleanup。`inv-685vvwg356` 证明显式 120 秒客户端 timeout 下 live Delete 后五秒内 RuntimeResource=EMPTY、epoch 2→3，release 后收敛；其中诊断 ERR trap 对预期 `wait rc=1` 打出误报文字，但任务 exit=0 且最终验收行通过，需干净重跑替换该证据。额外两节点 TKE `cls-1oqe2py4` 已 Ready；`inv-a85win0n3a` 的 Deployment 5/5、StatefulSet 3/3 与全 Pod HTTP/curl 验收通过。S0 三节点自建集群也已部署同一清单；`inv-b860n808vc` 验证 8 个 Pod 覆盖三节点，localhost、Service、稳定 DNS 和持续 curl 全部通过。两个环境都只作为默认 containerd 多节点基线，不冒充 Cube RuntimeClass 证据。
 
 ## 阻塞
 
