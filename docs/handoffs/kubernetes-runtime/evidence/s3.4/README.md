@@ -180,13 +180,13 @@ S3.4a 只冻结输入、现状与精确缺口，不把“请求被接受”记�
   `left_units=0`、`left_cgroups=0`、`cleanup=exact` 且 TAT `dropped=0`。该结果只覆盖当前
   package/build/boot，新环境仍须重新门禁。
 
-## 待关闭
+## S3.4d 问题收口
 
-- `K8S-OQ-015`：Guest 更新和 Host 包络重算的顺序、幂等键与失败恢复。
-- `K8S-OQ-016`：swap、PIDs、hugepage 的 Guest/Host 分层，以及 ephemeral-storage 的 kubelet 边界。
-- `K8S-OQ-017`：极端 unchecked `memory.max` 下调的阻塞写、RPC deadline 与最终状态对账。
-- `K8S-OQ-021`：默认小 VM 规格下并发启动高内存负载的容量边界与诊断语义。
-- `K8S-OQ-022`：长时间 exec 与资源更新并发时的 Agent 操作通道和状态对账。
+- `K8S-OQ-015/016/017/021` 已按后续实现和云端证据关闭。
+- `K8S-OQ-022` 的 Shim client-handle 串行化已修复；Agent 持续 long-exec 与同容器 resize
+  的剩余串行化冻结为首版 P1 已知限制，转 S5.4，不计为支持能力。
+- `K8S-OQ-023` 记录 12 个 Sandbox 创建 2 秒即同时取消时的瞬时 `FailedKillPod`；kubelet
+  自动重试并 exact-zero，作为非阻断快速取消边界转 S5.4。
 
 ## 额外多节点交互基线（2026-09-02）
 
@@ -233,11 +233,22 @@ cgroup v2 OOM armed barrier 和 inactive/已消失 systemd scope 的幂等清理
 
 ## S3.4d 压力回归与支持矩阵（2026-09-03）
 
-状态：`VALIDATING`。最终候选实现 `011a05fa` 包含默认 VM memory floor、managed memory
-downsize 写前保护，以及 Shim Agent RPC client handle 解串行。默认规格 8 Pod 启动即 OOM
+状态：`VALIDATING`。最终候选 `6662316e` 包含默认 VM memory floor、managed memory
+downsize 写前保护，以及 Shim Agent RPC client handle 解串行；reviewer 指出的生命周期竞态
+由共享 per-container operation gate 与 sandbox fence 修复。默认规格 8 Pod 启动即 OOM
 全部得到 Guest `OOMKilled/137`；显式 64 MiB VM 请求被明确拒绝；普通 resize、在线
 containerd restart 和受控长 exec + resize 均通过。QoS/多容器/init/sidecar/Pod-level 的
 Guest/Host 数值矩阵一致，删除后双 Worker exact zero、3/3 Node Ready。
+
+`inv-386mfegiev` 补齐 ephemeral-storage：Cube Pod 向 Host-backed emptyDir 写入 96 MiB、
+总限额 16 MiB 后由 kubelet 标准驱逐为 `Failed/Evicted`，Node `DiskPressure=False`；namespace
+删除后 `inv-086mip0u7c` 确认 W2 exact zero。由此关闭 `K8S-OQ-016`，但不把 Guest 临时
+rootfs upper 计量扩展为已支持。
+
+`inv-086ncr074p` 中运行中长 exec + 连续 resize + delete 在 0 秒内删除且无
+`FailedKillPod`；同轮 12 Sandbox 创建 2 秒即取消全部收敛，但记录 3 个瞬时 systemd scope
+collection `FailedKillPod`。该极端边界转 `K8S-OQ-023`，不阻断基础 E2E。压力后
+`inv-a86ndt0pkt`/`inv-a86nds0c3q` 双 Worker exact-zero，`inv-v86nea09kv` 集群 3/3 Ready。
 
 持续长 exec 与同容器 resize 的激进组合仍可能首次 ttrpc/passfd 超时，kubelet 重试后约
 53 秒收敛；它冻结为首版 P1 已知限制并转 S5.4，不冒充支持。完整实现、制品 SHA、TAT
