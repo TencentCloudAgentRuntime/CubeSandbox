@@ -230,3 +230,16 @@ cgroup v2 OOM armed barrier 和 inactive/已消失 systemd scope 的幂等清理
 `K8S-OQ-022`，进入 S3.4d，不冒充通过能力。完整数值、invocation、失败尝试边界与制品身份见
 [`s3.4c.4-execution-summary.md`](./s3.4c.4-execution-summary.md)。同一 reviewer 已独立
 复核，确认无 P0/P1/P2 并明确返回 `APPROVE S3.4c DONE`。
+
+## S3.4d 压力回归与支持矩阵（2026-09-03）
+
+状态：`VALIDATING`。最终候选实现 `011a05fa` 包含默认 VM memory floor、managed memory
+downsize 写前保护，以及 Shim Agent RPC client handle 解串行。默认规格 8 Pod 启动即 OOM
+全部得到 Guest `OOMKilled/137`；显式 64 MiB VM 请求被明确拒绝；普通 resize、在线
+containerd restart 和受控长 exec + resize 均通过。QoS/多容器/init/sidecar/Pod-level 的
+Guest/Host 数值矩阵一致，删除后双 Worker exact zero、3/3 Node Ready。
+
+持续长 exec 与同容器 resize 的激进组合仍可能首次 ttrpc/passfd 超时，kubelet 重试后约
+53 秒收敛；它冻结为首版 P1 已知限制并转 S5.4，不冒充支持。完整实现、制品 SHA、TAT
+invocation、失败边界、支持判定和最终清理见
+[`s3.4d-execution-summary.md`](./s3.4d-execution-summary.md)。当前等待同一 reviewer 终审。
