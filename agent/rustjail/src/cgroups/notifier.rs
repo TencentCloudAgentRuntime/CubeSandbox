@@ -52,6 +52,30 @@ fn get_value_from_cgroup(path: &Path, key: &str) -> Result<i64> {
     Ok(0)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum V2EventDecision {
+    Continue,
+    Oom,
+    Exited,
+}
+
+fn decide_v2_event(
+    oom_kill: i64,
+    baseline_oom_kill: i64,
+    populated: Option<i64>,
+) -> V2EventDecision {
+    // memory.events and cgroup.events are independent inotify watches.  The
+    // populated=0 event can be delivered before the memory.events event for
+    // the same kill, so always give the counter readback precedence.
+    if oom_kill > baseline_oom_kill {
+        V2EventDecision::Oom
+    } else if populated == Some(0) {
+        V2EventDecision::Exited
+    } else {
+        V2EventDecision::Continue
+    }
+}
+
 // notify_on_oom returns channel on which you can expect event about OOM,
 // if process died without OOM this channel will be closed.
 pub async fn notify_on_oom_v2(containere_id: &str, cg_dir: String) -> Result<Receiver<String>> {
@@ -75,6 +99,7 @@ async fn register_memory_event_v2(
         "register_memory_event_v2 cgroup_event_control_path: {:?}", &cgroup_event_control_path
     );
 
+    let baseline_oom_kill = get_value_from_cgroup(&event_control_path, "oom_kill")?;
     let mut inotify = Inotify::init().context("Failed to initialize inotify")?;
 
     // watching oom kill
@@ -87,8 +112,15 @@ async fn register_memory_event_v2(
 
     let (sender, receiver) = channel(100);
     let containere_id = containere_id.to_string();
+    let armed_oom_kill = get_value_from_cgroup(&event_control_path, "oom_kill")?;
 
     tokio::spawn(async move {
+        if armed_oom_kill > baseline_oom_kill {
+            let _ = sender.send(containere_id.clone()).await.map_err(|e| {
+                error!(sl!(), "send containere_id failed, error: {:?}", e);
+            });
+            return;
+        }
         let mut buffer = [0; 32];
         let mut stream = inotify
             .event_stream(&mut buffer)
@@ -103,19 +135,27 @@ async fn register_memory_event_v2(
             // info!("is1: {}", event.wd == wd1);
             info!(sl!(), "event.wd: {:?}", event.wd);
 
-            if event.wd == ev_wd {
-                let oom = get_value_from_cgroup(&event_control_path, "oom_kill");
-                if oom.unwrap_or(0) > 0 {
+            let oom_kill = get_value_from_cgroup(&event_control_path, "oom_kill");
+            let populated = if event.wd == cg_wd {
+                Some(
+                    get_value_from_cgroup(&cgroup_event_control_path, "populated").unwrap_or(-1),
+                )
+            } else {
+                None
+            };
+            match decide_v2_event(
+                oom_kill.unwrap_or(baseline_oom_kill),
+                baseline_oom_kill,
+                populated,
+            ) {
+                V2EventDecision::Oom => {
                     let _ = sender.send(containere_id.clone()).await.map_err(|e| {
                         error!(sl!(), "send containere_id failed, error: {:?}", e);
                     });
                     return;
                 }
-            } else if event.wd == cg_wd {
-                let pids = get_value_from_cgroup(&cgroup_event_control_path, "populated");
-                if pids.unwrap_or(-1) == 0 {
-                    return;
-                }
+                V2EventDecision::Exited => return,
+                V2EventDecision::Continue => {}
             }
 
             // When a cgroup is destroyed, an event is sent to eventfd.
@@ -127,6 +167,36 @@ async fn register_memory_event_v2(
     });
 
     Ok(receiver)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decide_v2_event, get_value_from_cgroup, V2EventDecision};
+    use std::fs;
+
+    #[test]
+    fn populated_zero_prefers_oom_counter_increase() {
+        assert_eq!(
+            decide_v2_event(1, 0, Some(0)),
+            V2EventDecision::Oom
+        );
+        assert_eq!(
+            decide_v2_event(0, 0, Some(0)),
+            V2EventDecision::Exited
+        );
+        assert_eq!(
+            decide_v2_event(0, 0, Some(1)),
+            V2EventDecision::Continue
+        );
+    }
+
+    #[test]
+    fn cgroup_counter_readback_is_exact() {
+        let directory = tempfile::tempdir().unwrap();
+        let events = directory.path().join("memory.events");
+        fs::write(&events, "low 0\nhigh 0\nmax 3\noom 2\noom_kill 1\n").unwrap();
+        assert_eq!(get_value_from_cgroup(&events, "oom_kill").unwrap(), 1);
+    }
 }
 
 // notify_on_oom returns channel on which you can expect event about OOM,
