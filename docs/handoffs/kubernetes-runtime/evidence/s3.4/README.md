@@ -216,3 +216,13 @@ placement record 锁和 cleanup signal/barrier 顺序问题；云端 Host lifecy
 产物身份、失败诊断和非阻断观察见
 [`s3.4c.2-execution-summary.md`](./s3.4c.2-execution-summary.md)。同一 reviewer 最终确认
 P0/P1/P2 均为 0，并明确返回 `APPROVE S3.4c.2`。
+
+## S3.4c.4 压力、故障与兼容审计（2026-09-03）
+
+状态：`VALIDATING`。Kubernetes v1.36.4 的六 Pod QoS/Pod-level/init/sidecar 矩阵、Host
+CPU/memory/PIDs、Guest 定向 OOM、同 Pod/同节点/跨节点 survivor、压力中 resize、在线
+containerd restart 和双 Worker exact baseline 已完成。实测暴露并由 `90026f59` 修复
+cgroup v2 OOM/exit 通知竞态；最终 Kubernetes 状态为 `OOMKilled/137`。完整数值、invocation、
+失败尝试边界与制品身份见
+[`s3.4c.4-execution-summary.md`](./s3.4c.4-execution-summary.md)。等待同一 reviewer
+返回 `APPROVE S3.4c DONE`。
