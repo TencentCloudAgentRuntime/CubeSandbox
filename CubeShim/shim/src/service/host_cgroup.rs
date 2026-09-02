@@ -929,10 +929,10 @@ impl LifecycleHandle {
         }
     }
 
-    /// Deterministic PoC failpoint used to hold the first Create after its
-    /// durable admission but before any local reservation/state transition.
-    /// It is completely inactive unless the shim inherited an explicit test
-    /// directory from containerd.
+    /// Deterministic PoC failpoint used to hold the first Create after Host
+    /// placement and the CONTAINERD_COMMITTED transition, but before any
+    /// sandbox-local or RuntimeResource allocation. It is completely inactive
+    /// unless the shim inherited an explicit test directory from containerd.
     pub(crate) async fn wait_test_failpoint(&self, name: &str) {
         let Ok(root) = std::env::var("CUBE_SHIM_TEST_FAILPOINT_DIR") else {
             return;
@@ -1542,10 +1542,15 @@ impl LifecycleHandle {
         if record.phase != LifecyclePhase::TakeoverClaimed
             || record.classification != expected
             || record.operation_owner.kind != OwnerKind::Server
+            || record.create_state != CreateState::InProgress
         {
             return Err(format!(
-                "Host placement requires claimed {:?} server, found {:?}/{:?}/{:?}",
-                expected, record.phase, record.classification, record.operation_owner.kind
+                "Host placement requires claimed {:?} server with an IN_PROGRESS Create, found {:?}/{:?}/{:?}/{:?}",
+                expected,
+                record.phase,
+                record.classification,
+                record.operation_owner.kind,
+                record.create_state
             ));
         }
         let registered = record
@@ -1781,10 +1786,11 @@ impl LifecycleHandle {
         let record = self.read_record()?;
         if record.operation_owner.kind != OwnerKind::Server
             || record.phase != LifecyclePhase::ContainerdCommitted
+            || record.create_state != CreateState::InProgress
         {
             return Err(format!(
-                "RuntimeResource allocation requires committed server owner; found {:?}/{:?}",
-                record.operation_owner.kind, record.phase
+                "RuntimeResource allocation requires an IN_PROGRESS Create with committed server owner; found {:?}/{:?}/{:?}",
+                record.operation_owner.kind, record.phase, record.create_state
             ));
         }
         let operation = LifecycleOperation {
@@ -1841,15 +1847,35 @@ impl LifecycleHandle {
     }
 
     pub(crate) fn begin_runtime_release(&self) -> Result<LifecycleOperation, String> {
+        self.begin_server_operation(
+            "RuntimeResource release",
+            &[
+                CreateState::InProgress,
+                CreateState::Succeeded,
+                CreateState::Failed,
+            ],
+        )
+    }
+
+    fn begin_server_operation(
+        &self,
+        action: &str,
+        allowed_create_states: &[CreateState],
+    ) -> Result<LifecycleOperation, String> {
         let operation_lock = self.operation_lock()?;
         let _record_lock = self.record_lock()?;
         let record = self.read_record()?;
         if record.operation_owner.kind != OwnerKind::Server
             || record.phase != LifecyclePhase::ContainerdCommitted
+            || record.operation_owner.revoked_epoch.is_some()
+            || !allowed_create_states.contains(&record.create_state)
         {
             return Err(format!(
-                "RuntimeResource release requires committed server owner; found {:?}/{:?}",
-                record.operation_owner.kind, record.phase
+                "{action} requires an unfenced committed server in an allowed Create state; found {:?}/{:?}/{:?}/revoked={:?}",
+                record.operation_owner.kind,
+                record.phase,
+                record.create_state,
+                record.operation_owner.revoked_epoch
             ));
         }
         let operation = LifecycleOperation {
@@ -1865,14 +1891,14 @@ impl LifecycleHandle {
     }
 
     pub(crate) fn begin_start_operation(&self) -> Result<LifecycleOperation, String> {
-        self.begin_runtime_release()
+        self.begin_server_operation("StartSandbox", &[CreateState::Succeeded])
     }
 
     /// Holds the same operation barrier used by cleanup while a durable
     /// SUCCEEDED Create is read back from the RuntimeResource provider. The
     /// caller must verify again after Inspect before returning success.
     pub(crate) fn begin_create_readback_operation(&self) -> Result<LifecycleOperation, String> {
-        self.begin_runtime_release()
+        self.begin_server_operation("CreateSandbox readback", &[CreateState::Succeeded])
     }
 
     fn begin_helper_host_operation(&self) -> Result<LifecycleOperation, String> {
@@ -1921,6 +1947,42 @@ impl LifecycleHandle {
         let record = self.update_record(|record| {
             if record.phase == LifecyclePhase::Done {
                 return Ok(());
+            }
+            if matches!(
+                record.phase,
+                LifecyclePhase::TakeoverClaimed | LifecyclePhase::ContainerdCommitted
+            ) {
+                if record.create_state == CreateState::InProgress {
+                    // containerd may invoke the delete action immediately
+                    // after losing the Create RPC connection.  Publish the
+                    // terminal result before cleanup so duplicate waiters and
+                    // the external scanner observe one deterministic outcome.
+                    record.create_state = CreateState::Failed;
+                    record.failure = Some(FailureResult {
+                        code: "CANCELLED".to_string(),
+                        message: reason.to_string(),
+                        published_at_ms: unix_time_ms()?,
+                        waiter_count: record.create_waiters,
+                        drained: record.create_waiters == 0,
+                    });
+                    // Fence a still-live Create actor immediately. It may
+                    // already hold the operation lock, so cleanup cannot wait
+                    // for that lock before publishing the terminal result.
+                    // The next epoch check prevents later provider mutations;
+                    // if an allocating RPC is already in flight, its durable
+                    // INTENT remains replayable by cleanup.
+                    let old_epoch = record.operation_owner.epoch;
+                    record.operation_owner.epoch = old_epoch
+                        .checked_add(1)
+                        .ok_or_else(|| "operation owner epoch overflow".to_string())?;
+                    record.operation_owner.revoked_epoch = Some(old_epoch);
+                    return Ok(());
+                }
+                if record.create_state == CreateState::Failed
+                    && !create_failure_cleanup_ready(record)?
+                {
+                    return Ok(());
+                }
             }
             if !matches!(
                 record.phase,
@@ -5618,6 +5680,43 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn delete_fences_takeover_before_host_commit() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-host-cgroup-delete-before-commit-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let handle = pending_socket_ready_fixture(&root);
+        fs::write(
+            root.join("config.json"),
+            serde_json::to_vec(&spec(HashMap::new(), None)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            handle
+                .begin_legacy_create(&root, "fixture", b"legacy")
+                .unwrap(),
+            CreateAdmission::First
+        );
+        let claimed = handle.read_record().unwrap();
+
+        handle.request_cleanup("delete before Host commit").unwrap();
+        let failed = handle.read_record().unwrap();
+        assert_eq!(failed.phase, LifecyclePhase::TakeoverClaimed);
+        assert_eq!(failed.create_state, CreateState::Failed);
+        assert_eq!(
+            failed.operation_owner.epoch,
+            claimed.operation_owner.epoch + 1
+        );
+        assert!(handle.commit_legacy_takeover().is_err());
+        assert_eq!(
+            handle.read_host_owner().unwrap().state,
+            HostOwnerState::Empty
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn socket_ready_does_not_treat_normal_helper_exit_as_abandonment() {
         let root = std::env::temp_dir().join(format!(
@@ -5745,6 +5844,94 @@ mod tests {
         assert!(!handle.read_record().unwrap().failure.unwrap().drained);
         handle.finish_create_waiter().unwrap();
         assert!(handle.read_record().unwrap().failure.unwrap().drained);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn delete_during_create_publishes_failure_before_cleanup() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-host-cgroup-delete-during-create-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let handle = lifecycle_fixture(&root, LifecyclePhase::ContainerdCommitted);
+        let server = process_identity(std::process::id() as i32).unwrap();
+        handle
+            .update_record(|record| {
+                record.operation_owner = OperationOwner {
+                    kind: OwnerKind::Server,
+                    epoch: 7,
+                    identity: server,
+                    revoked_epoch: None,
+                };
+                record.create_state = CreateState::InProgress;
+                record.create_waiters = 1;
+                record.create_fingerprint = Some("fixture-create".to_string());
+                Ok(())
+            })
+            .unwrap();
+        let in_progress = handle.read_record().unwrap();
+
+        handle.request_cleanup("containerd delete action").unwrap();
+        let failed = handle.read_record().unwrap();
+        assert_eq!(failed.phase, LifecyclePhase::ContainerdCommitted);
+        assert_eq!(failed.create_state, CreateState::Failed);
+        assert_eq!(failed.create_waiters, 1);
+        assert_eq!(
+            failed.operation_owner.epoch,
+            in_progress.operation_owner.epoch + 1
+        );
+        assert_eq!(
+            failed.operation_owner.revoked_epoch,
+            Some(in_progress.operation_owner.epoch)
+        );
+        let failure = failed.failure.as_ref().unwrap();
+        assert_eq!(failure.code, "CANCELLED");
+        assert_eq!(failure.message, "containerd delete action");
+        assert_eq!(failure.waiter_count, 1);
+        assert!(!failure.drained);
+        let intent = RuntimeResourceOwner::intent(
+            "/run/cubelet.sock".to_string(),
+            "sandbox".to_string(),
+            "lease".to_string(),
+            1,
+            "allocation".to_string(),
+        );
+        assert!(handle.begin_runtime_intent(&intent).is_err());
+        assert!(handle.begin_start_operation().is_err());
+        assert!(handle.begin_create_readback_operation().is_err());
+        assert!(handle.begin_runtime_release().is_err());
+        assert_eq!(
+            handle.runtime_owner().unwrap().state(),
+            RuntimeOwnerState::Empty
+        );
+
+        assert!(!handle
+            .scanner_publish_failure_if_current(
+                &in_progress,
+                "INTERNAL",
+                "scanner must not replace delete failure",
+                None,
+            )
+            .unwrap());
+        handle.request_cleanup("duplicate delete action").unwrap();
+        let duplicate = handle.read_record().unwrap();
+        assert_eq!(duplicate.phase, LifecyclePhase::ContainerdCommitted);
+        assert_eq!(duplicate.failure, failed.failure);
+
+        handle.finish_create_waiter().unwrap();
+        let drained = handle.read_record().unwrap();
+        assert!(drained.failure.as_ref().unwrap().drained);
+        handle.request_cleanup("drained delete action").unwrap();
+        let cleanup = handle.read_record().unwrap();
+        assert_eq!(cleanup.phase, LifecyclePhase::CleanupRequired);
+        assert_eq!(
+            cleanup.failure,
+            failed.failure.map(|mut failure| {
+                failure.drained = true;
+                failure
+            })
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -6203,6 +6390,7 @@ mod tests {
                     identity: server,
                     revoked_epoch: None,
                 };
+                record.create_state = CreateState::Succeeded;
                 Ok(())
             })
             .unwrap();
@@ -6280,6 +6468,7 @@ mod tests {
                     identity: server,
                     revoked_epoch: None,
                 };
+                record.create_state = CreateState::InProgress;
                 Ok(())
             })
             .unwrap();
@@ -6294,6 +6483,12 @@ mod tests {
             .unwrap();
         prepare.mark_allocated().unwrap();
         drop(prepare);
+        handle
+            .update_record(|record| {
+                record.create_state = CreateState::Succeeded;
+                Ok(())
+            })
+            .unwrap();
 
         let start = handle.begin_start_operation().unwrap();
         start
@@ -6332,6 +6527,7 @@ mod tests {
                     identity: server,
                     revoked_epoch: None,
                 };
+                record.create_state = CreateState::InProgress;
                 Ok(())
             })
             .unwrap();
@@ -6349,6 +6545,9 @@ mod tests {
             .unwrap();
         assert!(operation.verify().is_err());
         drop(operation);
+        handle
+            .request_cleanup("drain cancelled Create after INTENT")
+            .unwrap();
         ensure_cleanup_handoff(&handle, &queue).unwrap();
         let queued: RuntimeCleanupJob = read_json(&cleanup_queue_path(
             &queue,
@@ -6382,6 +6581,7 @@ mod tests {
                     identity: server,
                     revoked_epoch: None,
                 };
+                record.create_state = CreateState::InProgress;
                 Ok(())
             })
             .unwrap();
@@ -6396,6 +6596,12 @@ mod tests {
             .unwrap();
         prepare.mark_allocated().unwrap();
         drop(prepare);
+        handle
+            .update_record(|record| {
+                record.create_state = CreateState::Succeeded;
+                Ok(())
+            })
+            .unwrap();
 
         let start = handle.begin_start_operation().unwrap();
         start
@@ -6477,6 +6683,7 @@ mod tests {
                     identity: server,
                     revoked_epoch: None,
                 };
+                record.create_state = CreateState::Succeeded;
                 Ok(())
             })
             .unwrap();
@@ -6527,6 +6734,7 @@ mod tests {
                     identity: server,
                     revoked_epoch: None,
                 };
+                record.create_state = CreateState::Succeeded;
                 Ok(())
             })
             .unwrap();
@@ -6582,6 +6790,7 @@ mod tests {
                     identity: server,
                     revoked_epoch: None,
                 };
+                record.create_state = CreateState::Succeeded;
                 Ok(())
             })
             .unwrap();
