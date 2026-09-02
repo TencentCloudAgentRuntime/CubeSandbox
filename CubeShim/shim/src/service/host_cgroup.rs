@@ -4144,6 +4144,10 @@ fn parse_systemd_target_components(
 fn validate_unified_cgroup_mount() -> Result<(), String> {
     let mountinfo = fs::read_to_string("/proc/self/mountinfo")
         .map_err(|error| format!("read cgroup mountinfo: {error}"))?;
+    validate_unified_cgroup_mountinfo(&mountinfo)
+}
+
+fn validate_unified_cgroup_mountinfo(mountinfo: &str) -> Result<(), String> {
     let mut cgroup2_mounts = Vec::new();
     for line in mountinfo.lines() {
         let Some((before, after)) = line.split_once(" - ") else {
@@ -4155,17 +4159,37 @@ fn validate_unified_cgroup_mount() -> Result<(), String> {
         if file_system != "cgroup2" {
             continue;
         }
-        let mountpoint = before
-            .split_whitespace()
-            .nth(4)
+        let fields: Vec<_> = before.split_whitespace().collect();
+        let hierarchy = fields
+            .get(2)
+            .ok_or_else(|| "cgroup2 mountinfo entry has no major:minor".to_string())?;
+        let mountpoint = fields
+            .get(4)
             .ok_or_else(|| "cgroup2 mountinfo entry has no mountpoint".to_string())?;
-        cgroup2_mounts.push(mountpoint.to_string());
+        cgroup2_mounts.push((hierarchy.to_string(), mountpoint.to_string()));
     }
-    if cgroup2_mounts != ["/sys/fs/cgroup"] {
+    let primary: Vec<_> = cgroup2_mounts
+        .iter()
+        .filter(|(_, mountpoint)| mountpoint == "/sys/fs/cgroup")
+        .collect();
+    if primary.len() != 1 {
         return Err(format!(
-            "require exactly one cgroup-v2 mount at /sys/fs/cgroup, found {cgroup2_mounts:?}"
+            "require exactly one primary cgroup-v2 mount at /sys/fs/cgroup, found {cgroup2_mounts:?}"
         ));
     }
+    let hierarchy = &primary[0].0;
+    if cgroup2_mounts
+        .iter()
+        .any(|(candidate, _)| candidate != hierarchy)
+    {
+        return Err(format!(
+            "multiple cgroup-v2 hierarchies are visible, found {cgroup2_mounts:?}"
+        ));
+    }
+    // Cilium and similar node agents may bind-mount the same hierarchy at an
+    // additional path.  The major:minor identity proves it is an alias, not a
+    // second controller hierarchy; Cube still performs every operation only
+    // through the canonical /sys/fs/cgroup mount.
     Ok(())
 }
 
@@ -4963,6 +4987,25 @@ mod tests {
         );
         assert!(canonical_cri_cgroup_parent("").is_err());
         assert!(canonical_cri_cgroup_parent("parent:child").is_err());
+    }
+
+    #[test]
+    fn unified_cgroup_validation_allows_same_hierarchy_bind_aliases() {
+        let mountinfo = concat!(
+            "30 20 0:27 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n",
+            "31 20 0:27 / /run/cilium/cgroupv2 rw - cgroup2 cgroup rw\n",
+        );
+        validate_unified_cgroup_mountinfo(mountinfo).unwrap();
+
+        let different = concat!(
+            "30 20 0:27 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n",
+            "31 20 0:28 / /run/other/cgroup2 rw - cgroup2 cgroup rw\n",
+        );
+        assert!(validate_unified_cgroup_mountinfo(different).is_err());
+        assert!(validate_unified_cgroup_mountinfo(
+            "31 20 0:27 / /run/cilium/cgroupv2 rw - cgroup2 cgroup rw\n"
+        )
+        .is_err());
     }
 
     #[test]
