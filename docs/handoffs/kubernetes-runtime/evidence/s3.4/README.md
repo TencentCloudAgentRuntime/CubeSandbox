@@ -199,10 +199,20 @@ RuntimeClass 的 S3.4c 验收；资源清单、TAT 证据和用户验证命令�
 S0 三节点自建集群的两个 PVM 工作节点已使用 `RuntimeClass/cube` 运行 Deployment 5
 副本和 StatefulSet 3 副本。8 个 Pod 实际对应 8 个 `io.containerd.cube.rs` sandbox/VM；
 64 次 PodIP 全互访、30 次跨节点、24 次稳定 DNS、24 次 ClusterIP 以及非 root resolver
-读取和 root 只读写保护全部通过。工作负载按用户要求保留运行；修正、制品 SHA、TAT
-证据和人工复查命令见
-[`s0-cube-crossnode-workloads.md`](./s0-cube-crossnode-workloads.md)。该回归扩充
-S3.4c.2 证据，但不代替尚未完成的 sibling/PID 诱饵、containerd restart 和 legacy Task。
+读取和 root 只读写保护全部通过。用户于 2026-09-03 验收后授权删除；Deployment、StatefulSet
+及其 8 个 Pod 已删除，namespace 与 RuntimeClass 保留。修正、制品 SHA、TAT 证据和人工复查
+命令见 [`s0-cube-crossnode-workloads.md`](./s0-cube-crossnode-workloads.md)。该回归作为
+S3.4c.2 跨节点证据；后续 sibling/PID 诱饵、containerd restart 和 legacy Task 也已分别通过。
 2026-09-03 又以同一 `2269a3b3` 源码补齐两个 Worker 的 `cube-runtime` CLI；两节点
-SHA 一致，安装未重启 containerd，8 Pod/8 次 Service DNS 回归保持通过，详细制品身份、
+SHA 一致，安装未重启 containerd，当时 8 Pod/8 次 Service DNS 回归保持通过，详细制品身份、
 TAT 任务和失败尝试边界记录在同一证据页。
+
+## S3.4c.2 Host cgroup 生命周期终验（2026-09-03）
+
+live Create/Delete、sibling containment 与同 executable/argv PID 诱饵、containerd restart、legacy
+Task/watchdog restart 及最终双 Worker 零基线均已在最终 `90edf7bf` 上通过。该提交保留
+`2a3927a1` 对 PVM stale PID 的 `pidfd_open(EINVAL)` 保守兼容，并进一步关闭 scanner fencing、Host
+placement record 锁和 cleanup signal/barrier 顺序问题；云端 Host lifecycle 55/55。完整 invocation、
+产物身份、失败诊断和非阻断观察见
+[`s3.4c.2-execution-summary.md`](./s3.4c.2-execution-summary.md)。同一 reviewer 最终确认
+P0/P1/P2 均为 0，并明确返回 `APPROVE S3.4c.2`。

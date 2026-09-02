@@ -139,5 +139,7 @@ ctr -n k8s.io sandboxes list
 find /run/vc/vm -mindepth 1 -maxdepth 1
 ```
 
-本环境完成跨节点 Cube workload 回归，但不替代 S3.4c.2 尚未完成的 sibling/PID 诱饵、
-containerd restart 和 legacy Task 验收，因此 Stage 状态仍为 `VALIDATING`。
+本环境完成跨节点 Cube workload 回归。其后 S3.4c.2 的 sibling/PID 诱饵、containerd restart
+和 legacy Task 验收已另行完成；用户于 2026-09-03 验收后授权删除本页的 Deployment、
+StatefulSet 及 8 个 Pod，namespace 与 RuntimeClass 保留。当前状态与终验见
+[`s3.4c.2-execution-summary.md`](./s3.4c.2-execution-summary.md)。

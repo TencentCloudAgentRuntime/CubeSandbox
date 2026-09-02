@@ -2,27 +2,27 @@
 
 ## 当前 Stage
 
-S3.4c.2 `VALIDATING`：Host leaf lifecycle、进程归位、bundle 外 takeover/scanner 和 Create/Delete failure barrier 已实现；S0 双工作节点的 8 VM 跨节点 Cube 回归已通过，当前继续剩余云端故障、漂移、重启与 legacy 验收。
+S3.4c.3 `IN_PROGRESS`：实现 RuntimeClass overhead 输入、Host 静态 leaf CPU/memory/PIDs ceiling、controller WAL 与恢复决策；并提前运行 Kubernetes Node E2E/Conformance 诊断基线。
 
 ## 基线
 
-最后一项已验证实现 commit 为 `2269a3b3248bda1259cec722fbdd1d20cf843bbd`，tree 为 `ca969122cc3e2abeab8254bdacf5ee8a0a35462c`；上一个验收证据 commit 为 `4c6b8b25`。S0 双工作节点当前 CubeShim/Agent/`cube-runtime` SHA-256 为 `9cfaf6d3…`/`870fd590…`/`8c17375d…`；固定 commit 云端 20 项 standard-rootfs 测试、8 Pod 跨节点 RuntimeClass 回归、原有 50 项 Host lifecycle、RuntimeClass Pod 与 SIGKILL/30 秒兜底均通过。
+最后一项已验证实现 commit 为 `90edf7bf1bec222c7b4e3fc353478eabe6a42db5`，tree 为 `8c2301d0034a19a42fda73e170340a2cafe3a8f9`；上一个验收证据 commit 为 `13625f99`。S0 双工作节点当前 CubeShim/Agent/`cube-runtime` SHA-256 为 `7ba54f3d…`/`870fd590…`/`8c17375d…`；固定构建 Host lifecycle 55/55、双节点 systemd gate 200、RuntimeClass、live Delete、PID 诱饵、containerd restart 和 legacy/watchdog restart 均通过。
 
 ## 已完成
 
-S0、S1、S2.1～S2.4、S3.1～S3.3、S3.4a～S3.4b 与 S3.4c.1 全部 `DONE`。S3.4c.1 冻结 kubelet parent/Cube static leaf/Guest per-container 三层 owner、12 个预算向量、classifier/path、immutable/containment identity、external lifecycle + 双 cleanup owner、epoch/revoke、INTENT-before-write WAL 与封闭恢复表；systemd 200 次行为门禁和同一 reviewer 批准均完成。
+S0、S1、S2.1～S2.4、S3.1～S3.3、S3.4a～S3.4b 与 S3.4c.1～S3.4c.2 全部 `DONE`。S3.4c.2 最终实现 `90edf7bf` 完成 Host placement、takeover/scanner、process fencing 和 exact cleanup；固定测试、完整云端故障矩阵及同一 reviewer 批准均完成。
 
 ## 未完成
 
-S3.4c.2～S3.4d 尚未全部完成。S3.4c.2 还需 sibling containment/PID 诱饵、containerd restart、legacy Task 和最终 reviewer closure；S3.4c.3 的 controller WAL/RuntimeClass overhead 与 S3.4c.4 压力矩阵尚未开始。极端 unchecked `memory.max` 下调按 `K8S-OQ-017` 跟踪。
+S3.4c.3～S3.4d 尚未完成。S3.4c.3 的 controller WAL/RuntimeClass overhead 已开始，S3.4c.4 压力矩阵尚未开始。极端 unchecked `memory.max` 下调按 `K8S-OQ-017` 跟踪，inactive systemd scope 的 Release 幂等语义按 `K8S-OQ-020` 跟踪。
 
 ## 验证
 
-`fe2f47cb` 由同一 reviewer 复审为 P0/P1=0 并 `APPROVE THIS FIX`；`inv-085uf4g092` 固定构建 50/50，`inv-885uk4gin4` 部署并通过本 build/boot 的 systemd 200 次 gate，`inv-985umh0f8d` 真实 RuntimeClass Pod 启停/日志/exec/Host leaf/exact cleanup 通过。`inv-v85umsgm7x` 证明 shim SIGKILL 后 durable FAILED、epoch fence、未 drain waiter 保留 30.698 秒后 exact cleanup。`inv-685vvwg356` 证明显式 120 秒客户端 timeout 下 live Delete 后五秒内 RuntimeResource=EMPTY、epoch 2→3，release 后收敛；其中诊断 ERR trap 对预期 `wait rc=1` 打出误报文字，但任务 exit=0 且最终验收行通过，需干净重跑替换该证据。额外两节点 TKE `cls-1oqe2py4` 的默认 runtime 5+3 基线保持。S0 自建集群现另有真实 Cube 验收：`inv-8863x002rx` 为 8 个 Pod 2/2 Ready，`inv-8863xngiss` 完成 64 次 PodIP、30 次跨节点、24 次稳定 DNS 和 24 次 ClusterIP；`inv-38640k0ru9`/`inv-88640n0hs5` 确认 3/5 个 `io.containerd.cube.rs` sandbox 与 VM/lease 精确一致，`inv-98642mgspg` 确认 8 个非 root resolver 与只读 bind。`inv-v86aek0p10` 又以同一 commit 的 `cube-runtime` 补齐两个 Worker，`inv-v86aem0qtx` 确认安装后 8/8 Pod、0 restart 与 Service DNS 8/8。详见 [跨节点证据](./evidence/s3.4/s0-cube-crossnode-workloads.md)。
+`90edf7bf` 在 `2a3927a1` 的 PVM stale PID 兼容之上，关闭 scanner/operation lock 死锁窗口、Host placement record 长持锁和 cleanup signal 顺序问题。`inv-086cqv0bdf` 固定构建 55/55；`inv-v86cvcgkke`/`inv-086cvbg072` 双节点部署并各通过 systemd gate 200。新基线 live Delete `inv-986cwegjsh`、sibling/PID 诱饵 `inv-386d0802k1`、containerd restart `inv-686d0r0frx`/`inv-a86d18gp2k`、legacy/watchdog restart `inv-p86d0q07k9` 与最终双 Worker 零基线 `inv-b86d1xgwuh`/`inv-v86d20090k` 全通过。原 S0 8 Pod 跨节点回归证据保持，但工作负载已按用户授权删除；详见 [S3.4c.2 终验](./evidence/s3.4/s3.4c.2-execution-summary.md)。
 
 ## 阻塞
 
-无外部阻塞，也无待用户决策。用户请求的 S0 跨节点 Cube 验证环境已经可用并保留 8 个运行中 Pod。live-delete 前两轮失败已定位为 `crictl` 默认短 timeout 导致 waiter 正常 drain；显式 120 秒后功能通过，当前只清理诊断 trap 误报并补干净证据。`K8S-OQ-014`～`K8S-OQ-016` 等待 S3.4c.2～c.4 最终关闭；`K8S-OQ-017`～`019` 继续跟踪极端内存下调、VM hotplug 与有限 Pod PID 语义。
+无外部阻塞，也无待用户决策。S0 跨节点 Cube 验证环境继续保留，已验收的 8 Pod 已按用户授权删除且两个 Worker 回到精确零基线。一次 inactive systemd scope Release 的可重试错误作为非阻断 `K8S-OQ-020` 进入 S3.4c.4/E2E；`K8S-OQ-014`～`K8S-OQ-016` 等待 S3.4c.3～c.4 最终关闭，`K8S-OQ-017`～`019` 继续跟踪极端内存下调、VM hotplug 与有限 Pod PID 语义。
 
 ## 受保护路径
 
@@ -30,4 +30,4 @@ S3.4c.2～S3.4d 尚未全部完成。S3.4c.2 还需 sibling containment/PID 诱�
 
 ## 下一步
 
-用户可先在两个 Worker 用 `/usr/local/bin/cube-runtime` 做 Guest/底层 snapshot 调试，并在 `ins-qj8d7ypa` 用 `/etc/kubernetes/admin.conf` 验证 `cubesandbox-cube-crossnode`；不要缩容或替换这 8 个 Pod，除非开始下一项破坏性验收。随后干净重跑 live Create/并发 Delete，再完成 sibling containment breach + 同 executable/argv PID 诱饵、containerd restart 时现有 Pod 可用、legacy Task 与最终零基线。更新 S3.4c 实际契约/证据后交同一 reviewer，直到明确 `APPROVE S3.4c.2` 才进入 S3.4c.3。
+先在不改变当前双 Worker 零基线的前提下，固定 Kubernetes v1.36.4 Node E2E/Conformance runner、运行方式与测试清单；随后实现 S3.4c.3 的 CRI overhead decoder、预算向量和 controller WAL，按纯函数→云端特权 controller→真实 RuntimeClass/resize 顺序验收。同一 reviewer 明确批准 S3.4c.3 后才进入 S3.4c.4。
