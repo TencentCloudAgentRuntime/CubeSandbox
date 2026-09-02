@@ -335,7 +335,7 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 | S3.1 基础 Volume | `DONE` | Codex | 输入、独立 Pod Volume share、可写卷/失败回滚、四类投射卷动态更新、subPath 固定语义和最终支持矩阵均已关闭 | 实现 `5b504b58`；S3.1d 回归 `aafdef40` / `inv-a83u0wgvxv`；审计 `inv-v83u490xa8`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.1/README.md)；同一 reviewer 确认 S3.1 `DONE` | S3.2 filesystem PVC |
 | S3.2 PVC | `DONE` | Codex | S3.2a～S3.2d 已完成输入基线、跨容器/Pod 重建持久化、失败回滚、static-local Retain 手工重绑、组合回归与支持矩阵 | `83902212`；组合终验 `inv-a83x7s0g04`；独立审计 `inv-883xivg7ub`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.2/README.md)；同一 reviewer 确认 S3.2 `DONE` | S3.3 SecurityContext |
 | S3.3 SecurityContext | `DONE` | Codex | S3.3a～S3.3f 已完成输入诊断、身份与组、capability/rootfs、NNP/seccomp、privileged 双门禁、exec 安全上下文和组合支持矩阵 | 实现 `7bf7f09d`；组合终验 `inv-v84gjpgj7k`；独立审计 `inv-884huw00ab`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.3/README.md)；同一 reviewer `APPROVE S3.3f DONE` | S3.4 资源控制 |
-| S3.4 资源控制 | `IN_PROGRESS` | Codex | S3.4a、S3.4b、S3.4c.1 和 S3.4c.2 已 `DONE`；S3.4c.3 已开始 | S3.4c.2 `90edf7bf`、Host lifecycle 55/55、双节点 systemd gate 200、live Delete、PID 诱饵、containerd/legacy watchdog restart、exact cleanup 与 reviewer P0/P1/P2=0 全通过；[终验证据](../../handoffs/kubernetes-runtime/evidence/s3.4/s3.4c.2-execution-summary.md) | 实现 RuntimeClass overhead、静态 leaf ceiling/controller WAL；提前运行 Node E2E 诊断基线 |
+| S3.4 资源控制 | `IN_PROGRESS` | Codex | S3.4a、S3.4b、S3.4c.1 和 S3.4c.2 已 `DONE`；S3.4c.3 实现/云证据已闭合，等待 reviewer | S3.4c.3 `6c7eb754`、固定 builder 153/153、双节点 gate 200、真实 V1/resize/controller crash/exact cleanup 全通过；[候选终验证据](../../handoffs/kubernetes-runtime/evidence/s3.4/s3.4c.3-execution-summary.md) | 同一 reviewer 批准后进入 S3.4c.4 压力/兼容矩阵，再运行 Kubernetes E2E/Conformance |
 
 ### S3.1 子阶段执行记录
 
