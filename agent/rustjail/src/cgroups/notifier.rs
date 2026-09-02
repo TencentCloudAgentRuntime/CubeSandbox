@@ -15,6 +15,7 @@ use futures::StreamExt as _;
 use inotify::{Inotify, WatchMask};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc::{channel, Receiver};
+use tokio::task::JoinHandle;
 
 // Convenience macro to obtain the scope logger
 macro_rules! sl {
@@ -23,7 +24,40 @@ macro_rules! sl {
     };
 }
 
-pub async fn notify_oom(cid: &str, cg_dir: String) -> Result<Receiver<String>> {
+pub struct OomNotifier {
+    receiver: Receiver<String>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl OomNotifier {
+    fn new(receiver: Receiver<String>, task: JoinHandle<()>) -> Self {
+        Self {
+            receiver,
+            task: Some(task),
+        }
+    }
+
+    pub async fn recv(&mut self) -> Option<String> {
+        self.receiver.recv().await
+    }
+
+    pub async fn cancel(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for OomNotifier {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+pub async fn notify_oom(cid: &str, cg_dir: String) -> Result<OomNotifier> {
     if cgroups::hierarchies::is_cgroup2_unified_mode() {
         return notify_on_oom_v2(cid, cg_dir).await;
     }
@@ -78,7 +112,7 @@ fn decide_v2_event(
 
 // notify_on_oom returns channel on which you can expect event about OOM,
 // if process died without OOM this channel will be closed.
-pub async fn notify_on_oom_v2(containere_id: &str, cg_dir: String) -> Result<Receiver<String>> {
+pub async fn notify_on_oom_v2(containere_id: &str, cg_dir: String) -> Result<OomNotifier> {
     register_memory_event_v2(containere_id, cg_dir, "memory.events", "cgroup.events").await
 }
 
@@ -87,7 +121,7 @@ async fn register_memory_event_v2(
     cg_dir: String,
     memory_event_name: &str,
     cgroup_event_name: &str,
-) -> Result<Receiver<String>> {
+) -> Result<OomNotifier> {
     let event_control_path = Path::new(&cg_dir).join(memory_event_name);
     let cgroup_event_control_path = Path::new(&cg_dir).join(cgroup_event_name);
     info!(
@@ -114,7 +148,7 @@ async fn register_memory_event_v2(
     let containere_id = containere_id.to_string();
     let armed_oom_kill = get_value_from_cgroup(&event_control_path, "oom_kill")?;
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         if armed_oom_kill > baseline_oom_kill {
             let _ = sender.send(containere_id.clone()).await.map_err(|e| {
                 error!(sl!(), "send containere_id failed, error: {:?}", e);
@@ -137,9 +171,7 @@ async fn register_memory_event_v2(
 
             let oom_kill = get_value_from_cgroup(&event_control_path, "oom_kill");
             let populated = if event.wd == cg_wd {
-                Some(
-                    get_value_from_cgroup(&cgroup_event_control_path, "populated").unwrap_or(-1),
-                )
+                Some(get_value_from_cgroup(&cgroup_event_control_path, "populated").unwrap_or(-1))
             } else {
                 None
             };
@@ -166,28 +198,24 @@ async fn register_memory_event_v2(
         }
     });
 
-    Ok(receiver)
+    Ok(OomNotifier::new(receiver, task))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{decide_v2_event, get_value_from_cgroup, V2EventDecision};
+    use super::{
+        decide_v2_event, get_value_from_cgroup, register_memory_event_v2, V2EventDecision,
+    };
     use std::fs;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Barrier;
 
     #[test]
     fn populated_zero_prefers_oom_counter_increase() {
-        assert_eq!(
-            decide_v2_event(1, 0, Some(0)),
-            V2EventDecision::Oom
-        );
-        assert_eq!(
-            decide_v2_event(0, 0, Some(0)),
-            V2EventDecision::Exited
-        );
-        assert_eq!(
-            decide_v2_event(0, 0, Some(1)),
-            V2EventDecision::Continue
-        );
+        assert_eq!(decide_v2_event(1, 0, Some(0)), V2EventDecision::Oom);
+        assert_eq!(decide_v2_event(0, 0, Some(0)), V2EventDecision::Exited);
+        assert_eq!(decide_v2_event(0, 0, Some(1)), V2EventDecision::Continue);
     }
 
     #[test]
@@ -197,11 +225,76 @@ mod tests {
         fs::write(&events, "low 0\nhigh 0\nmax 3\noom 2\noom_kill 1\n").unwrap();
         assert_eq!(get_value_from_cgroup(&events, "oom_kill").unwrap(), 1);
     }
+
+    #[tokio::test]
+    async fn watcher_is_armed_before_immediate_oom_and_notifies_exactly_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let memory_events = directory.path().join("memory.events");
+        let cgroup_events = directory.path().join("cgroup.events");
+        fs::write(&memory_events, "oom 0\noom_kill 0\n").unwrap();
+        fs::write(&cgroup_events, "populated 1\n").unwrap();
+
+        // This barrier models the exec FIFO: the workload cannot create its
+        // immediate OOM until registration has returned with both watches
+        // armed and the baseline captured.
+        let release = Arc::new(Barrier::new(2));
+        let trigger = Arc::clone(&release);
+        let memory_events_for_trigger = memory_events.clone();
+        let cgroup_events_for_trigger = cgroup_events.clone();
+        let workload = tokio::spawn(async move {
+            trigger.wait().await;
+            fs::write(memory_events_for_trigger, "oom 1\noom_kill 1\n").unwrap();
+            fs::write(cgroup_events_for_trigger, "populated 0\n").unwrap();
+        });
+
+        let mut notifier = register_memory_event_v2(
+            "immediate-oom",
+            directory.path().display().to_string(),
+            "memory.events",
+            "cgroup.events",
+        )
+        .await
+        .unwrap();
+        release.wait().await;
+        workload.await.unwrap();
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), notifier.recv())
+                .await
+                .unwrap(),
+            Some("immediate-oom".to_string())
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), notifier.recv())
+                .await
+                .unwrap(),
+            None,
+            "one cgroup OOM must produce exactly one notification"
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_can_be_cancelled_when_start_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("memory.events"), "oom_kill 0\n").unwrap();
+        fs::write(directory.path().join("cgroup.events"), "populated 1\n").unwrap();
+        let notifier = register_memory_event_v2(
+            "failed-start",
+            directory.path().display().to_string(),
+            "memory.events",
+            "cgroup.events",
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), notifier.cancel())
+            .await
+            .unwrap();
+    }
 }
 
 // notify_on_oom returns channel on which you can expect event about OOM,
 // if process died without OOM this channel will be closed.
-async fn notify_on_oom(cid: &str, dir: String) -> Result<Receiver<String>> {
+async fn notify_on_oom(cid: &str, dir: String) -> Result<OomNotifier> {
     if dir.is_empty() {
         return Err(anyhow!("memory controller missing"));
     }
@@ -214,7 +307,7 @@ async fn register_memory_event(
     cg_dir: String,
     event_name: &str,
     arg: &str,
-) -> Result<Receiver<String>> {
+) -> Result<OomNotifier> {
     let path = Path::new(&cg_dir).join(event_name);
     let event_file = File::open(path.clone())?;
 
@@ -235,7 +328,7 @@ async fn register_memory_event(
     let (sender, receiver) = tokio::sync::mpsc::channel(100);
     let containere_id = cid.to_string();
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         loop {
             let sender = sender.clone();
             let mut buf = [0u8; 8];
@@ -270,5 +363,5 @@ async fn register_memory_event(
         }
     });
 
-    Ok(receiver)
+    Ok(OomNotifier::new(receiver, task))
 }

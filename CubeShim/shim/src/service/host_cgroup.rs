@@ -4804,35 +4804,90 @@ fn cleanup_host_target(target: &HostTarget) -> Result<(), String> {
             ..
         } => {
             let path = Path::new("/sys/fs/cgroup").join(cgroup.trim_start_matches('/'));
-            if !path.exists() {
-                return if systemd_unit_absent(unit)? {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "systemd scope {unit} remains loaded after cgroup disappeared"
-                    ))
-                };
-            }
-            verify_cgroup_cleanup_identity(&path, parent_identity, leaf_identity.as_ref())?;
-            let values = systemd_properties(unit)?;
-            if values.get("ActiveState").map(String::as_str) == Some("failed") {
-                // Resetting a failed scope may cause systemd to collect its
-                // cgroup.  Only do so after the exact leaf is proven empty;
-                // never use reset-failed as a process-removal operation.
-                verify_empty_cgroup(&path)?;
-                let output = Command::new("systemctl")
-                    .args(["reset-failed", unit])
-                    .output()
-                    .map_err(|error| format!("reset failed scope {unit}: {error}"))?;
-                if !output.status.success() {
-                    return Err(format!(
-                        "reset failed scope {unit}: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ));
-                }
-            }
-            Err(format!("systemd scope {unit} has not been collected yet"))
+            cleanup_systemd_target_with(
+                unit,
+                &path,
+                parent_identity,
+                leaf_identity.as_ref(),
+                || systemd_properties(unit),
+                || systemd_unit_absent(unit),
+                || reset_failed_systemd_unit(unit),
+            )
         }
+    }
+}
+
+fn cleanup_systemd_target_with<P, A, R>(
+    unit: &str,
+    path: &Path,
+    parent_identity: &FileIdentity,
+    leaf_identity: Option<&FileIdentity>,
+    mut properties: P,
+    mut unit_absent: A,
+    mut reset_failed: R,
+) -> Result<(), String>
+where
+    P: FnMut() -> Result<HashMap<String, String>, String>,
+    A: FnMut() -> Result<bool, String>,
+    R: FnMut() -> Result<(), String>,
+{
+    if !path.exists() {
+        return if unit_absent()? {
+            Ok(())
+        } else {
+            Err(format!(
+                "systemd scope {unit} remains loaded after cgroup disappeared"
+            ))
+        };
+    }
+    verify_cgroup_cleanup_identity(path, parent_identity, leaf_identity)?;
+
+    let values = match properties() {
+        Ok(values) => values,
+        Err(query_error) => {
+            // systemctl show races scope collection: it can fail after the
+            // exact path was observed but before properties are returned.
+            // Only accept that race when the unit is now absent and the
+            // identity-bound leaf is empty.
+            if !unit_absent()? {
+                return Err(query_error);
+            }
+            if path.exists() {
+                verify_cgroup_cleanup_identity(path, parent_identity, leaf_identity)?;
+                verify_empty_cgroup(path)?;
+            }
+            return Ok(());
+        }
+    };
+
+    match values.get("ActiveState").map(String::as_str) {
+        Some("inactive") | Some("dead") => {
+            verify_empty_cgroup(path)?;
+            Ok(())
+        }
+        Some("failed") => {
+            // Resetting a failed scope may cause systemd to collect its
+            // cgroup. Only do so after the exact leaf is proven empty; never
+            // use reset-failed as a process-removal operation.
+            verify_empty_cgroup(path)?;
+            reset_failed()
+        }
+        _ => Err(format!("systemd scope {unit} has not been collected yet")),
+    }
+}
+
+fn reset_failed_systemd_unit(unit: &str) -> Result<(), String> {
+    let output = Command::new("systemctl")
+        .args(["reset-failed", unit])
+        .output()
+        .map_err(|error| format!("reset failed scope {unit}: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "reset failed scope {unit}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     }
 }
 
@@ -6736,6 +6791,136 @@ mod tests {
             worker.join().unwrap().unwrap();
         }
         assert!(directory.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn empty_systemd_cleanup_fixture(name: &str) -> (PathBuf, PathBuf, FileIdentity, FileIdentity) {
+        let root = std::env::temp_dir().join(format!(
+            "cube-systemd-cleanup-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let leaf = root.join("fixture.scope");
+        fs::create_dir_all(&leaf).unwrap();
+        fs::write(leaf.join("cgroup.events"), "populated 0\n").unwrap();
+        fs::write(leaf.join("cgroup.procs"), "").unwrap();
+        let parent_identity = file_identity(&root).unwrap();
+        let leaf_identity = file_identity(&leaf).unwrap();
+        (root, leaf, parent_identity, leaf_identity)
+    }
+
+    #[test]
+    fn systemd_cleanup_accepts_exact_empty_inactive_and_collection_race() {
+        let (root, leaf, parent, identity) = empty_systemd_cleanup_fixture("inactive");
+        cleanup_systemd_target_with(
+            "fixture.scope",
+            &leaf,
+            &parent,
+            Some(&identity),
+            || {
+                Ok(HashMap::from([(
+                    "ActiveState".to_string(),
+                    "inactive".to_string(),
+                )]))
+            },
+            || panic!("inactive state must not require an absence query"),
+            || panic!("inactive state must not reset the unit"),
+        )
+        .unwrap();
+        fs::remove_dir_all(root).unwrap();
+
+        let (root, leaf, parent, identity) = empty_systemd_cleanup_fixture("collected");
+        cleanup_systemd_target_with(
+            "fixture.scope",
+            &leaf,
+            &parent,
+            Some(&identity),
+            || Err("injected systemctl show collection race".to_string()),
+            || Ok(true),
+            || panic!("an absent unit must not be reset"),
+        )
+        .unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn systemd_cleanup_resets_only_exact_empty_failed_scope() {
+        let (root, leaf, parent, identity) = empty_systemd_cleanup_fixture("failed");
+        let reset = Arc::new(AtomicBool::new(false));
+        let reset_call = Arc::clone(&reset);
+        cleanup_systemd_target_with(
+            "fixture.scope",
+            &leaf,
+            &parent,
+            Some(&identity),
+            || {
+                Ok(HashMap::from([(
+                    "ActiveState".to_string(),
+                    "failed".to_string(),
+                )]))
+            },
+            || panic!("failed state must not require an absence query"),
+            move || {
+                reset_call.store(true, Ordering::Release);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(reset.load(Ordering::Acquire));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn systemd_cleanup_fails_closed_for_live_or_uncertain_identity() {
+        let (root, leaf, parent, identity) = empty_systemd_cleanup_fixture("active");
+        let error = cleanup_systemd_target_with(
+            "fixture.scope",
+            &leaf,
+            &parent,
+            Some(&identity),
+            || {
+                Ok(HashMap::from([(
+                    "ActiveState".to_string(),
+                    "active".to_string(),
+                )]))
+            },
+            || Ok(false),
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.contains("has not been collected"));
+
+        let bait = root.join("bait");
+        fs::create_dir(&bait).unwrap();
+        let wrong_identity = file_identity(&bait).unwrap();
+        let error = cleanup_systemd_target_with(
+            "fixture.scope",
+            &leaf,
+            &parent,
+            Some(&wrong_identity),
+            || Err("injected systemctl show collection race".to_string()),
+            || Ok(true),
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.contains("leaf identity changed"));
+
+        fs::write(leaf.join("cgroup.events"), "populated 1\n").unwrap();
+        let error = cleanup_systemd_target_with(
+            "fixture.scope",
+            &leaf,
+            &parent,
+            Some(&identity),
+            || {
+                Ok(HashMap::from([(
+                    "ActiveState".to_string(),
+                    "inactive".to_string(),
+                )]))
+            },
+            || Ok(false),
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.contains("still populated"));
         fs::remove_dir_all(root).unwrap();
     }
 

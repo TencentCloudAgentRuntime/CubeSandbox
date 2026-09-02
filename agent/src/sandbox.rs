@@ -28,7 +28,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{thread, time};
 use tokio::sync::broadcast::{channel, Sender as BroadcastSender};
-use tokio::sync::mpsc::Receiver;
 use tokio::sync::{oneshot, Notify};
 use tracing::instrument;
 
@@ -470,8 +469,12 @@ impl Sandbox {
         Ok(())
     }
 
-    #[instrument]
-    pub async fn run_oom_event_monitor(&self, mut rx: Receiver<String>, container_id: String) {
+    #[instrument(skip(self, notifier))]
+    pub async fn run_oom_event_monitor(
+        &self,
+        mut notifier: rustjail_cgroups::notifier::OomNotifier,
+        container_id: String,
+    ) {
         let logger = self.logger.clone();
 
         if self.event_tx.is_none() {
@@ -486,7 +489,7 @@ impl Sandbox {
 
         tokio::spawn(async move {
             loop {
-                let event = rx.recv().await;
+                let event = notifier.recv().await;
                 // None means the container has exited,
                 // and sender in OOM notifier is dropped.
                 if event.is_none() {

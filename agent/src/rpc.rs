@@ -694,21 +694,34 @@ impl AgentService {
             .ok_or_else(|| anyhow!("Invalid container id"))?;
 
         check_container_resource_operation(ctr, ContainerResourceOperation::Start)?;
-        ctr.exec().await?;
 
-        if sid == cid {
-            return Ok(());
+        // Arm the OOM watcher before releasing the exec FIFO. Otherwise an
+        // immediately OOMing init process can increment oom_kill and exit
+        // before the notifier establishes its baseline and inotify watches.
+        let oom_notifier = if sid != cid {
+            match ctr
+                .cgroup_manager
+                .as_ref()
+                .and_then(|manager| manager.get_cg_path("memory"))
+            {
+                Some(cg_path) => {
+                    Some(notifier::notify_oom(cid.as_str(), cg_path.to_string()).await?)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        if let Err(error) = ctr.exec().await {
+            if let Some(notifier) = oom_notifier {
+                notifier.cancel().await;
+            }
+            return Err(error);
         }
 
-        // start oom event loop
-        if let Some(ref ctr) = ctr.cgroup_manager {
-            let cg_path = ctr.get_cg_path("memory");
-
-            if let Some(cg_path) = cg_path {
-                let rx = notifier::notify_oom(cid.as_str(), cg_path.to_string()).await?;
-
-                s.run_oom_event_monitor(rx, cid.clone()).await;
-            }
+        if let Some(notifier) = oom_notifier {
+            s.run_oom_event_monitor(notifier, cid.clone()).await;
         }
 
         Ok(())
