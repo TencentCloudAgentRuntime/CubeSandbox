@@ -384,6 +384,33 @@ struct LogForwardHandle {
     lifecycle: Arc<tokio::sync::Semaphore>,
 }
 
+/// Clone-safe serialization gate for one container's mutating lifecycle.
+///
+/// `SandBox` deliberately clones `Container` values before Agent RPCs so the
+/// container map is not held across I/O.  Every clone must nevertheless share
+/// one mutation fence; otherwise Start/Update can complete after Delete or a
+/// pod-level pause has already removed/frozen the tracked object.
+#[derive(Clone)]
+struct ContainerOperationGate {
+    semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+impl ContainerOperationGate {
+    fn new() -> Self {
+        Self {
+            semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+        }
+    }
+
+    async fn acquire(&self) -> tokio::sync::OwnedSemaphorePermit {
+        self.semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("container operation semaphore closed")
+    }
+}
+
 impl LogForwardHandle {
     fn new() -> Self {
         Self {
@@ -483,6 +510,8 @@ pub struct Container {
     /// Clones share the task ownership so exactly one caller takes and awaits
     /// it; start/stop are serialized across clones by an internal semaphore.
     log_forward: LogForwardHandle,
+    /// Serializes mutating container/exec operations across all clones.
+    operation: ContainerOperationGate,
 }
 
 impl Container {
@@ -527,8 +556,13 @@ impl Container {
             app_snapshot,
             resources_v2,
             log_forward: LogForwardHandle::new(),
+            operation: ContainerOperationGate::new(),
         };
         Ok(c)
+    }
+
+    pub(crate) async fn acquire_operation(&self) -> tokio::sync::OwnedSemaphorePermit {
+        self.operation.acquire().await
     }
 
     pub async fn pause_vm_forbidding(&self) -> bool {
@@ -2294,5 +2328,77 @@ mod log_forward_tests {
             observed, 1,
             "stop must drain the task the start installed, not abort it"
         );
+    }
+}
+
+#[cfg(test)]
+mod container_operation_tests {
+    use super::ContainerOperationGate;
+    use std::time::Duration;
+
+    /// All mutating SandBox paths acquire the same gate stored in Container:
+    /// start-container/start-exec versus delete/kill/pause, and update versus
+    /// pause/delete.  Exercise every required conflict name so future changes
+    /// cannot accidentally replace the shared clone-safe gate with a local one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lifecycle_conflicts_are_exclusive_across_container_clones() {
+        for (in_flight, contender) in [
+            ("start-container", "delete"),
+            ("start-container", "kill"),
+            ("start-container", "pause"),
+            ("start-exec", "delete"),
+            ("start-exec", "kill"),
+            ("start-exec", "pause"),
+            ("update", "pause"),
+            ("update", "delete"),
+        ] {
+            let gate = ContainerOperationGate::new();
+            let first = gate.acquire().await;
+            let contender_gate = gate.clone();
+            let waiting = tokio::spawn(async move {
+                let _permit = contender_gate.acquire().await;
+            });
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert!(
+                !waiting.is_finished(),
+                "{contender} must wait while {in_flight} owns the container operation fence"
+            );
+
+            drop(first);
+            tokio::time::timeout(Duration::from_secs(1), waiting)
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("{contender} did not proceed after {in_flight} released the fence")
+                })
+                .unwrap();
+        }
+    }
+
+    /// A pod-wide pause acquires every container's gate. If any container has
+    /// a Start/Update in flight, the pause cannot cross the lifecycle boundary
+    /// until that operation completes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pod_pause_waits_for_all_container_operations() {
+        let first = ContainerOperationGate::new();
+        let second = ContainerOperationGate::new();
+        let in_flight = second.acquire().await;
+
+        let pause = tokio::spawn({
+            let first = first.clone();
+            let second = second.clone();
+            async move {
+                let _first = first.acquire().await;
+                let _second = second.acquire().await;
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!pause.is_finished(), "pause crossed an in-flight operation");
+        drop(in_flight);
+        tokio::time::timeout(Duration::from_secs(1), pause)
+            .await
+            .expect("pause did not continue after all container operations completed")
+            .unwrap();
     }
 }

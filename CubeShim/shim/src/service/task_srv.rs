@@ -756,14 +756,15 @@ impl Task for TaskService {
             req.id(),
             req.exec_id()
         );
-        let sb = {
-            let sb = self.sandbox.lock().await;
-            if sb.paused().await {
-                errf!(self.log, "sandbox not in normal state");
-                return Err(Others(format!("sandbox not in normal state")));
-            }
-            sb.clone()
-        };
+        // Hold the sandbox mutation fence through Agent Start and event
+        // publication. Delete/Kill/Pause and Sandbox Stop use the same mutex,
+        // so none can remove or freeze the tracked object while a cloned
+        // Container finishes Start in the Guest.
+        let sb = self.sandbox.lock().await;
+        if sb.paused().await {
+            errf!(self.log, "sandbox not in normal state");
+            return Err(Others(format!("sandbox not in normal state")));
+        }
         if req.exec_id().is_empty() {
             sb.start_container(&req.id).await.map_err(|e| {
                 errf!(self.log, "Start container failed:{}", e);
@@ -1053,14 +1054,15 @@ impl Task for TaskService {
         } else {
             None
         };
-        let sb = {
-            let sb = self.sandbox.lock().await;
-            if sb.paused().await {
-                errf!(self.log, "sandbox not in normal state");
-                return Err(Others(format!("sandbox not in normal state")));
-            }
-            sb.clone()
-        };
+        // Resource update and a possible pod-level pause/rollback are one
+        // sandbox mutation. Keep the same fence for both phases so Pause or
+        // Delete cannot commit between the Guest resource write and the final
+        // sandbox state transition.
+        let mut sb = self.sandbox.lock().await;
+        if sb.paused().await {
+            errf!(self.log, "sandbox not in normal state");
+            return Err(Others(format!("sandbox not in normal state")));
+        }
         if let Some((resources, resources_v2)) = parsed_resources.as_ref() {
             sb.update_container(&req.id, resources, resources_v2.as_deref())
                 .await
@@ -1071,11 +1073,6 @@ impl Task for TaskService {
         }
 
         let outcome = {
-            let mut sb = self.sandbox.lock().await;
-            if sb.paused().await {
-                errf!(self.log, "sandbox not in normal state");
-                return Err(Others(format!("sandbox not in normal state")));
-            }
             sb.update_sandbox(&req.annotations).await.map_err(|e| {
                 errf!(self.log, "update sandbox failed:{}", e.clone());
                 Error::Other(format!("update sandbox failed:{}", e))

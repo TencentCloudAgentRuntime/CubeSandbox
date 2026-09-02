@@ -352,6 +352,26 @@ impl SandBox {
         }
         false
     }
+
+    /// Fence pod-wide VM transitions against every in-flight mutating
+    /// container operation.  IDs are sorted so future callers that need the
+    /// same complete set cannot acquire the per-container gates in opposite
+    /// orders.
+    async fn acquire_all_container_operations(&self) -> Vec<tokio::sync::OwnedSemaphorePermit> {
+        let mut containers: Vec<_> = {
+            let containers = self.containers.lock().await;
+            containers
+                .iter()
+                .map(|(id, container)| (id.clone(), container.clone()))
+                .collect()
+        };
+        containers.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut permits = Vec::with_capacity(containers.len());
+        for (_, container) in containers {
+            permits.push(container.acquire_operation().await);
+        }
+        permits
+    }
     async fn disconnect_agent(&mut self, from_rollback: bool) -> CResult<()> {
         //stop monitor
 
@@ -1227,6 +1247,7 @@ impl SandBox {
                 None => return Err(Error::NotFoundError(format!("not found container:{}", id))),
             }
         };
+        let _operation = container.acquire_operation().await;
         container
             .start_container()
             .await
@@ -1235,23 +1256,27 @@ impl SandBox {
     }
 
     pub async fn kill_container(&self, id: &String, exec_id: &String, sig: u32) -> Result<()> {
-        let mut containers = self.containers.lock().await;
-        let container = containers.get_mut(id);
-        if container.is_none() {
-            return Err(Error::NotFoundError(format!("not found container:{}", id)));
-        }
-
-        container.unwrap().signal_container(exec_id, sig).await
+        let mut container = {
+            let containers = self.containers.lock().await;
+            containers
+                .get(id)
+                .cloned()
+                .ok_or_else(|| Error::NotFoundError(format!("not found container:{}", id)))?
+        };
+        let _operation = container.acquire_operation().await;
+        container.signal_container(exec_id, sig).await
     }
 
     pub async fn close_io(&self, id: &String, exec_id: &String) -> Result<()> {
-        let mut containers = self.containers.lock().await;
-        let container = containers.get_mut(id);
-        if container.is_none() {
-            return Err(Error::NotFoundError(format!("not found container:{}", id)));
-        }
-
-        container.unwrap().close_io(exec_id).await
+        let container = {
+            let containers = self.containers.lock().await;
+            containers
+                .get(id)
+                .cloned()
+                .ok_or_else(|| Error::NotFoundError(format!("not found container:{}", id)))?
+        };
+        let _operation = container.acquire_operation().await;
+        container.close_io(exec_id).await
     }
 
     pub async fn delete_container(&mut self, id: &String) -> Result<(u32, DateTime<Utc>)> {
@@ -1262,6 +1287,7 @@ impl SandBox {
                 None => return Err(Error::NotFoundError(format!("not found container:{}", id))),
             }
         };
+        let _operation = container.acquire_operation().await;
         let (code, tm) = container
             .destroy_container()
             .await
@@ -1337,14 +1363,18 @@ impl SandBox {
         tty: Tty,
         proc: Process,
     ) -> Result<()> {
-        let mut containers = self.containers.lock().await;
-        if let Some(c) = containers.get_mut(id) {
-            return c
-                .create_exec(exec_id, tty, proc)
-                .await
-                .map_err(|e| Error::Other(e.to_string()));
-        }
-        Err(Error::NotFoundError(format!("not found container:{}", id)))
+        let mut container = {
+            let containers = self.containers.lock().await;
+            containers
+                .get(id)
+                .cloned()
+                .ok_or_else(|| Error::NotFoundError(format!("not found container:{}", id)))?
+        };
+        let _operation = container.acquire_operation().await;
+        container
+            .create_exec(exec_id, tty, proc)
+            .await
+            .map_err(|e| Error::Other(e.to_string()))
     }
 
     pub async fn start_exec(&self, id: &String, exec_id: &String) -> Result<()> {
@@ -1355,6 +1385,7 @@ impl SandBox {
                 .cloned()
                 .ok_or_else(|| Error::NotFoundError(format!("not found container:{}", id)))?
         };
+        let _operation = container.acquire_operation().await;
         container.start_exec(exec_id).await
     }
 
@@ -1363,14 +1394,18 @@ impl SandBox {
         id: &String,
         exec_id: &String,
     ) -> Result<(u32, DateTime<Utc>)> {
-        let mut containers = self.containers.lock().await;
-        if let Some(c) = containers.get_mut(id) {
-            return c
-                .destroy_exec(exec_id)
-                .await
-                .map_err(|e| Error::Other(e.to_string()));
-        }
-        Err(Error::NotFoundError(format!("not found container:{}", id)))
+        let mut container = {
+            let containers = self.containers.lock().await;
+            containers
+                .get(id)
+                .cloned()
+                .ok_or_else(|| Error::NotFoundError(format!("not found container:{}", id)))?
+        };
+        let _operation = container.acquire_operation().await;
+        container
+            .destroy_exec(exec_id)
+            .await
+            .map_err(|e| Error::Other(e.to_string()))
     }
     pub async fn update_container(
         &self,
@@ -1385,6 +1420,7 @@ impl SandBox {
                 .cloned()
                 .ok_or_else(|| Error::NotFoundError(format!("not found container:{}", id)))?
         };
+        let _operation = container.acquire_operation().await;
         container
             .update(res, resources_v2)
             .await
@@ -1549,6 +1585,7 @@ impl SandBox {
         destination_path: &str,
         memory_vol_url: Option<String>,
     ) -> CResult<()> {
+        let _operations = self.acquire_all_container_operations().await;
         {
             let mut state = self.state.lock().await;
             if *state != SandBoxState::Normal {
@@ -1657,6 +1694,7 @@ impl SandBox {
             return Err(format!("rollback restore_config.source_url is empty").into());
         }
 
+        let _operations = self.acquire_all_container_operations().await;
         {
             let mut state = self.state.lock().await;
             if *state != SandBoxState::Normal {
