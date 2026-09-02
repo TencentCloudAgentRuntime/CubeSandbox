@@ -220,7 +220,7 @@ P0/P1/P2 均为 0，并明确返回 `APPROVE S3.4c.2`。
 
 ## S3.4c.4 压力、故障与兼容审计（2026-09-03）
 
-状态：`VALIDATING`。Kubernetes v1.36.4 的六 Pod QoS/Pod-level/init/sidecar 矩阵、Host
+状态：`DONE`。Kubernetes v1.36.4 的六 Pod QoS/Pod-level/init/sidecar 矩阵、Host
 CPU/memory/PIDs、Guest 定向 OOM、同 Pod/同节点/跨节点 survivor、压力中 resize、在线
 containerd restart 和双 Worker exact baseline 已完成。`2a23aa3c` 进一步修复启动阶段
 cgroup v2 OOM armed barrier 和 inactive/已消失 systemd scope 的幂等清理；8 个显式
@@ -228,5 +228,5 @@ cgroup v2 OOM armed barrier 和 inactive/已消失 systemd scope 的幂等清理
 删除无 `FailedKillPod`。六 Pod、九容器的 Guest/Host 原始逐对象证据与 SHA-256 已随 handoff
 保存。默认小 VM 高并发启动和长 exec + resize 的两个边界分别登记为 `K8S-OQ-021`、
 `K8S-OQ-022`，进入 S3.4d，不冒充通过能力。完整数值、invocation、失败尝试边界与制品身份见
-[`s3.4c.4-execution-summary.md`](./s3.4c.4-execution-summary.md)。等待同一 reviewer
-返回 `APPROVE S3.4c DONE`。
+[`s3.4c.4-execution-summary.md`](./s3.4c.4-execution-summary.md)。同一 reviewer 已独立
+复核，确认无 P0/P1/P2 并明确返回 `APPROVE S3.4c DONE`。
