@@ -4890,14 +4890,21 @@ where
 
     match values.get("ActiveState").map(String::as_str) {
         Some("inactive") | Some("dead") => {
+            // The property retry above is intentionally bounded but may span
+            // collection and recreation of the same pathname. Revalidate the
+            // durable identity after the final query before accepting state.
+            verify_cgroup_cleanup_identity(path, parent_identity, leaf_identity)?;
             verify_empty_cgroup(path)?;
+            verify_cgroup_cleanup_identity(path, parent_identity, leaf_identity)?;
             Ok(())
         }
         Some("failed") => {
             // Resetting a failed scope may cause systemd to collect its
             // cgroup. Only do so after the exact leaf is proven empty; never
             // use reset-failed as a process-removal operation.
+            verify_cgroup_cleanup_identity(path, parent_identity, leaf_identity)?;
             verify_empty_cgroup(path)?;
+            verify_cgroup_cleanup_identity(path, parent_identity, leaf_identity)?;
             reset_failed()
         }
         _ => Err(format!("systemd scope {unit} has not been collected yet")),
@@ -6940,6 +6947,49 @@ mod tests {
         .unwrap();
         assert!(reset.load(Ordering::Acquire));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn systemd_cleanup_rejects_leaf_replacement_during_property_retry() {
+        for final_state in ["inactive", "failed"] {
+            let (root, leaf, parent, identity) =
+                empty_systemd_cleanup_fixture(&format!("replacement-{final_state}"));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let property_calls = Arc::clone(&calls);
+            let replacement = leaf.clone();
+            let reset = Arc::new(AtomicBool::new(false));
+            let reset_call = Arc::clone(&reset);
+            let error = cleanup_systemd_target_with(
+                "fixture.scope",
+                &leaf,
+                &parent,
+                Some(&identity),
+                move || {
+                    if property_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                        fs::remove_dir_all(&replacement).unwrap();
+                        fs::create_dir(&replacement).unwrap();
+                        fs::write(replacement.join("cgroup.events"), "populated 0\n").unwrap();
+                        fs::write(replacement.join("cgroup.procs"), "").unwrap();
+                        Err("injected systemctl show collection race".to_string())
+                    } else {
+                        Ok(HashMap::from([(
+                            "ActiveState".to_string(),
+                            final_state.to_string(),
+                        )]))
+                    }
+                },
+                || Ok(false),
+                move || {
+                    reset_call.store(true, Ordering::Release);
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert!(error.contains("leaf identity changed"), "{error}");
+            assert_eq!(calls.load(Ordering::Acquire), 2);
+            assert!(!reset.load(Ordering::Acquire));
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
