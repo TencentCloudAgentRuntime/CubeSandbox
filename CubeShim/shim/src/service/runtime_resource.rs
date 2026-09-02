@@ -2098,11 +2098,11 @@ fn runtime_prepare_plan_with_config(
 
     if overhead.cpu_period <= 0
         || overhead.cpu_quota <= 0
-        || overhead.cpu_shares <= 0
+        || overhead.cpu_shares < 0
         || overhead.memory_limit_in_bytes <= 0
     {
         return Err(
-            "RuntimeClass overhead requires positive CPU period/quota/shares and memory"
+            "RuntimeClass overhead requires positive CPU period/quota and memory with non-negative CPU shares"
                 .to_string(),
         );
     }
@@ -2134,12 +2134,14 @@ fn runtime_prepare_plan_with_config(
         .and_then(|value| value.checked_add(period - 1))
         .map(|value| value / period)
         .ok_or_else(|| "RuntimeClass overhead CPU normalization overflow".to_string())?;
-    let millicores = quota
+    let rate_numerator = quota
         .checked_mul(1_000)
-        .and_then(|value| value.checked_add(period - 1))
-        .map(|value| value / period)
-        .ok_or_else(|| "RuntimeClass overhead CPU millicore normalization overflow".to_string())?;
-    if millicores < u128::from(node.minimum_cpu_millicores) {
+        .ok_or_else(|| "RuntimeClass overhead CPU rate overflow".to_string())?;
+    let minimum_rate_numerator = u128::from(node.minimum_cpu_millicores)
+        .checked_mul(period)
+        .ok_or_else(|| "RuntimeClass overhead node minimum CPU rate overflow".to_string())?;
+    if rate_numerator < minimum_rate_numerator {
+        let millicores = rate_numerator / period;
         return Err(format!(
             "RuntimeClass CPU overhead {millicores}m is below node minimum {}m",
             node.minimum_cpu_millicores
@@ -3166,6 +3168,51 @@ mod tests {
             host_resource_ceiling_with_config(&overflow, &HashMap::new(), &node)
                 .unwrap_err()
                 .contains("controller range")
+        );
+    }
+
+    #[test]
+    fn runtimeclass_cpu_minimum_compares_exact_rate_across_periods() {
+        let node = poc_overhead_config();
+        for (period, exact_quota, below_quota) in [
+            (100_000, 25_000, 24_999),
+            (200_000, 50_000, 49_999),
+            (1_000_000, 250_000, 249_999),
+        ] {
+            let mut exact = default_overhead();
+            exact.cpu_period = period;
+            exact.cpu_quota = exact_quota;
+            let exact = ceiling_config(CriLinuxContainerResources::default(), exact);
+            assert_eq!(
+                host_resource_ceiling_with_config(&exact, &HashMap::new(), &node)
+                    .unwrap()
+                    .cpu_max,
+                "125000 100000"
+            );
+
+            let mut below = default_overhead();
+            below.cpu_period = period;
+            below.cpu_quota = below_quota;
+            let below = ceiling_config(CriLinuxContainerResources::default(), below);
+            assert!(
+                host_resource_ceiling_with_config(&below, &HashMap::new(), &node)
+                    .unwrap_err()
+                    .contains("below node minimum 250m")
+            );
+        }
+    }
+
+    #[test]
+    fn runtimeclass_zero_cpu_shares_remain_fingerprint_only() {
+        let node = poc_overhead_config();
+        let mut overhead = default_overhead();
+        overhead.cpu_shares = 0;
+        let config = ceiling_config(CriLinuxContainerResources::default(), overhead);
+        assert_eq!(
+            host_resource_ceiling_with_config(&config, &HashMap::new(), &node)
+                .unwrap()
+                .cpu_max,
+            "125000 100000"
         );
     }
 
