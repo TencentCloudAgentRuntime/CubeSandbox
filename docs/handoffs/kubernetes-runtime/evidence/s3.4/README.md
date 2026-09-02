@@ -193,3 +193,13 @@ S3.4a 只冻结输入、现状与精确缺口，不把“请求被接受”记�
 逐 Pod HTTP/curl 验收已经通过。该集群当前使用 TKE 默认 containerd，不计作 Cube
 RuntimeClass 的 S3.4c 验收；资源清单、TAT 证据和用户验证命令见
 [`extra-two-node-cluster.md`](./extra-two-node-cluster.md)。
+
+## S0 Cube RuntimeClass 跨节点回归（2026-09-02）
+
+S0 三节点自建集群的两个 PVM 工作节点已使用 `RuntimeClass/cube` 运行 Deployment 5
+副本和 StatefulSet 3 副本。8 个 Pod 实际对应 8 个 `io.containerd.cube.rs` sandbox/VM；
+64 次 PodIP 全互访、30 次跨节点、24 次稳定 DNS、24 次 ClusterIP 以及非 root resolver
+读取和 root 只读写保护全部通过。工作负载按用户要求保留运行；修正、制品 SHA、TAT
+证据和人工复查命令见
+[`s0-cube-crossnode-workloads.md`](./s0-cube-crossnode-workloads.md)。该回归扩充
+S3.4c.2 证据，但不代替尚未完成的 sibling/PID 诱饵、containerd restart 和 legacy Task。
