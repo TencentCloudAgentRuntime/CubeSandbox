@@ -3998,17 +3998,36 @@ fn takeover_cgroup_allowed(record: &LifecycleRecord, cgroup: &str) -> bool {
 
 fn target_from_cri_parent(parent: &str, instance_id: &str) -> Result<HostTarget, String> {
     validate_containerd_id(instance_id)?;
-    let parent = parent.trim();
-    if parent.is_empty() {
-        return Err("managed CRI cgroup_parent is empty".to_string());
-    }
-    let target = if !parent.contains('/') && parent.ends_with(".slice") {
-        PathBuf::from(format!("{parent}:cri-containerd:{instance_id}"))
-    } else {
-        let relative = normalized_cgroup_relative(Path::new(parent))?;
-        PathBuf::from("/").join(relative).join(instance_id)
-    };
+    let target = target_path_from_cri_parent(parent, instance_id)?;
     parse_host_target(&target, instance_id)
+}
+
+fn target_path_from_cri_parent(parent: &str, instance_id: &str) -> Result<PathBuf, String> {
+    let canonical_parent = canonical_cri_cgroup_parent(parent)?;
+    let parent_path = Path::new(&canonical_parent);
+    let basename = parent_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| format!("CRI cgroup_parent has no UTF-8 basename: {canonical_parent}"))?;
+
+    // Kubelet/containerd may encode a systemd parent either as the slice unit
+    // name or as its expanded cgroup-v2 path.  The latter is what CRI v1.36
+    // sends on the target node.  Re-expanding the basename proves the absolute
+    // path is exactly that slice hierarchy before selecting a transient scope.
+    if basename.ends_with(".slice") {
+        let expanded = expand_slice(basename)
+            .map_err(|error| format!("expand CRI systemd parent {basename}: {error}"))?;
+        if canonical_parent != format!("/{expanded}") {
+            return Err(format!(
+                "CRI systemd parent path does not match slice {basename}: {canonical_parent}"
+            ));
+        }
+        return Ok(PathBuf::from(format!(
+            "{basename}:cri-containerd:{instance_id}"
+        )));
+    }
+
+    Ok(parent_path.join(instance_id))
 }
 
 fn classify_and_target(
@@ -4270,7 +4289,10 @@ fn create_and_join_target(target: &HostTarget, pid: i32) -> Result<(), String> {
             let path = Path::new("/sys/fs/cgroup").join(cgroup.trim_start_matches('/'));
             fs::create_dir(&path)
                 .map_err(|error| format!("create cgroupfs leaf {}: {error}", path.display()))?;
-            sync_directory(path.parent().unwrap())?;
+            // cgroup2 is a kernel control filesystem, not durable storage.
+            // fsync(2) on its directories returns EINVAL on the target Linux
+            // 6.6 node.  Durability comes from the owner INTENT written before
+            // this mutation; identity and membership are read back below.
             move_process_to(cgroup, pid)
         }
         HostTarget::Pending { .. } | HostTarget::Legacy { .. } => Ok(()),
@@ -4977,13 +4999,37 @@ mod tests {
 
     #[test]
     fn cri_parent_normalization_matches_systemd_and_cgroupfs_forms() {
+        let id = "c".repeat(64);
         assert_eq!(
             canonical_cri_cgroup_parent("kubepods-burstable-podabc.slice").unwrap(),
             "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podabc.slice"
         );
         assert_eq!(
+            target_path_from_cri_parent("kubepods-burstable-podabc.slice", &id).unwrap(),
+            PathBuf::from(format!(
+                "kubepods-burstable-podabc.slice:cri-containerd:{id}"
+            ))
+        );
+        assert_eq!(
+            target_path_from_cri_parent(
+                "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podabc.slice",
+                &id,
+            )
+            .unwrap(),
+            PathBuf::from(format!(
+                "kubepods-burstable-podabc.slice:cri-containerd:{id}"
+            ))
+        );
+        assert_eq!(
             canonical_cri_cgroup_parent("/kubepods/burstable/podabc").unwrap(),
             "/kubepods/burstable/podabc"
+        );
+        assert_eq!(
+            target_path_from_cri_parent("/kubepods/burstable/podabc", &id).unwrap(),
+            PathBuf::from(format!("/kubepods/burstable/podabc/{id}"))
+        );
+        assert!(
+            target_path_from_cri_parent("/wrong/kubepods-burstable-podabc.slice", &id).is_err()
         );
         assert!(canonical_cri_cgroup_parent("").is_err());
         assert!(canonical_cri_cgroup_parent("parent:child").is_err());
