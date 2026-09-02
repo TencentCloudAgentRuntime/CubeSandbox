@@ -4773,21 +4773,30 @@ fn file_identity(path: &Path) -> Result<FileIdentity, String> {
 }
 
 fn ensure_directory(path: &Path) -> Result<(), String> {
-    if path.exists() {
-        if !fs::metadata(path)
-            .map_err(|error| format!("stat directory {}: {error}", path.display()))?
-            .is_dir()
-        {
-            return Err(format!("path is not a directory: {}", path.display()));
-        }
-        return sync_directory(path);
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => return sync_directory(path),
+        Ok(_) => return Err(format!("path is not a directory: {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("stat directory {}: {error}", path.display())),
     }
     let parent = path
         .parent()
         .ok_or_else(|| format!("directory has no parent: {}", path.display()))?;
     ensure_directory(parent)?;
-    fs::create_dir(path)
-        .map_err(|error| format!("create directory {}: {error}", path.display()))?;
+    match fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !fs::metadata(path)
+                .map_err(|error| format!("stat raced directory {}: {error}", path.display()))?
+                .is_dir()
+            {
+                return Err(format!("path is not a directory: {}", path.display()));
+            }
+        }
+        Err(error) => {
+            return Err(format!("create directory {}: {error}", path.display()));
+        }
+    }
     sync_directory(parent)?;
     sync_directory(path)
 }
@@ -5000,6 +5009,8 @@ mod tests {
     use oci_spec::runtime::{LinuxBuilder, SpecBuilder};
     use std::os::unix::net::UnixListener;
     use std::process::Command as ProcessCommand;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     fn params(namespace: &str, id: &str) -> BootstrapParams {
         BootstrapParams {
@@ -5024,6 +5035,33 @@ mod tests {
             .linux(linux)
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn ensure_directory_accepts_concurrent_creators() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-host-cgroup-directory-race-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let directory = root.join("shared");
+        let barrier = Arc::new(Barrier::new(32));
+        let workers: Vec<_> = (0..32)
+            .map(|_| {
+                let directory = directory.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    ensure_directory(&directory)
+                })
+            })
+            .collect();
+
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+        assert!(directory.is_dir());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -53,6 +53,8 @@ pub enum Error {
     EventMonitorIo(#[source] std::io::Error),
     #[error("Error doing log json I/O: {0}")]
     LogJsonIo(#[source] std::io::Error),
+    #[error("Error creating log directory: {0}")]
+    LogDirectoryCreation(#[source] std::io::Error),
     #[error("Error init vmm service: {0}")]
     InitVmmService(#[source] VmmServiceError),
     #[error("Failed to send request: {0}")]
@@ -70,6 +72,26 @@ pub struct VmmInstance {
     vmm_thread: Option<JoinHandle<Result<(), VmmError>>>,
 }
 
+fn prepare_log_directory(vmm_config: &VmmConfig) -> Result<(), Error> {
+    if vmm_config.log_stderr {
+        return Ok(());
+    }
+    let log_file = std::path::Path::new(&vmm_config.log_file);
+    if log_file.as_os_str().is_empty() {
+        return Err(Error::LogDirectoryCreation(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "log file path is empty",
+        )));
+    }
+    let Some(directory) = log_file
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(directory).map_err(Error::LogDirectoryCreation)
+}
+
 impl VmmInstance {
     /// Create a vmm instance
     ///
@@ -84,6 +106,7 @@ impl VmmInstance {
     /// let vmm = VmmInstance::new(VmmConfig::default()).expect("Failed to create vmm");
     /// ```
     pub fn new(vmm_config: VmmConfig) -> Result<Self, Error> {
+        prepare_log_directory(&vmm_config)?;
         let now = std::time::Instant::now();
         let local = Local::now();
         let tm1 = std::time::Instant::now().duration_since(now);
@@ -355,5 +378,59 @@ impl Drop for VmmInstance {
             // before to exit.
             std::io::stdin().lock().set_canon_mode().unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_vmm_prepares_missing_log_directory() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cube-embedded-vmm-log-{}-{unique}",
+            std::process::id()
+        ));
+        let directory = root.join("nested");
+        let mut config = VmmConfig::default();
+        config.log_file = directory.join("vmm.log").to_string_lossy().into_owned();
+
+        prepare_log_directory(&config).unwrap();
+
+        assert!(directory.is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn embedded_vmm_accepts_log_file_without_parent() {
+        let mut config = VmmConfig::default();
+        config.log_file = "vmm.log".to_string();
+
+        prepare_log_directory(&config).unwrap();
+    }
+
+    #[test]
+    fn embedded_vmm_rejects_empty_log_file() {
+        let mut config = VmmConfig::default();
+        config.log_file.clear();
+
+        assert!(matches!(
+            prepare_log_directory(&config),
+            Err(Error::LogDirectoryCreation(error))
+                if error.kind() == std::io::ErrorKind::InvalidInput
+        ));
+    }
+
+    #[test]
+    fn embedded_vmm_log_stderr_does_not_require_a_file() {
+        let mut config = VmmConfig::default();
+        config.log_stderr = true;
+        config.log_file.clear();
+
+        prepare_log_directory(&config).unwrap();
     }
 }

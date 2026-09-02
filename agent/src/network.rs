@@ -8,6 +8,7 @@ use nix::mount::{self, MsFlags};
 use slog::Logger;
 use std::fs;
 use std::io::ErrorKind;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 const KATA_GUEST_SANDBOX_DNS_FILE: &str = "/run/cube-containers/sandbox/resolv.conf";
@@ -82,6 +83,7 @@ fn do_setup_guest_dns(logger: Logger, dns_list: Vec<String>, src: &str, dst: &st
         .collect::<Vec<&str>>()
         .join("\n");
     fs::write(src, &content)?;
+    fs::set_permissions(src, fs::Permissions::from_mode(0o644))?;
 
     // bind mount to /etc/resolv.conf
     mount::mount(Some(src), dst, Some("bind"), MsFlags::MS_BIND, None::<&str>)
@@ -135,11 +137,16 @@ mod tests {
         src_file
             .write_all(content.as_bytes())
             .expect("failed to write file contents");
+        fs::set_permissions(src_filename, fs::Permissions::from_mode(0o600)).unwrap();
 
         // call do_setup_guest_dns
         let result = do_setup_guest_dns(logger, dns.clone(), src_filename, dst_filename);
 
         assert!(result.is_ok(), "result should be ok, but {:?}", result);
+        assert_eq!(
+            fs::metadata(src_filename).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
 
         // get content of /etc/resolv.conf
         let content = fs::read_to_string(dst_filename);
@@ -183,10 +190,17 @@ mod tests {
             .to_string();
 
         let dns = vec!["nameserver 1.1.1.1".to_string()];
+        fs::create_dir_all(Path::new(&src_filename).parent().unwrap()).unwrap();
+        fs::write(&src_filename, "stale").unwrap();
+        fs::set_permissions(&src_filename, fs::Permissions::from_mode(0o600)).unwrap();
         let result = do_setup_guest_dns(logger, dns.clone(), &src_filename, &dst_filename);
 
         assert!(result.is_ok(), "result should be ok, but {:?}", result);
         assert!(Path::new(&dst_filename).exists());
+        assert_eq!(
+            fs::metadata(&src_filename).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
 
         let content = fs::read_to_string(&dst_filename);
         assert!(content.is_ok());
