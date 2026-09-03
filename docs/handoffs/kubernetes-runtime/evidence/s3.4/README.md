@@ -233,9 +233,10 @@ cgroup v2 OOM armed barrier 和 inactive/已消失 systemd scope 的幂等清理
 
 ## S3.4d 压力回归与支持矩阵（2026-09-03）
 
-状态：`VALIDATING`。最终候选 `6662316e` 包含默认 VM memory floor、managed memory
+状态：`VALIDATING`。最终候选 `10b7af56` 包含默认 VM memory floor、managed memory
 downsize 写前保护，以及 Shim Agent RPC client handle 解串行；reviewer 指出的生命周期竞态
-由共享 per-container operation gate 与 sandbox fence 修复。默认规格 8 Pod 启动即 OOM
+由共享 per-container operation gate 与 sandbox fence 修复；systemd collection 有界等待后
+重新校验 cgroup identity，避免同路径替代 leaf 被误认成原 owner。默认规格 8 Pod 启动即 OOM
 全部得到 Guest `OOMKilled/137`；显式 64 MiB VM 请求被明确拒绝；普通 resize、在线
 containerd restart 和受控长 exec + resize 均通过。QoS/多容器/init/sidecar/Pod-level 的
 Guest/Host 数值矩阵一致，删除后双 Worker exact zero、3/3 Node Ready。

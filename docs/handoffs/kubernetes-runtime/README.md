@@ -8,8 +8,8 @@ E2E。
 
 ## 基线
 
-最后一项已验证实现 commit 为 `6662316e`；S3.4c 最终证据 commit 为 `24d2d188`。S0 双
-Worker 当前 CubeShim/Agent ext4 SHA-256 为 `a4974713…`/`c768706b…`；`cube-runtime`
+最后一项已验证实现 commit 为 `10b7af56`；S3.4c 最终证据 commit 为 `24d2d188`。S0 双
+Worker 当前 CubeShim/Agent ext4 SHA-256 为 `6a0c0cd3…`/`c768706b…`；`cube-runtime`
 保持既有制品；运行时根为
 `/opt/cubesandbox-s0-multinode-runtime-2269a3b3`。
 
@@ -27,7 +27,9 @@ E2E/Conformance，逐项分类失败并优先修复阻断主路径的问题。
 
 ## 验证
 
-S3.4d 最终验证：`inv-686k7g02nv` 默认规格启动即 OOM 8/8 为 `OOMKilled/137`；
+S3.4d 最终验证：`inv-v86nregacb` 在 `10b7af56` 完成 identity replacement、service
+163/163 与 all-targets；`inv-686nvg0va4`/`inv-886nvfg6v6` 将同一 Shim 部署到双 Worker；
+`inv-686k7g02nv` 默认规格启动即 OOM 8/8 为 `OOMKilled/137`；
 `inv-v86ksj0ndb` 完成 restart/两次 resize/受控长 exec；`inv-686ktxgext`、
 `inv-886ku00590`、`inv-a86kufg720` 完成 Guest/Host 组合矩阵；
 `inv-086ncr074p` 完成最终 lifecycle regression；`inv-a86ndt0pkt`/`inv-a86nds0c3q` 双
@@ -50,7 +52,7 @@ Update/探针超时；kubelet 重试后 resize 收敛，资源可精确清理。
 
 ## 下一步
 
-1. 同一 reviewer 复核 `6662316e`、S3.4d 证据和已知限制分类。
+1. 同一 reviewer 复核 `10b7af56`、S3.4d 证据和已知限制分类。
 2. 若有 P0/P1 阻断项则修复并复审；批准后把 S3.4/S3.4d 标记 `DONE`。
 3. 在 W1 临时把 containerd default runtime 切到 Cube，运行官方 Kubernetes v1.36.4
    Node E2E/Conformance；完成后恢复 runc 默认值。
