@@ -3,8 +3,8 @@
 ## 当前状态
 
 `IN_PROGRESS`。本文件先固定已验证的执行方式、错误模式和门禁结论；完整 477 项结果、
-失败分类、清理及 reviewer 结论尚未补齐。首轮完整运行已经主动终止，并暴露首版支持面
-内的 Guest dummy netdev 缺口；未完成修复和重跑前不得把 S5.3 标记为 `DONE`。
+失败分类、清理及 reviewer 结论尚未补齐。Guest dummy netdev 缺口已经修复并通过官方
+单项门禁；修复后的完整运行正在进行。未完成重跑前不得把 S5.3 标记为 `DONE`。
 
 ## 固定环境与制品
 
@@ -94,10 +94,20 @@ kubelet unit，无法识别 kubeadm 默认的 `kubelet.service`；测试期由�
    不把它们伪装成已通过。
 3. NodeAllocatable Host OOM 的无 limit 语义不属于本次 NodeConformance 集合，按
    `K8S-OQ-026` 记录。
-4. `PrivilegedPod` 的容器创建、启动和 exec 正常，但 `ip link add dummy1 type dummy`
-   返回 `Operation not supported`。仓库 `configs/kernel-oc9.x86_64.config` 与
-   `deploy/pvm/configs/pvm_guest` 均明确关闭 `CONFIG_DUMMY`；由于 privileged 属于首版
-   支持面，本项不是可延期差异，按 `K8S-OQ-028` 在重跑前修复。
+4. `PrivilegedPod` 暴露的 dummy netdev 缺口已关闭，不再属于已知差异，修复证据见下节。
+
+## PrivilegedPod 修复与门禁
+
+`f9120d79` 将 x86 BM 与 PVM Guest kernel 配置统一为内建 `CONFIG_DUMMY=y`；aarch64
+原本已内建。`inv-b86w9i084p` 使用与 W1 匹配的 PVM 源 commit `0de43d6b…` 构建，最终
+vmlinux 内嵌配置提取为 `CONFIG_DUMMY=y`，artifact SHA-256 为
+`633bb9828e27c012ed4a0a530826ab41493401ead20750c2bd66c6d609a2dc0f`。
+
+`inv-v86wfwg2wn` 在 W1 零 Sandbox/VM 条件下保留旧 kernel `f9ecd86a…`，再原子替换
+assets target。官方 `PrivilegedPod` `inv-v86wga0nm0` 在 8.293 秒内 1/1 通过；JUnit、
+Ginkgo JSON 与 output SHA-256 分别为 `4d3e29e4…`、`da8f73b7…`、`cc08067d…`。
+containerd 的 Sandbox metadata 由 kubelet 异步 GC，在约 55 秒后走标准 Stop/Remove；
+`inv-986wi0gicj` 确认 Sandbox/VM/shim/TAP/mount/active lease 全为 0。
 
 ## 完整运行历史
 
@@ -114,9 +124,11 @@ kubelet unit，无法识别 kubeadm 默认的 `kubelet.service`；测试期由�
 - 重跑前 `inv-b86w4kgh72`：Sandbox/VM/lifecycle record/reaper/adapter/shared root/active
   lease/shim/TAP/mount 全部为 0；`inv-a86w4m07r2` 再次确认 RuntimeClass overhead、节点
   selector 与 W1 Ready。
-- 修订 PVM Guest kernel 构建：`inv-b86w9i084p`，进行中；输入 config SHA-256
-  `0d2865ad3bdd9f84ec011d41a4b2ad689808c7a5181029f7bb993db481cae4ad`。
-- 下一次完整运行：待 privileged 单项门禁通过后启动。
+- 修订 PVM Guest kernel 构建：`inv-b86w9i084p` 已完成；输入 config SHA-256
+  `0d2865ad3bdd9f84ec011d41a4b2ad689808c7a5181029f7bb993db481cae4ad`，产物与门禁见上节。
+- 修复后完整运行：`inv-a86wisgb60`，report
+  `node-conformance-runtimeclass-full-4`，进行中；启动时强制校验 kernel SHA、kubelet
+  有效配置 20s 与零 Cube Sandbox。
 
 ## 完成前必须补齐
 
