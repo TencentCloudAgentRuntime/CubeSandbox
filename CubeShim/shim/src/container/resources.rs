@@ -26,6 +26,183 @@ pub(crate) const RESOURCE_V2_CAPABILITY: &str = "io.cubesandbox.agent.container.
 pub(crate) const OCI_LINUX_RESOURCES_TYPE_URL: &str =
     "types.containerd.io/opencontainers/runtime-spec/1/LinuxResources";
 
+/// Stable Pod-local translation from kubelet's host CPU/NUMA identifiers to
+/// the dense identifiers exposed by a Cube guest. Host identifiers are not
+/// meaningful inside the VM, but equality and separation between container
+/// assignments must survive the boundary (notably for CPU Manager).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PodCpusetMapper {
+    cpus: BTreeMap<u32, u32>,
+    mems: BTreeMap<u32, u32>,
+}
+
+fn parse_cpuset_ids(value: &str, maximum_items: usize, field: &str) -> CResult<Vec<u32>> {
+    let mut ranges = Vec::new();
+    for component in value.split(',') {
+        if component.is_empty() {
+            return Err(format!("empty {field} component in {value:?}"));
+        }
+        let mut bounds = component.split('-');
+        let first = bounds
+            .next()
+            .expect("split always returns one component")
+            .parse::<u32>()
+            .map_err(|error| format!("invalid {field} component {component:?}: {error}"))?;
+        let last = match bounds.next() {
+            Some(last) => last
+                .parse::<u32>()
+                .map_err(|error| format!("invalid {field} component {component:?}: {error}"))?,
+            None => first,
+        };
+        if bounds.next().is_some() || first > last {
+            return Err(format!("invalid {field} range {component:?}"));
+        }
+        ranges.push((first, last));
+    }
+    ranges.sort_unstable();
+
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        if let Some(previous) = merged.last_mut() {
+            if start <= previous.1.saturating_add(1) {
+                previous.1 = previous.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+
+    let count = merged.iter().try_fold(0_u64, |count, (start, end)| {
+        count.checked_add(u64::from(*end) - u64::from(*start) + 1)
+    });
+    let count = count.ok_or_else(|| format!("{field} cardinality overflows"))?;
+    if count > maximum_items as u64 {
+        return Err(format!(
+            "{field} requests {count} identifiers but Cube exposes {maximum_items}"
+        ));
+    }
+
+    let mut ids = Vec::with_capacity(count as usize);
+    for (start, end) in merged {
+        ids.extend(start..=end);
+    }
+    Ok(ids)
+}
+
+fn format_cpuset_ids(mut ids: Vec<u32>) -> String {
+    ids.sort_unstable();
+    ids.dedup();
+    let mut ranges = Vec::new();
+    let mut index = 0;
+    while index < ids.len() {
+        let start = ids[index];
+        let mut end = start;
+        index += 1;
+        while index < ids.len() && ids[index] == end.saturating_add(1) {
+            end = ids[index];
+            index += 1;
+        }
+        if start == end {
+            ranges.push(start.to_string());
+        } else {
+            ranges.push(format!("{start}-{end}"));
+        }
+    }
+    ranges.join(",")
+}
+
+fn remap_cpuset(
+    mapping: &mut BTreeMap<u32, u32>,
+    value: &str,
+    guest_count: u32,
+    field: &str,
+) -> CResult<String> {
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    if guest_count == 0 {
+        return Err(format!(
+            "cannot translate non-empty {field} {value:?}: Cube exposes no identifiers"
+        ));
+    }
+    // A CPU Manager shared-pool assignment commonly contains most CPUs on the
+    // host and is therefore larger than the VM. Its correct VM-local meaning
+    // is "all guest identifiers" and it must not consume exclusive mappings.
+    // Keep a hard expansion bound for malformed or adversarial OCI input.
+    let source = parse_cpuset_ids(value, 65_536, field)?;
+    if source.len() > guest_count as usize {
+        return Ok(format_cpuset_ids((0..guest_count).collect()));
+    }
+    let mut candidate = mapping.clone();
+    let mut used = candidate
+        .values()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut translated = Vec::with_capacity(source.len());
+    for source_id in source {
+        let guest_id = match candidate.get(&source_id).copied() {
+            Some(guest_id) if guest_id < guest_count => guest_id,
+            Some(guest_id) => {
+                return Err(format!(
+                    "existing {field} mapping {source_id}->{guest_id} is outside Cube identifier count {guest_count}"
+                ))
+            }
+            None => {
+                let guest_id = (0..guest_count)
+                    .find(|guest_id| !used.contains(guest_id))
+                    .ok_or_else(|| {
+                        format!(
+                            "cannot translate {field} {value:?}: all {guest_count} Cube identifiers are already mapped"
+                        )
+                    })?;
+                candidate.insert(source_id, guest_id);
+                used.insert(guest_id);
+                guest_id
+            }
+        };
+        translated.push(guest_id);
+    }
+    *mapping = candidate;
+    Ok(format_cpuset_ids(translated))
+}
+
+impl PodCpusetMapper {
+    /// Rewrite only non-empty CPU Manager assignments in an already validated
+    /// resources-v2 payload. Commit CPU and NUMA state only after the complete
+    /// payload has been translated successfully.
+    pub(crate) fn remap_payload(
+        &mut self,
+        payload: &[u8],
+        guest_cpu_count: u32,
+        guest_numa_count: u32,
+    ) -> CResult<Vec<u8>> {
+        let mut resources = parse_strict(payload, "resources-v2 cpuset")?;
+        validate_resources(&resources, "resources")?;
+        let mut candidate = self.clone();
+        if let StrictValue::Object(resources) = &mut resources {
+            if let Some(StrictValue::Object(cpu)) = resources.get_mut("cpu") {
+                for (field, mapping, guest_count) in [
+                    ("cpus", &mut candidate.cpus, guest_cpu_count),
+                    ("mems", &mut candidate.mems, guest_numa_count),
+                ] {
+                    let Some(value) = cpu.get_mut(field) else {
+                        continue;
+                    };
+                    let StrictValue::String(source) = value else {
+                        return Err(format!("resources.cpu.{field} must be a string"));
+                    };
+                    if !source.is_empty() {
+                        *source = remap_cpuset(mapping, source, guest_count, field)?;
+                    }
+                }
+            }
+        }
+        let payload = canonical_payload(resources)?;
+        *self = candidate;
+        Ok(payload)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum StrictValue {
     Null,
@@ -494,6 +671,72 @@ mod tests {
         let reservation_only =
             canonicalize_update(br#"{"memory":{"reservation":33554432}}"#).unwrap();
         assert_eq!(reservation_only, br#"{"memory":{"reservation":33554432}}"#);
+    }
+
+    #[test]
+    fn pod_cpuset_remap_preserves_cpu_manager_identity_and_separation() {
+        let mut mapper = PodCpusetMapper::default();
+        let init = mapper
+            .remap_payload(br#"{"cpu":{"cpus":"1","mems":"0"}}"#, 2, 1)
+            .unwrap();
+        let sidecar = mapper
+            .remap_payload(br#"{"cpu":{"cpus":"1","mems":"0"}}"#, 2, 1)
+            .unwrap();
+        let regular = mapper
+            .remap_payload(br#"{"cpu":{"cpus":"2","mems":"0"}}"#, 2, 1)
+            .unwrap();
+
+        assert_eq!(init, br#"{"cpu":{"cpus":"0","mems":"0"}}"#);
+        assert_eq!(sidecar, init);
+        assert_eq!(regular, br#"{"cpu":{"cpus":"1","mems":"0"}}"#);
+    }
+
+    #[test]
+    fn pod_cpuset_remap_normalizes_ranges_and_is_atomic_on_exhaustion() {
+        let mut mapper = PodCpusetMapper::default();
+        let first = mapper
+            .remap_payload(br#"{"cpu":{"cpus":"4,6-7","mems":"3"}}"#, 3, 1)
+            .unwrap();
+        assert_eq!(first, br#"{"cpu":{"cpus":"0-2","mems":"0"}}"#);
+        let subset = mapper
+            .remap_payload(br#"{"cpu":{"cpus":"7,4","mems":"3"}}"#, 3, 1)
+            .unwrap();
+        assert_eq!(subset, br#"{"cpu":{"cpus":"0,2","mems":"0"}}"#);
+
+        let before = mapper.clone();
+        let error = mapper
+            .remap_payload(br#"{"cpu":{"cpus":"8"}}"#, 3, 1)
+            .unwrap_err();
+        assert!(error.contains("already mapped"), "{error}");
+        assert_eq!(mapper, before);
+    }
+
+    #[test]
+    fn pod_cpuset_remap_preserves_absent_and_explicit_empty_fields() {
+        let mut mapper = PodCpusetMapper::default();
+        assert_eq!(mapper.remap_payload(br#"{}"#, 2, 1).unwrap(), br#"{}"#);
+        assert_eq!(
+            mapper
+                .remap_payload(br#"{"cpu":{"cpus":"","mems":""}}"#, 2, 1)
+                .unwrap(),
+            br#"{"cpu":{"cpus":"","mems":""}}"#
+        );
+        assert_eq!(mapper, PodCpusetMapper::default());
+    }
+
+    #[test]
+    fn pod_cpuset_remap_maps_host_shared_pool_to_all_guest_cpus() {
+        let mut mapper = PodCpusetMapper::default();
+        let shared = mapper
+            .remap_payload(br#"{"cpu":{"cpus":"0,3-15"}}"#, 2, 1)
+            .unwrap();
+        assert_eq!(shared, br#"{"cpu":{"cpus":"0-1"}}"#);
+        assert_eq!(mapper, PodCpusetMapper::default());
+
+        let exclusive = mapper
+            .remap_payload(br#"{"cpu":{"cpus":"9"}}"#, 2, 1)
+            .unwrap();
+        assert_eq!(exclusive, br#"{"cpu":{"cpus":"0"}}"#);
     }
 
     #[test]

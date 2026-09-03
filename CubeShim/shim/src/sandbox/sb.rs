@@ -37,6 +37,7 @@ use crate::common::{
     GUEST_VIRTIOFS_MNT_PATH_DEPRECATED,
 };
 use crate::container::container_mgr::ContainerInfo;
+use crate::container::resources::PodCpusetMapper;
 use crate::container::{exec::Tty, Container, GUEST_DEV_SHM};
 use crate::hypervisor::config::{HypConfig, VmConfig};
 use crate::hypervisor::cube_hypervisor as CH;
@@ -134,6 +135,9 @@ pub struct SandBox {
     tx_oom_exited: Option<Sender<()>>,
     oom_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
     runtime_tap: Option<Arc<File>>,
+    /// Stable host-to-guest CPU/NUMA translation for Kubernetes CPU Manager.
+    /// All containers in this Sandbox share one Cube and therefore one map.
+    pod_cpuset_mapper: PodCpusetMapper,
 }
 
 impl SandBox {
@@ -176,6 +180,7 @@ impl SandBox {
             tx_oom_exited: None,
             oom_handle: None,
             runtime_tap: None,
+            pod_cpuset_mapper: PodCpusetMapper::default(),
         }
     }
 
@@ -1220,8 +1225,19 @@ impl SandBox {
         if containers.contains_key(&id) {
             return Err(format!("container {} already exists", id.clone()));
         }
+        let mapper_before = self.pod_cpuset_mapper.clone();
+        let resources_v2 = if self.conf.sandbox_hostname.is_empty() {
+            resources_v2
+        } else {
+            resources_v2
+                .map(|payload| {
+                    self.pod_cpuset_mapper
+                        .remap_payload(&payload, self.conf.vm_res.cpu, 1)
+                })
+                .transpose()?
+        };
         let client = self.client.as_ref().unwrap();
-        let mut c: Container = Container::new(
+        let mut c: Container = match Container::new(
             self.id.clone(),
             id.clone(),
             spec,
@@ -1232,8 +1248,17 @@ impl SandBox {
             self.tx_containerd.clone(),
             self.app_snapshot_create(),
             resources_v2,
-        )?;
-        c.create_container().await?;
+        ) {
+            Ok(container) => container,
+            Err(error) => {
+                self.pod_cpuset_mapper = mapper_before;
+                return Err(error);
+            }
+        };
+        if let Err(error) = c.create_container().await {
+            self.pod_cpuset_mapper = mapper_before;
+            return Err(error);
+        }
         containers.insert(id, c);
 
         Ok(())
@@ -1414,7 +1439,7 @@ impl SandBox {
             .map_err(|e| Error::Other(e.to_string()))
     }
     pub async fn update_container(
-        &self,
+        &mut self,
         id: &String,
         res: &LinuxResources,
         resources_v2: Option<&[u8]>,
@@ -1426,11 +1451,27 @@ impl SandBox {
                 .cloned()
                 .ok_or_else(|| Error::NotFoundError(format!("not found container:{}", id)))?
         };
+        let mapper_before = self.pod_cpuset_mapper.clone();
+        let resources_v2 = if self.conf.sandbox_hostname.is_empty() {
+            resources_v2.map(ToOwned::to_owned)
+        } else {
+            resources_v2
+                .map(|payload| {
+                    self.pod_cpuset_mapper
+                        .remap_payload(payload, self.conf.vm_res.cpu, 1)
+                })
+                .transpose()
+                .map_err(Error::Other)?
+        };
         let _operation = container.acquire_operation().await;
-        container
-            .update(res, resources_v2)
+        let result = container
+            .update(res, resources_v2.as_deref())
             .await
-            .map_err(|e| Error::Other(e.to_string()))
+            .map_err(|e| Error::Other(e.to_string()));
+        if result.is_err() {
+            self.pod_cpuset_mapper = mapper_before;
+        }
+        result
     }
 
     pub async fn update_sandbox(&mut self, annotation: &HashMap<String, String>) -> CResult<()> {
