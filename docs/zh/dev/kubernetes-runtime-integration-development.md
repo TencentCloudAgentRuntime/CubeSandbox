@@ -454,7 +454,7 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 |---|---|---|---|---|---|
 | S5.1 安装与共存 | `NOT_STARTED` | 待指定 | — | — | 提供安装、卸载和 runc 共存方案 |
 | S5.2 升级与回滚 | `NOT_STARTED` | 待指定 | — | — | 验证版本协商、滚动升级和回滚 |
-| S5.3 兼容性 | `IN_PROGRESS` | Codex | 固定 Kubernetes v1.36.4 官方 e2e_node.test 制品和 W1 执行/回滚方案；S3.4 已获 reviewer 批准 | 官方 archive SHA-256 `fe66edafa1595ee7bfb55bcbdf107e6dca7a7c1e59dd15ecff1f6575793f3b5b`，e2e_node.test SHA-256 `560a097a5aef06fe640d9bfe87d4a67dda3faafd599d7d5f028ae21fab6ec408`；dry-run 已枚举 NodeConformance specs | W1 临时切换默认 runtime=Cube，先跑定向 smoke，再跑完整 Node E2E/Conformance 并分类失败；完成后恢复 runc |
+| S5.3 兼容性 | `IN_PROGRESS` | Codex | 固定 Kubernetes v1.36.4 官方 e2e_node.test 制品；确认缺省 runtime 不能携带 RuntimeClass overhead，改为只对 `e2e-framework` namespace 注入 `runtimeClassName: cube`；OOM/Downward API/privileged HostPath 定向门禁通过 | 官方 archive SHA-256 `fe66edafa1595ee7bfb55bcbdf107e6dca7a7c1e59dd15ecff1f6575793f3b5b`，e2e_node.test SHA-256 `560a097a5aef06fe640d9bfe87d4a67dda3faafd599d7d5f028ae21fab6ec408`；错误模式基线 `inv-686q27g8sp`；正确模式 7 项门禁 `inv-386td0gr45` 为 6 通过、1 个非 NodeConformance 差异；完整 477 项运行 `inv-686tgvghci` 进行中 | 等待 477 项完整结果，分类支持面/已知限制/真实缺陷，完成恢复和同一 reviewer 审计 |
 | S5.4 性能与稳定性 | `NOT_STARTED` | 待指定 | — | — | 执行密度、并发和 soak 测试 |
 
 

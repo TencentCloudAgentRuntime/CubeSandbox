@@ -3,13 +3,13 @@
 ## 当前 Stage
 
 S5.3 `IN_PROGRESS`：S3.4/S3.4d 已获同一 reviewer `APPROVE S3.4 DONE`，P0/P1/P2=0。
-当前准备在 W1 以 Cube 作为 containerd 临时默认 runtime，执行官方 Kubernetes v1.36.4 Node
-E2E/Conformance；结束后恢复 runc 并逐项分类失败。
+W1 正在执行正确 RuntimeClass/overhead 模式的 Kubernetes v1.36.4 官方 NodeConformance
+477 项完整运行；TAT invocation 为 `inv-686tgvghci`，尚未形成最终通过率。
 
 ## 基线
 
-最后一项已验证实现 commit 为 `10b7af56`；S3.4c 最终证据 commit 为 `24d2d188`。S0 双
-Worker 当前 CubeShim/Agent ext4 SHA-256 为 `6a0c0cd3…`/`c768706b…`；`cube-runtime`
+最后一项已验证实现 commit 为 `1df1da09`；S3.4c 最终证据 commit 为 `24d2d188`。W1
+当前 CubeShim/Agent ext4 SHA-256 为 `e0052c7e…`/`c768706b…`；`cube-runtime`
 保持既有制品；运行时根为
 `/opt/cubesandbox-s0-multinode-runtime-2269a3b3`。
 
@@ -22,8 +22,9 @@ ephemeral-storage、QoS/多容器双层数值和最终清理；
 
 ## 未完成
 
-S5.3 需要运行官方 Kubernetes v1.36.4 Node E2E/Conformance，逐项分类失败并优先修复
-阻断主路径的问题；尚未形成最终通过率和失败清单。
+S5.3 的 477 项完整 NodeConformance 尚在运行，尚未形成最终通过率、失败清单、清理证据
+和 reviewer 结论。memory EmptyDir 在 Guest 中呈现 FUSE mount identity 的兼容性缺口已
+确认，按 `K8S-OQ-025` 记录；不影响内容、权限和清理，但会失败于标准 `tmpfs` 类型断言。
 
 ## 验证
 
@@ -36,12 +37,29 @@ S3.4d 最终验证：`inv-v86nregacb` 在 `10b7af56` 完成 identity replacement
 Worker exact zero；`inv-v86nea09kv` 为 3/3 Ready。完整证据见
 [S3.4d 摘要](./evidence/s3.4/s3.4d-execution-summary.md)。
 
+S5.3 已完成的关键验证：`1df1da09` 在 W1 的定向与全量回归通过；错误模式基线
+`inv-686q27g8sp` 在 39 项中得到 33 通过、6 失败后主动终止，证明 containerd 缺省
+handler 不会让 kubelet 计入 RuntimeClass overhead；`inv-b86t69gf00` 验证 Kubernetes
+v1.36 原生 MutatingAdmissionPolicy 会在 `e2e-framework` namespace 注入 `cube` 且得到
+256Mi overhead/节点选择器；`inv-386td0gr45` 的 7 项门禁为 6 通过、1 失败，标准
+NodeConformance OOM、Downward API、privileged HostPath/subPath 均通过，唯一失败是不属于
+NodeConformance 的 NodeAllocatable Host OOM 差异。全量运行前 `inv-a86tg905pf` 的 Cube
+Sandbox/VM/shim/TAP/mount/active lease 全为 0。
+
 ## 阻塞
 
-无外部阻塞或待用户决策。P1 已知限制为持续长 exec + 同容器 resize 仍可能使首次
+无外部阻塞或待用户决策。当前运行中的完整 NodeConformance 是时间型依赖，不是卡点。
+P1 已知限制为持续长 exec + 同容器 resize 仍可能使首次
 Update/探针超时；kubelet 重试后 resize 收敛，资源可精确清理。该组合不属于首版支持面，
 在 `K8S-OQ-022` 转 S5.4 整改。另有 12 Sandbox 创建即取消的瞬时 `FailedKillPod`，重试
 后 exact-zero，按 `K8S-OQ-023` 转 S5.4。二者均不阻断基础 E2E。
+
+当前 W1 的临时测试状态必须成组恢复：默认 runtime 已是 runc；
+`96-cubesandbox-e2e-nodeconformance.toml` 临时启用 Cube privileged 并把官方
+`test-handler` 映射到 runc；kubelet 由等价的 `kubelet-e2e.service` 运行；集群中只对带
+`e2e-framework` 标签 namespace 生效的 `cubesandbox-e2e-runtimeclass` mutation
+policy/binding 正在启用；临时 auth carrier 和两项 ClusterRoleBinding 正在启用。control
+和 W2 kubelet 仍停止、对应 Node 对象仍从 API 暂时移除，CVM 没有删除。
 
 ## 受保护路径
 
@@ -52,7 +70,10 @@ Update/探针超时；kubelet 重试后 resize 收敛，资源可精确清理。
 
 ## 下一步
 
-1. 在 W1 临时把 containerd default runtime 切到 Cube，运行官方 Kubernetes v1.36.4
-   Node E2E/Conformance；完成后恢复 runc 默认值。
-2. 对每个 E2E 失败分类、关联日志和问题 ID，优先关闭主路径阻断项。
-3. 更新 S5.3 证据并交给同一 reviewer 审计。
+1. 监控 `inv-686tgvghci` 至结束，保留 JUnit/Ginkgo JSON/日志摘要并逐项分类失败。
+2. 只修复阻断主路径的问题；非严重差异按问题 ID 延期，再运行必要的定向/支持面门禁。
+3. 清理 e2e namespace 后确认 W1 exact-zero；依次删除 mutation policy/binding、恢复
+   `kubelet.service`、删除 e2e containerd 片段、删除 auth carrier/SA/RBAC；随后启动
+   control/W2 kubelet，等待 3/3 Ready，并再次做双 Worker exact-zero。
+4. 更新 S5.3 证据，运行 `make handoff-validate`，交给同一 reviewer 审计，未获批准前
+   不得标记 S5.3 `DONE`。
