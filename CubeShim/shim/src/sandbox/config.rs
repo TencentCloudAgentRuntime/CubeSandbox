@@ -41,6 +41,7 @@ pub const ANNO_PAUSE_SNAPSHOT_ID: &str = "cube.master.pause.snapshot.id";
 pub const ANNO_RUNTIME_SNAPSHOT_ID: &str = "cube.master.runtime.snapshot.id";
 pub const ANNO_SANDBOX_HOSTNAME: &str = "cube.sandbox.hostname";
 pub const ANNO_SANDBOX_PIDNS: &str = "cube.sandbox.pidns";
+pub const ANNO_SANDBOX_SYSCTLS: &str = "cube.sandbox.sysctls";
 
 pub const SHARE_CACHE_ALWAYS: u8 = 1;
 pub const SHARE_CACHE_NEVER: u8 = 2;
@@ -78,6 +79,8 @@ pub struct Config {
     pub sandbox_hostname: String,
     /// Whether all containers join one Guest PID namespace.
     pub sandbox_pidns: bool,
+    /// Pod-level CRI sysctls applied inside the Guest shared namespaces.
+    pub sandbox_sysctls: HashMap<String, String>,
     /// Extra kernel cmdline parameters injected through annotations.
     pub extra_kernel_params: Vec<String>,
 }
@@ -110,6 +113,7 @@ impl Default for Config {
             use_passfd_io: true,
             sandbox_hostname: String::new(),
             sandbox_pidns: false,
+            sandbox_sysctls: HashMap::new(),
             extra_kernel_params: Vec::new(),
         }
     }
@@ -207,6 +211,11 @@ impl Config {
                 ))
             }
         };
+        let sandbox_sysctls = anno
+            .get(ANNO_SANDBOX_SYSCTLS)
+            .map(|value| Utils::anno_to_obj::<HashMap<String, String>>(value))
+            .transpose()?
+            .unwrap_or_default();
 
         let mut cube_vips = String::new();
         if let Some(v) = anno.get(ANNO_CUBE_VIPS) {
@@ -295,6 +304,7 @@ impl Config {
             use_passfd_io,
             sandbox_hostname,
             sandbox_pidns,
+            sandbox_sysctls,
             extra_kernel_params,
         };
         Ok(c)
@@ -337,6 +347,7 @@ mod tests {
     use crate::sandbox::config::Config;
     use crate::sandbox::config::ANNO_SANDBOX_HOSTNAME;
     use crate::sandbox::config::ANNO_SANDBOX_PIDNS;
+    use crate::sandbox::config::ANNO_SANDBOX_SYSCTLS;
     use crate::sandbox::config::ANNO_SNAPSHOT_BASE;
     use crate::sandbox::config::ANNO_SNAPSHOT_MEMORY_VOL_URL;
     use crate::sandbox::config::ANNO_VM_AGENT;
@@ -545,15 +556,21 @@ mod tests {
         let config = Config::new(&Some(annotations.clone())).unwrap();
         assert_eq!(config.sandbox_hostname, "");
         assert!(!config.sandbox_pidns);
+        assert!(config.sandbox_sysctls.is_empty());
 
         annotations.insert(
             ANNO_SANDBOX_HOSTNAME.to_string(),
             "pod-hostname".to_string(),
         );
         annotations.insert(ANNO_SANDBOX_PIDNS.to_string(), "true".to_string());
+        annotations.insert(
+            ANNO_SANDBOX_SYSCTLS.to_string(),
+            r#"{"kernel.shm_rmid_forced":"1"}"#.to_string(),
+        );
         let config = Config::new(&Some(annotations.clone())).unwrap();
         assert_eq!(config.sandbox_hostname, "pod-hostname");
         assert!(config.sandbox_pidns);
+        assert_eq!(config.sandbox_sysctls["kernel.shm_rmid_forced"], "1");
 
         annotations.insert(ANNO_SANDBOX_PIDNS.to_string(), "yes".to_string());
         assert!(Config::new(&Some(annotations))

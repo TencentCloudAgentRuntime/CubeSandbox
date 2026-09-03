@@ -736,6 +736,12 @@ impl Container {
         let mut spec: oci::Spec = serde_json::from_str(&json_str)
             .map_err(|e| format!("deserialize spec failed:{}", e))?;
 
+        for (key, value) in &self.sb_conf.sandbox_sysctls {
+            spec.mut_linux()
+                .mut_sysctl()
+                .insert(key.clone(), value.clone());
+        }
+
         let proc = spec.mut_process();
         proc.set_selinuxLabel(String::new());
 
@@ -1114,7 +1120,7 @@ impl Container {
         Ok(())
     }
 
-    async fn do_signal_container(&mut self, exec_id: &String, sig: u32) -> CResult<()> {
+    async fn do_signal_container(&mut self, exec_id: &String, sig: u32, all: bool) -> CResult<()> {
         infof!(
             self.log,
             "signal {} to container:{}, exec:{}",
@@ -1126,6 +1132,7 @@ impl Container {
             container_id: self.id.clone(),
             exec_id: exec_id.clone(),
             signal: sig,
+            all,
             ..Default::default()
         };
         let client = self.client.as_ref().unwrap().lock().await;
@@ -1175,7 +1182,7 @@ impl Container {
         Ok(())
     }
 
-    pub async fn signal_container(&mut self, exec_id: &String, sig: u32) -> Result<()> {
+    pub async fn signal_container(&mut self, exec_id: &String, sig: u32, all: bool) -> Result<()> {
         {
             let state = self.state.as_ref().unwrap();
             if !state.is_running().await {
@@ -1232,7 +1239,7 @@ impl Container {
             }
         }
 
-        self.do_signal_container(exec_id, sig)
+        self.do_signal_container(exec_id, sig, all)
             .await
             .map_err(|e| Error::Other(e.to_string()))?;
 
@@ -1245,7 +1252,7 @@ impl Container {
 
     pub async fn destroy_container(&mut self) -> Result<(u32, DateTime<Utc>)> {
         // kill then stop log forwarding (also done inside signal_container)
-        self.signal_container(&"".to_string(), libc::SIGKILL as u32)
+        self.signal_container(&"".to_string(), libc::SIGKILL as u32, true)
             .await?;
 
         //remove
@@ -1461,7 +1468,7 @@ impl Container {
         };
 
         if exec.state.as_ref().unwrap().is_running().await {
-            self.do_signal_container(exec_id, libc::SIGKILL as u32)
+            self.do_signal_container(exec_id, libc::SIGKILL as u32, false)
                 .await?;
         }
 
@@ -1578,6 +1585,23 @@ mod identity_translation_tests {
             None,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pod_sysctls_are_applied_to_each_guest_container() {
+        let mut container = container_with_process(serde_json::json!({
+            "user": {"uid": 0, "gid": 0},
+            "args": ["true"],
+            "cwd": "/"
+        }));
+        container.sb_conf.sandbox_sysctls = HashMap::from([
+            ("kernel.shm_rmid_forced".to_string(), "1".to_string()),
+            ("net.ipv4.ip_forward".to_string(), "1".to_string()),
+        ]);
+
+        let spec = container.get_pb_spec().unwrap();
+        assert_eq!(spec.get_linux().get_sysctl()["kernel.shm_rmid_forced"], "1");
+        assert_eq!(spec.get_linux().get_sysctl()["net.ipv4.ip_forward"], "1");
     }
 
     fn container_with_process(process_json: serde_json::Value) -> Container {

@@ -1255,7 +1255,13 @@ impl SandBox {
         Ok(())
     }
 
-    pub async fn kill_container(&self, id: &String, exec_id: &String, sig: u32) -> Result<()> {
+    pub async fn kill_container(
+        &self,
+        id: &String,
+        exec_id: &String,
+        sig: u32,
+        all: bool,
+    ) -> Result<()> {
         let mut container = {
             let containers = self.containers.lock().await;
             containers
@@ -1264,7 +1270,7 @@ impl SandBox {
                 .ok_or_else(|| Error::NotFoundError(format!("not found container:{}", id)))?
         };
         let _operation = container.acquire_operation().await;
-        container.signal_container(exec_id, sig).await
+        container.signal_container(exec_id, sig, all).await
     }
 
     pub async fn close_io(&self, id: &String, exec_id: &String) -> Result<()> {

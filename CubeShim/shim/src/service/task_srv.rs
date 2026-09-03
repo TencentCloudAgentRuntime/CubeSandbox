@@ -1003,16 +1003,13 @@ impl Task for TaskService {
             req.id(),
             req.exec_id()
         );
-        let mut exec_id = req.exec_id.clone();
-        if req.all {
-            exec_id = "".to_string();
-        }
+        let exec_id = req.exec_id.clone();
         let sb = self.sandbox.lock().await;
         if sb.paused().await {
             errf!(self.log, "sandbox not in normal state");
             return Err(Others(format!("sandbox not in normal state")));
         }
-        sb.kill_container(&req.id, &exec_id, req.signal())
+        sb.kill_container(&req.id, &exec_id, req.signal(), req.all)
             .await
             .map_err(|e| {
                 errf!(self.log, "Kill container failed:{}", e);

@@ -16,6 +16,7 @@ use oci_spec::runtime::Spec;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{IoSliceMut, Read, Write};
@@ -51,6 +52,7 @@ const ANNO_SANDBOX_NAME: &str = "io.kubernetes.cri.sandbox-name";
 const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const ANNO_SANDBOX_HOSTNAME: &str = "cube.sandbox.hostname";
 const ANNO_SANDBOX_PIDNS: &str = "cube.sandbox.pidns";
+const ANNO_SANDBOX_SYSCTLS: &str = "cube.sandbox.sysctls";
 const CRI_V1_POD_SANDBOX_CONFIG: &str = "runtime.v1.PodSandboxConfig";
 const RUNTIME_CLEANUP_RECORD: &str = "cube-runtime-resource.json";
 const RUNTIME_REAPER_ROOT_ENV: &str = "CUBE_RUNTIME_RESOURCE_REAPER_DIR";
@@ -1281,6 +1283,16 @@ pub(crate) fn merge_cri_annotations(
         },
     );
     annotations.insert(ANNO_SANDBOX_PIDNS.to_string(), shared_pidns.to_string());
+    if let Some(linux) = config.linux.as_ref() {
+        if !linux.sysctls.is_empty() {
+            let sysctls: BTreeMap<_, _> = linux.sysctls.iter().collect();
+            annotations.insert(
+                ANNO_SANDBOX_SYSCTLS.to_string(),
+                serde_json::to_string(&sysctls)
+                    .map_err(|error| format!("encode CRI sysctls: {error}"))?,
+            );
+        }
+    }
     if config.dns_config.is_some() {
         let dns = cri_dns_entries(config.dns_config.as_ref())?;
         annotations.insert(
@@ -3011,6 +3023,9 @@ mod tests {
         assert_eq!(annotations[ANNO_SANDBOX_NAME], "pod-a");
         assert_eq!(annotations[ANNO_SANDBOX_HOSTNAME], "pod-hostname");
         assert_eq!(annotations[ANNO_SANDBOX_PIDNS], "false");
+        let sysctls: HashMap<String, String> =
+            serde_json::from_str(&annotations[ANNO_SANDBOX_SYSCTLS]).unwrap();
+        assert_eq!(sysctls["net.ipv4.ip_forward"], "1");
         assert_eq!(annotations["pod.example/key"], "value");
         assert_eq!(annotations["request.example/key"], "request");
         let dns: Vec<String> = serde_json::from_str(&annotations[ANNO_SANDBOX_DNS]).unwrap();

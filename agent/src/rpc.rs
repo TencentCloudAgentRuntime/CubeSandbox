@@ -977,8 +977,9 @@ impl AgentService {
             }
         }
 
-        if eid.is_empty() {
-            // eid is empty, signal all the remaining processes in the container cgroup
+        if req.all() {
+            // The task API explicitly requested that the signal reach every
+            // remaining process in the container cgroup.
             info!(
                 sl!(),
                 "signal all the remaining processes cid: {} eid: {}", cid, eid

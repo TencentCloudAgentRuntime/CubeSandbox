@@ -1734,6 +1734,7 @@ pub struct SignalProcessRequest {
     pub container_id: ::std::string::String,
     pub exec_id: ::std::string::String,
     pub signal: u32,
+    pub all: bool,
     // special fields
     #[cfg_attr(feature = "with-serde", serde(skip))]
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -1818,6 +1819,21 @@ impl SignalProcessRequest {
     pub fn set_signal(&mut self, v: u32) {
         self.signal = v;
     }
+
+    // bool all = 4;
+
+
+    pub fn get_all(&self) -> bool {
+        self.all
+    }
+    pub fn clear_all(&mut self) {
+        self.all = false;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_all(&mut self, v: bool) {
+        self.all = v;
+    }
 }
 
 impl ::protobuf::Message for SignalProcessRequest {
@@ -1842,6 +1858,13 @@ impl ::protobuf::Message for SignalProcessRequest {
                     let tmp = is.read_uint32()?;
                     self.signal = tmp;
                 },
+                4 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_bool()?;
+                    self.all = tmp;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -1863,6 +1886,9 @@ impl ::protobuf::Message for SignalProcessRequest {
         if self.signal != 0 {
             my_size += ::protobuf::rt::value_size(3, self.signal, ::protobuf::wire_format::WireTypeVarint);
         }
+        if self.all != false {
+            my_size += 2;
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -1877,6 +1903,9 @@ impl ::protobuf::Message for SignalProcessRequest {
         }
         if self.signal != 0 {
             os.write_uint32(3, self.signal)?;
+        }
+        if self.all != false {
+            os.write_bool(4, self.all)?;
         }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
@@ -1931,6 +1960,11 @@ impl ::protobuf::Message for SignalProcessRequest {
                 |m: &SignalProcessRequest| { &m.signal },
                 |m: &mut SignalProcessRequest| { &mut m.signal },
             ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeBool>(
+                "all",
+                |m: &SignalProcessRequest| { &m.all },
+                |m: &mut SignalProcessRequest| { &mut m.all },
+            ));
             ::protobuf::reflect::MessageDescriptor::new_pb_name::<SignalProcessRequest>(
                 "SignalProcessRequest",
                 fields,
@@ -1950,6 +1984,7 @@ impl ::protobuf::Clear for SignalProcessRequest {
         self.container_id.clear();
         self.exec_id.clear();
         self.signal = 0;
+        self.all = false;
         self.unknown_fields.clear();
     }
 }
@@ -15543,29 +15578,30 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     d\x18\x01\x20\x01(\tR\x0bcontainerIdB\0\x12\x1f\n\nstdin_port\x18\x02\
     \x20\x01(\rR\tstdinPortB\0\x12!\n\x0bstdout_port\x18\x03\x20\x01(\rR\nst\
     doutPortB\0\x12!\n\x0bstderr_port\x18\x04\x20\x01(\rR\nstderrPortB\0:\0\
-    \"r\n\x14SignalProcessRequest\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\
-    \x0bcontainerIdB\0\x12\x19\n\x07exec_id\x18\x02\x20\x01(\tR\x06execIdB\0\
-    \x12\x18\n\x06signal\x18\x03\x20\x01(\rR\x06signalB\0:\0\"V\n\x12WaitPro\
-    cessRequest\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerIdB\0\
-    \x12\x19\n\x07exec_id\x18\x02\x20\x01(\tR\x06execIdB\0:\0\"1\n\x13WaitPr\
-    ocessResponse\x12\x18\n\x06status\x18\x01\x20\x01(\x05R\x06statusB\0:\0\
-    \"u\n\x16UpdateContainerRequest\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\
-    \tR\x0bcontainerIdB\0\x124\n\tresources\x18\x02\x20\x01(\x0b2\x14.grpc.L\
-    inuxResourcesR\tresourcesB\0:\0\">\n\x15StatsContainerRequest\x12#\n\x0c\
-    container_id\x18\x01\x20\x01(\tR\x0bcontainerIdB\0:\0\">\n\x15PauseConta\
-    inerRequest\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerIdB\0\
-    :\0\"?\n\x16ResumeContainerRequest\x12#\n\x0ccontainer_id\x18\x01\x20\
-    \x01(\tR\x0bcontainerIdB\0:\0\"\xb4\x01\n\x08CpuUsage\x12!\n\x0btotal_us\
-    age\x18\x01\x20\x01(\x04R\ntotalUsageB\0\x12#\n\x0cpercpu_usage\x18\x02\
-    \x20\x03(\x04R\x0bpercpuUsageB\0\x120\n\x13usage_in_kernelmode\x18\x03\
-    \x20\x01(\x04R\x11usageInKernelmodeB\0\x12,\n\x11usage_in_usermode\x18\
-    \x04\x20\x01(\x04R\x0fusageInUsermodeB\0:\0\"\x86\x01\n\x0eThrottlingDat\
-    a\x12\x1a\n\x07periods\x18\x01\x20\x01(\x04R\x07periodsB\0\x12-\n\x11thr\
-    ottled_periods\x18\x02\x20\x01(\x04R\x10throttledPeriodsB\0\x12'\n\x0eth\
-    rottled_time\x18\x03\x20\x01(\x04R\rthrottledTimeB\0:\0\"|\n\x08CpuStats\
-    \x12-\n\tcpu_usage\x18\x01\x20\x01(\x0b2\x0e.grpc.CpuUsageR\x08cpuUsageB\
-    \0\x12?\n\x0fthrottling_data\x18\x02\x20\x01(\x0b2\x14.grpc.ThrottlingDa\
-    taR\x0ethrottlingDataB\0:\0\"A\n\tPidsStats\x12\x1a\n\x07current\x18\x01\
+    \"\x86\x01\n\x14SignalProcessRequest\x12#\n\x0ccontainer_id\x18\x01\x20\
+    \x01(\tR\x0bcontainerIdB\0\x12\x19\n\x07exec_id\x18\x02\x20\x01(\tR\x06e\
+    xecIdB\0\x12\x18\n\x06signal\x18\x03\x20\x01(\rR\x06signalB\0\x12\x12\n\
+    \x03all\x18\x04\x20\x01(\x08R\x03allB\0:\0\"V\n\x12WaitProcessRequest\
+    \x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerIdB\0\x12\x19\n\
+    \x07exec_id\x18\x02\x20\x01(\tR\x06execIdB\0:\0\"1\n\x13WaitProcessRespo\
+    nse\x12\x18\n\x06status\x18\x01\x20\x01(\x05R\x06statusB\0:\0\"u\n\x16Up\
+    dateContainerRequest\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bconta\
+    inerIdB\0\x124\n\tresources\x18\x02\x20\x01(\x0b2\x14.grpc.LinuxResource\
+    sR\tresourcesB\0:\0\">\n\x15StatsContainerRequest\x12#\n\x0ccontainer_id\
+    \x18\x01\x20\x01(\tR\x0bcontainerIdB\0:\0\">\n\x15PauseContainerRequest\
+    \x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerIdB\0:\0\"?\n\
+    \x16ResumeContainerRequest\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\
+    \x0bcontainerIdB\0:\0\"\xb4\x01\n\x08CpuUsage\x12!\n\x0btotal_usage\x18\
+    \x01\x20\x01(\x04R\ntotalUsageB\0\x12#\n\x0cpercpu_usage\x18\x02\x20\x03\
+    (\x04R\x0bpercpuUsageB\0\x120\n\x13usage_in_kernelmode\x18\x03\x20\x01(\
+    \x04R\x11usageInKernelmodeB\0\x12,\n\x11usage_in_usermode\x18\x04\x20\
+    \x01(\x04R\x0fusageInUsermodeB\0:\0\"\x86\x01\n\x0eThrottlingData\x12\
+    \x1a\n\x07periods\x18\x01\x20\x01(\x04R\x07periodsB\0\x12-\n\x11throttle\
+    d_periods\x18\x02\x20\x01(\x04R\x10throttledPeriodsB\0\x12'\n\x0ethrottl\
+    ed_time\x18\x03\x20\x01(\x04R\rthrottledTimeB\0:\0\"|\n\x08CpuStats\x12-\
+    \n\tcpu_usage\x18\x01\x20\x01(\x0b2\x0e.grpc.CpuUsageR\x08cpuUsageB\0\
+    \x12?\n\x0fthrottling_data\x18\x02\x20\x01(\x0b2\x14.grpc.ThrottlingData\
+    R\x0ethrottlingDataB\0:\0\"A\n\tPidsStats\x12\x1a\n\x07current\x18\x01\
     \x20\x01(\x04R\x07currentB\0\x12\x16\n\x05limit\x18\x02\x20\x01(\x04R\
     \x05limitB\0:\0\"y\n\nMemoryData\x12\x16\n\x05usage\x18\x01\x20\x01(\x04\
     R\x05usageB\0\x12\x1d\n\tmax_usage\x18\x02\x20\x01(\x04R\x08maxUsageB\0\
