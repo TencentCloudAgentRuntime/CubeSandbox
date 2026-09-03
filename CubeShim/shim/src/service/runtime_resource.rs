@@ -3011,9 +3011,16 @@ mod tests {
     #[test]
     fn cri_annotations_construct_default_sandbox_spec() {
         let mut spec = Spec::default();
+        let mut config = sample_cri();
+        config
+            .linux
+            .as_mut()
+            .unwrap()
+            .sysctls
+            .insert("net.ipv4.ip_forward".to_string(), "1".to_string());
         merge_cri_annotations(
             &mut spec,
-            &sample_cri(),
+            &config,
             &HashMap::from([("request.example/key".to_string(), "request".to_string())]),
         )
         .unwrap();
