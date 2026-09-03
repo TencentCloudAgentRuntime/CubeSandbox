@@ -2179,10 +2179,33 @@ fn runtime_prepare_plan_with_config(
         .linux
         .as_ref()
         .ok_or_else(|| "CRI LinuxPodSandboxConfig is required".to_string())?;
-    let overhead = linux
-        .overhead
-        .as_ref()
-        .ok_or_else(|| "RuntimeClass overhead is required for RuntimeClass cube".to_string())?;
+    // Kubernetes does not attach RuntimeClass overhead when Cube is selected
+    // as the CRI handler's default runtime. containerd still encodes an empty
+    // LinuxContainerResources message in that case. Reserve the node policy
+    // minimum so the Host runtime envelope remains fail-safe while allowing
+    // unmodified Kubernetes workloads (including Node E2E) to use Cube.
+    // Partially populated overhead remains an explicit, validated input and
+    // must not fall back silently.
+    let fallback_overhead;
+    let overhead = match linux.overhead.as_ref() {
+        Some(overhead) if *overhead != CriLinuxContainerResources::default() => overhead,
+        _ => {
+            let cpu_quota = node
+                .minimum_cpu_millicores
+                .checked_mul(100)
+                .and_then(|value| i64::try_from(value).ok())
+                .ok_or_else(|| "default runtime CPU overhead overflows CRI range".to_string())?;
+            let memory_limit_in_bytes = i64::try_from(node.minimum_memory_bytes)
+                .map_err(|_| "default runtime memory overhead overflows CRI range".to_string())?;
+            fallback_overhead = CriLinuxContainerResources {
+                cpu_period: 100_000,
+                cpu_quota,
+                memory_limit_in_bytes,
+                ..Default::default()
+            };
+            &fallback_overhead
+        }
+    };
 
     if overhead.cpu_period <= 0
         || overhead.cpu_quota <= 0
@@ -3267,12 +3290,35 @@ mod tests {
     }
 
     #[test]
-    fn runtimeclass_ceiling_rejects_v6_and_v11_before_controller_io() {
+    fn default_runtime_missing_or_empty_overhead_uses_node_minimum() {
         let node = poc_overhead_config();
+        let expected = host_resource_ceiling_with_config(
+            &ceiling_config(CriLinuxContainerResources::default(), default_overhead()),
+            &HashMap::new(),
+            &node,
+        )
+        .unwrap();
+
         let mut missing = ceiling_config(CriLinuxContainerResources::default(), default_overhead());
         missing.linux.as_mut().unwrap().overhead = None;
-        assert!(host_resource_ceiling_with_config(&missing, &HashMap::new(), &node).is_err());
+        assert_eq!(
+            host_resource_ceiling_with_config(&missing, &HashMap::new(), &node).unwrap(),
+            expected
+        );
 
+        let empty = ceiling_config(
+            CriLinuxContainerResources::default(),
+            CriLinuxContainerResources::default(),
+        );
+        assert_eq!(
+            host_resource_ceiling_with_config(&empty, &HashMap::new(), &node).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn runtimeclass_ceiling_rejects_v6_and_v11_before_controller_io() {
+        let node = poc_overhead_config();
         let mut invalid = default_overhead();
         for mutate in 0..5 {
             let mut candidate = invalid.clone();
