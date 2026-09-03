@@ -2,9 +2,9 @@
 
 ## 当前 Stage
 
-S3.4d `VALIDATING`：实现、云端矩阵和环境清理已完成，等待同一 reviewer 终审。持续长
-exec + 同容器 resize 的超时已冻结为首版 P1 已知限制并转 S5.4，不阻断基础 Kubernetes
-E2E。
+S5.3 `IN_PROGRESS`：S3.4/S3.4d 已获同一 reviewer `APPROVE S3.4 DONE`，P0/P1/P2=0。
+当前准备在 W1 以 Cube 作为 containerd 临时默认 runtime，执行官方 Kubernetes v1.36.4 Node
+E2E/Conformance；结束后恢复 runc 并逐项分类失败。
 
 ## 基线
 
@@ -15,15 +15,15 @@ Worker 当前 CubeShim/Agent ext4 SHA-256 为 `6a0c0cd3…`/`c768706b…`；`cub
 
 ## 已完成
 
-S0、S1、S2、S3.1～S3.3、S3.4a～S3.4c 均为 `DONE`。S3.4d 已关闭
+S0、S1、S2、S3.1～S3.4d 均为 `DONE`。S3.4d 已关闭
 `K8S-OQ-015/016/017/021`，完成生命周期 fence、受控 restart/resize/long-exec、
 ephemeral-storage、QoS/多容器双层数值和最终清理；
 两个 Worker 均为 0 sandbox/VM/CNI/shim/mount/active lease，集群 3/3 Ready。
 
 ## 未完成
 
-S3.4d 只差同一 reviewer 终审。批准后立即运行官方 Kubernetes v1.36.4 Node
-E2E/Conformance，逐项分类失败并优先修复阻断主路径的问题。
+S5.3 需要运行官方 Kubernetes v1.36.4 Node E2E/Conformance，逐项分类失败并优先修复
+阻断主路径的问题；尚未形成最终通过率和失败清单。
 
 ## 验证
 
@@ -52,8 +52,7 @@ Update/探针超时；kubelet 重试后 resize 收敛，资源可精确清理。
 
 ## 下一步
 
-1. 同一 reviewer 复核 `10b7af56`、S3.4d 证据和已知限制分类。
-2. 若有 P0/P1 阻断项则修复并复审；批准后把 S3.4/S3.4d 标记 `DONE`。
-3. 在 W1 临时把 containerd default runtime 切到 Cube，运行官方 Kubernetes v1.36.4
+1. 在 W1 临时把 containerd default runtime 切到 Cube，运行官方 Kubernetes v1.36.4
    Node E2E/Conformance；完成后恢复 runc 默认值。
-4. 对每个 E2E 失败分类、关联日志和问题 ID，优先关闭主路径阻断项。
+2. 对每个 E2E 失败分类、关联日志和问题 ID，优先关闭主路径阻断项。
+3. 更新 S5.3 证据并交给同一 reviewer 审计。

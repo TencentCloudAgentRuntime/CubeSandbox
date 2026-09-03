@@ -328,14 +328,14 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 - 终止宽限期、SIGTERM/SIGKILL 和 TaskExit 事件时序有自动化测试。
 
 ## 8. S3：存储、安全与资源
-> Milestone 状态：`IN_PROGRESS`。S2、S3.1、S3.2、S3.3 已完成；当前执行 S3.4。
+> Milestone 状态：`DONE`。S3.1～S3.4 已完成并通过各子阶段同一 reviewer 验收。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
 | S3.1 基础 Volume | `DONE` | Codex | 输入、独立 Pod Volume share、可写卷/失败回滚、四类投射卷动态更新、subPath 固定语义和最终支持矩阵均已关闭 | 实现 `5b504b58`；S3.1d 回归 `aafdef40` / `inv-a83u0wgvxv`；审计 `inv-v83u490xa8`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.1/README.md)；同一 reviewer 确认 S3.1 `DONE` | S3.2 filesystem PVC |
 | S3.2 PVC | `DONE` | Codex | S3.2a～S3.2d 已完成输入基线、跨容器/Pod 重建持久化、失败回滚、static-local Retain 手工重绑、组合回归与支持矩阵 | `83902212`；组合终验 `inv-a83x7s0g04`；独立审计 `inv-883xivg7ub`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.2/README.md)；同一 reviewer 确认 S3.2 `DONE` | S3.3 SecurityContext |
 | S3.3 SecurityContext | `DONE` | Codex | S3.3a～S3.3f 已完成输入诊断、身份与组、capability/rootfs、NNP/seccomp、privileged 双门禁、exec 安全上下文和组合支持矩阵 | 实现 `7bf7f09d`；组合终验 `inv-v84gjpgj7k`；独立审计 `inv-884huw00ab`；[验收证据](../../handoffs/kubernetes-runtime/evidence/s3.3/README.md)；同一 reviewer `APPROVE S3.3f DONE` | S3.4 资源控制 |
-| S3.4 资源控制 | `VALIDATING` | Codex | S3.4a、S3.4b、S3.4c 均已 `DONE`；S3.4d 实现与云端矩阵完成，等待同一 reviewer 终审 | `10b7af56` 关闭默认小 VM 启动、极端内存下调、Shim RPC client、生命周期 fence 及 systemd collection 等待后的 cgroup identity TOCTOU；QoS/多容器/Pod-level、Guest/Host 数值、OOM、resize、ephemeral-storage、在线 containerd restart、双 Worker exact zero 已闭环；持续长 exec+resize 与创建即取消零告警分别登记 `K8S-OQ-022/023`；[S3.4d 证据](../../handoffs/kubernetes-runtime/evidence/s3.4/s3.4d-execution-summary.md) | 取得 reviewer `APPROVE S3.4 DONE` 后立即运行 Kubernetes v1.36.4 E2E/Conformance |
+| S3.4 资源控制 | `DONE` | Codex | S3.4a～S3.4d 全部完成；默认小 VM 启动、极端内存下调、Shim RPC client、生命周期 fence 及 systemd collection 等待后的 cgroup identity TOCTOU 已关闭 | 最终实现 `10b7af56`；QoS/多容器/Pod-level、Guest/Host 数值、OOM、resize、ephemeral-storage、在线 containerd restart、双 Worker exact zero 已闭环；持续长 exec+resize 与创建即取消零告警分别登记 `K8S-OQ-022/023`；[S3.4d 证据](../../handoffs/kubernetes-runtime/evidence/s3.4/s3.4d-execution-summary.md)；同一 reviewer `APPROVE S3.4 DONE`，P0/P1/P2=0 | S5.3 Kubernetes v1.36.4 Node E2E/Conformance |
 
 ### S3.1 子阶段执行记录
 
@@ -373,7 +373,7 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 | S3.4a 资源输入与现状诊断 | `DONE` | 冻结 Kubernetes 1.36/containerd 2.3 在 cgroup v2 上对 CPU、内存、swap、PIDs、hugepages 和 ephemeral-storage 的职责边界，并定位 Cube create/update 的真实缺口 | runc/Cube 对照覆盖 BestEffort/Burstable/Guaranteed、request-only/limit、init/restartable sidecar/app；保存 raw Pod/CRI/ctr OCI、Host VM/Shim cgroup、Guest per-container cgroup 和 cleanup 基线；create/update/拒绝路径形成证据矩阵；同一 reviewer `APPROVE` | V15 `/data/cubelet/s3.4-evidence/s34a-20260901T145751Z-2537408`：6 个 Pod、17 个低层 Task、1 个预期 reject、2 个 invalid-unified、20 份 trace 与 exact cleanup 通过；quota 和 `memory.max` 数值链已生效，period 仅覆盖默认 `100000`、未独立证明；shares 映射不兼容、limit-only 隐式 swap=0，NoSwap 的 observable `0` 不是 unified 无损传输结果；其余缺口进入 S3.4b；同一 reviewer `APPROVE S3.4a DONE` |
 | S3.4b Guest per-container cgroup | `DONE` | 保持 quota 与 `memory.max` 数值链，独立验证非默认 period，并让标准 OCI/Task Update 资源在 Guest resource parent 正确生效或明确拒绝 | 非默认 period create/update 正确；shares→weight 与当前 containerd/cgroups v3/runc 对照一致；limit-only 不改变 swap；无损处理或白名单实现 unified `memory.swap.max` 且 Kubernetes NoSwap 回归通过；reservation、显式 swap、cpuset、PIDs、hugepage、其他 unified 的 create/update 值正确；暂不能表示的字段 fail-closed，不再 accepted-unapplied；压力/OOM/PIDs/hugepage 正反例可归因到目标容器；同 Pod survivor 不受影响；validation/preflight 零写入，运行期失败且 rollback 成功时 controller/spec 复原，rollback 失败进入可重试 undo 的 fail-stop；create 失败由显式 pending owner 清理；同一 reviewer `APPROVE` | `be8e7304` 最终实现；正式矩阵 `inv-8853vxgxh1`、`inv-9855pngtst`、`inv-08564809p0`、`inv-68569j047d`、`inv-v856bt07f9` 与 clean preflight `inv-6856c8gt1t` 均通过；[证据摘要](../../handoffs/kubernetes-runtime/evidence/s3.4/s3.4b-execution-summary.txt)；同一 reviewer `APPROVE S3.4b DONE` |
 | S3.4c Host Pod VM 资源包络 | `DONE` | 在 Host cgroup 对一个 Pod VM 的总 CPU/内存/进程资源实施静态 VM 容量 ceiling，并让 kubelet 父层和 Guest 容器层保持各自动态更新职责 | Host 预算算法有固定测试向量；VM/VMM/virtiofs/辅助进程归入唯一 Pod leaf；压力下祖先/leaf 交集生效且不影响其他 Pod；更新、OOM、删除和失败创建均收敛；同一 reviewer `APPROVE S3.4c DONE` | `2a23aa3c` 已完成六 Pod/九容器原始证据、启动阶段 `OOMKilled/137`、inactive scope 删除、在线 containerd restart 与双节点 exact baseline；同一 reviewer 确认无 P0/P1/P2 并 `APPROVE S3.4c DONE`；`K8S-OQ-021/022` 进入 S3.4d |
-| S3.4d 压力回归与支持矩阵 | `VALIDATING` | 组合验证 Host/Guest 双层限制、QoS、更新、故障与非 cgroup 资源，并冻结首版范围 | 多容器 CPU/内存压力、定向 OOM、in-place update、swap/hugepage/PIDs、ephemeral-storage 责任边界均有通过或明确拒绝证据；lease/Pod/VM/cgroup 全量基线恢复；独立审计和同一 reviewer `APPROVE S3.4 DONE` | `10b7af56`；`K8S-OQ-015/016/017/021` 已关闭，restart/resize/受控 long-exec、生命周期 fence 及 systemd collection 后 identity 重验已通过；最终构建 `inv-v86nregacb`、部署 `inv-686nvg0va4`/`inv-886nvfg6v6`，功能回归与清理 `inv-086ncr074p`、`inv-a86ndt0pkt`/`inv-a86nds0c3q`、`inv-v86nea09kv`。持续 long-exec+resize 和创建即取消零告警转 `K8S-OQ-022/023`，不阻断基础 E2E；[执行摘要](../../handoffs/kubernetes-runtime/evidence/s3.4/s3.4d-execution-summary.md)；等待同一 reviewer 终审 |
+| S3.4d 压力回归与支持矩阵 | `DONE` | 组合验证 Host/Guest 双层限制、QoS、更新、故障与非 cgroup 资源，并冻结首版范围 | 多容器 CPU/内存压力、定向 OOM、in-place update、swap/hugepage/PIDs、ephemeral-storage 责任边界均有通过或明确拒绝证据；lease/Pod/VM/cgroup 全量基线恢复；独立审计和同一 reviewer `APPROVE S3.4 DONE` | `10b7af56`；`K8S-OQ-015/016/017/021` 已关闭，restart/resize/受控 long-exec、生命周期 fence 及 systemd collection 后 identity 重验已通过；最终构建 `inv-v86nregacb`、部署 `inv-686nvg0va4`/`inv-886nvfg6v6`，功能回归与清理 `inv-086ncr074p`、`inv-a86ndt0pkt`/`inv-a86nds0c3q`、`inv-v86nea09kv`。持续 long-exec+resize 和创建即取消零告警转 `K8S-OQ-022/023`；[执行摘要](../../handoffs/kubernetes-runtime/evidence/s3.4/s3.4d-execution-summary.md)；同一 reviewer `APPROVE S3.4 DONE`，P0/P1/P2=0 |
 
 #### S3.4b 实现单元记录
 
@@ -448,13 +448,13 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 - 每种失败至少能从日志或指标定位到具体生命周期阶段。
 
 ## 10. S5：PoC 集成交付
-> Milestone 状态：`NOT_STARTED`。依赖 S4.1～S4.3 完成。
+> Milestone 状态：`IN_PROGRESS`。按 PoC 快速验收优先级先执行 S5.3；S4.1～S4.3 仍需后续完成。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
 | S5.1 安装与共存 | `NOT_STARTED` | 待指定 | — | — | 提供安装、卸载和 runc 共存方案 |
 | S5.2 升级与回滚 | `NOT_STARTED` | 待指定 | — | — | 验证版本协商、滚动升级和回滚 |
-| S5.3 兼容性 | `NOT_STARTED` | 待指定 | — | — | 运行 Node E2E/Conformance 并分类失败 |
+| S5.3 兼容性 | `IN_PROGRESS` | Codex | 固定 Kubernetes v1.36.4 官方 e2e_node.test 制品和 W1 执行/回滚方案；S3.4 已获 reviewer 批准 | 官方 archive SHA-256 `fe66edafa1595ee7bfb55bcbdf107e6dca7a7c1e59dd15ecff1f6575793f3b5b`，e2e_node.test SHA-256 `560a097a5aef06fe640d9bfe87d4a67dda3faafd599d7d5f028ae21fab6ec408`；dry-run 已枚举 NodeConformance specs | W1 临时切换默认 runtime=Cube，先跑定向 smoke，再跑完整 Node E2E/Conformance 并分类失败；完成后恢复 runc |
 | S5.4 性能与稳定性 | `NOT_STARTED` | 待指定 | — | — | 执行密度、并发和 soak 测试 |
 
 

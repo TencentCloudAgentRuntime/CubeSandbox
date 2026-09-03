@@ -233,7 +233,7 @@ cgroup v2 OOM armed barrier 和 inactive/已消失 systemd scope 的幂等清理
 
 ## S3.4d 压力回归与支持矩阵（2026-09-03）
 
-状态：`VALIDATING`。最终候选 `10b7af56` 包含默认 VM memory floor、managed memory
+状态：`DONE`。最终候选 `10b7af56` 包含默认 VM memory floor、managed memory
 downsize 写前保护，以及 Shim Agent RPC client handle 解串行；reviewer 指出的生命周期竞态
 由共享 per-container operation gate 与 sandbox fence 修复；systemd collection 有界等待后
 重新校验 cgroup identity，避免同路径替代 leaf 被误认成原 owner。默认规格 8 Pod 启动即 OOM
@@ -254,4 +254,5 @@ collection `FailedKillPod`。该极端边界转 `K8S-OQ-023`，不阻断基础 E
 持续长 exec 与同容器 resize 的激进组合仍可能首次 ttrpc/passfd 超时，kubelet 重试后约
 53 秒收敛；它冻结为首版 P1 已知限制并转 S5.4，不冒充支持。完整实现、制品 SHA、TAT
 invocation、失败边界、支持判定和最终清理见
-[`s3.4d-execution-summary.md`](./s3.4d-execution-summary.md)。当前等待同一 reviewer 终审。
+[`s3.4d-execution-summary.md`](./s3.4d-execution-summary.md)。同一 reviewer 已终审并明确返回
+`APPROVE S3.4 DONE`，P0/P1/P2 阻断项均为 0。
