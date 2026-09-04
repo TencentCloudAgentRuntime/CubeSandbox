@@ -127,18 +127,39 @@ containerd 的 Sandbox metadata 由 kubelet 异步 GC，在约 55 秒后走标�
 - 修订 PVM Guest kernel 构建：`inv-b86w9i084p` 已完成；输入 config SHA-256
   `0d2865ad3bdd9f84ec011d41a4b2ad689808c7a5181029f7bb993db481cae4ad`，产物与门禁见上节。
 - 修复后完整运行：`inv-a86wisgb60`，report
-  `node-conformance-runtimeclass-full-4`，进行中；启动时强制校验 kernel SHA、kubelet
-  有效配置 20s 与零 Cube Sandbox。
+  `node-conformance-runtimeclass-full-4`，运行满 21600 秒后被 suite timeout 截断；实际执行
+  398/477 项，357 Passed、41 Failed、79 未执行。Ginkgo JSON SHA-256 为
+  `f641f3bb55c0c1bd822430cd054191efbe0d4291defbd56b4b5fae00e0618209`，JUnit XML
+  SHA-256 为 `c0c4890656fd84420007c64ce11c1404ac22b8d0ff388422842af6ac165fb226`。
+
+## 缓存镜像 Pod 热启动诊断
+
+`inv-9887r90bir` 在 W1 串行创建 5 个显式 `runtimeClassName: cube` 的单容器 Pod；busybox
+已缓存、`imagePullPolicy=IfNotPresent`、无 init container 和 probe。client create→Ready
+分别为 6476、6468、6459、6491、6474ms，平均 6474ms，镜像拉取次数为 0。同期 kubelet
+增量为：`RunPodSandbox` 5 次、平均 6024ms；`CreateContainer` 5 次、平均 12ms；
+`StartContainer` 5 次、平均 36ms。
+
+CubeShim 统计中 5 次 Guest 启动到 vsock ready 为 1128～1135ms、平均 1130ms；
+Cloud Hypervisor `LaunchVmm`/`BootVm` API 平均 1/18ms，Agent `CreateSandbox` 平均 7ms。
+`inv-8887w0ggbr`/`inv-98880agrwj` 对额外诊断 Pod 的进程追踪显示：Cilium CNI 调用约
+104ms；RuntimeResource 的 `ip/tc/TAP` 准备约 64ms；Host cgroup/lifecycle 路径执行了
+264 次同步 `systemctl show`，对应反复的 stable membership 校验，是约 4.5 秒准备开销的
+主因。strace 本身将该额外样本放大到 8.1 秒，因此通过未追踪的前 5 个样本报告基线，
+只用追踪样本归因。
+
+临时 namespace `cube-startup-probe-20260904-1144` 及 7 个诊断 Pod 已由
+`inv-v88827gg63` 删除；`inv-b8882igpkh` 等待 containerd 异步 GC 后确认匹配的 CRI
+Pod/container 均为 0。此项作为 `K8S-OQ-030` 转 S5.4，不阻断 S5.3 功能验收。
 
 ## 完成前必须补齐
 
-1. 保存最终 `Ran ...` 汇总、JUnit/Ginkgo JSON SHA-256 和唯一失败标题。
-2. 将失败分为：首版支持面外、已知非阻断差异、runner/环境、真实 Cube 缺陷。
-3. 对阻断主路径的真实缺陷完成修复和定向回归；其余问题必须有连续问题 ID 和后续
+1. 将 full-4 失败分为：首版支持面外、已知非阻断差异、runner/环境、真实 Cube 缺陷。
+2. 对阻断主路径的真实缺陷完成修复和定向回归；其余问题必须有连续问题 ID 和后续
    Stage。
-4. 删除 e2e namespace，并确认 W1 exact-zero。
-5. 删除 mutation policy/binding；恢复 `kubelet.service`；移除 containerd e2e 片段；
+3. 删除 e2e namespace，并确认 W1 exact-zero。
+4. 删除 mutation policy/binding；恢复 `kubelet.service`；移除 containerd e2e 片段；
    删除 auth carrier/SA/RBAC。
-6. 启动 control/W2 kubelet，恢复 3/3 Ready，完成双 Worker exact-zero。
-7. 运行 `make handoff-validate`，由同一 reviewer 审计；没有 reviewer `APPROVE` 不得
+5. 启动 control/W2 kubelet，恢复 3/3 Ready，完成双 Worker exact-zero。
+6. 运行 `make handoff-validate`，由同一 reviewer 审计；没有 reviewer `APPROVE` 不得
    标记 S5.3 `DONE`。

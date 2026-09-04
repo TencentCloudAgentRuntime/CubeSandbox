@@ -64,6 +64,15 @@ CPU Manager 暴露 host cpuset `2` 超出双 vCPU Guest `0-1`，`8dc39f77` 增�
 host→Guest CPU/NUMA 映射。云构建 `inv-6876060ap8` 已通过 cpuset 4/4、service 164/164、
 all-targets 和 release build，Shim SHA-256 为 `550d5f35…`；尚未部署到 W1。
 
+热启动诊断 `inv-9887r90bir` 使用已缓存 busybox、单容器、无 probe 的 5 个串行 Cube Pod，
+client create→Ready 为 6459～6491ms，平均 6474ms；kubelet 增量中 `RunPodSandbox` 平均
+6024ms，`CreateContainer`/`StartContainer` 平均 12/36ms，镜像拉取为 0。CubeShim 内部
+Guest 到 vsock ready 平均 1130ms，Cloud Hypervisor BootVm API 平均 18ms，Agent
+CreateSandbox 平均 7ms。`inv-8887w0ggbr`/`inv-98880agrwj` 的进程追踪发现单 Pod 启动
+触发 264 次同步 `systemctl show`，反复执行 Host cgroup/lifecycle 稳定性校验，是约 4.5 秒
+未优化开销的主因；Cilium CNI 约 104ms，RuntimeResource 网络准备约 64ms。测量 namespace
+已由 `inv-v88827gg63` 删除，`inv-b8882igpkh` 确认 CRI Pod/container 均为 0。
+
 ## 阻塞
 
 无外部阻塞或待用户决策。`K8S-OQ-028` 已关闭。首轮完整 NodeConformance 已因 6 小时
@@ -72,6 +81,8 @@ P1 已知限制为持续长 exec + 同容器 resize 仍可能使首次
 Update/探针超时；kubelet 重试后 resize 收敛，资源可精确清理。该组合不属于首版支持面，
 在 `K8S-OQ-022` 转 S5.4 整改。另有 12 Sandbox 创建即取消的瞬时 `FailedKillPod`，重试
 后 exact-zero，按 `K8S-OQ-023` 转 S5.4。二者均不阻断基础 E2E。
+当前缓存镜像 Pod 热启动约 6.5 秒，其中 Host cgroup/lifecycle 重复稳定性校验为主要开销，
+按 `K8S-OQ-030` 转 S5.4 优化；它不阻断 S5.3 功能兼容性验收。
 
 当前 W1 的临时测试状态必须成组恢复：默认 runtime 已是 runc；
 `96-cubesandbox-e2e-nodeconformance.toml` 临时启用 Cube privileged 并把官方
