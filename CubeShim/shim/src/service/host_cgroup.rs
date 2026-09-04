@@ -877,7 +877,7 @@ impl LifecycleOperation {
         }
         verify_live_target_identity(&record.target)?;
         if matches!(self.owner, OwnerKind::Helper | OwnerKind::Server) {
-            verify_target_membership(&record.target, actual.pid, true)?;
+            verify_target_membership(&record.target, actual.pid)?;
         }
         match self.owner {
             OwnerKind::Helper if record.phase == LifecyclePhase::Prepared => Ok(()),
@@ -1066,7 +1066,7 @@ impl crate::hypervisor::worker::WorkerPlacement for LifecycleOperation {
         {
             return Err("cube-vmm-worker identity changed during placement".to_string());
         }
-        verify_target_membership(&self.target, pid, false)?;
+        verify_target_membership(&self.target, pid)?;
 
         let _record_lock = self.handle.record_lock()?;
         let mut record = self.handle.read_record()?;
@@ -1085,7 +1085,7 @@ impl crate::hypervisor::worker::WorkerPlacement for LifecycleOperation {
             .checked_add(1)
             .ok_or_else(|| "lifecycle sequence overflow".to_string())?;
         atomic_write_json(&self.handle.directory.join(RECORD_FILE), &record)?;
-        verify_target_membership(&self.target, pid, false)
+        verify_target_membership(&self.target, pid)
     }
 }
 
@@ -1597,7 +1597,7 @@ impl LifecycleHandle {
                                     .to_string(),
                             );
                         }
-                        verify_target_membership(&record.target, server.pid, true)?;
+                        verify_target_membership(&record.target, server.pid)?;
                     } else if !takeover_cgroup_allowed(record, &server.cgroup) {
                         return Err(
                             "retry caller is outside both claimed Host locations".to_string()
@@ -1654,7 +1654,7 @@ impl LifecycleHandle {
             {
                 return Err("first takeover caller left the bootstrap cgroup".to_string());
             }
-            verify_target_membership(&record.target, server.pid, true)?;
+            verify_target_membership(&record.target, server.pid)?;
             if expected == Classification::ManagedSandbox && target.leaf_identity().is_some() {
                 return Err(format!(
                     "refuse to reuse an existing managed Host leaf {}",
@@ -1834,7 +1834,7 @@ impl LifecycleHandle {
                 {
                     return Err("legacy takeover must retain an EMPTY Host owner".to_string());
                 }
-                verify_target_membership(&record.target, server.pid, true)?;
+                verify_target_membership(&record.target, server.pid)?;
                 record.server = Some(server.clone());
                 record.operation_owner.identity = server;
                 record.phase = LifecyclePhase::ContainerdCommitted;
@@ -1860,7 +1860,7 @@ impl LifecycleHandle {
         if !immutable_identity_matches(&registered, &server) {
             return Err("server identity changed during Host placement".to_string());
         }
-        verify_target_membership(&target, server.pid, true)?;
+        verify_target_membership(&target, server.pid)?;
         let leaf_path = Path::new("/sys/fs/cgroup").join(target.cgroup().trim_start_matches('/'));
         let leaf_identity = file_identity(&leaf_path)?;
 
@@ -1883,7 +1883,7 @@ impl LifecycleHandle {
         if !immutable_identity_matches(record.server.as_ref().unwrap_or(&registered), &server) {
             return Err("registered server identity changed during Host placement".to_string());
         }
-        verify_target_membership(&record.target, server.pid, true)?;
+        verify_target_membership(&record.target, server.pid)?;
         let mut host_owner = self.read_host_owner()?;
         if host_owner.generation != record.generation
             || host_owner.state == HostOwnerState::Empty
@@ -1908,7 +1908,7 @@ impl LifecycleHandle {
             .checked_add(1)
             .ok_or_else(|| "lifecycle sequence overflow".to_string())?;
         atomic_write_json(&self.directory.join(RECORD_FILE), &record)?;
-        verify_target_membership(&record.target, std::process::id() as i32, true)
+        verify_target_membership(&record.target, std::process::id() as i32)
     }
 
     /// Apply or recover the static Host leaf transaction. The operation lock
@@ -2774,7 +2774,7 @@ fn verify_controller_claim(
             "Host controller operation process identity or containment changed".to_string(),
         );
     }
-    verify_target_membership(target, actual.pid, true)
+    verify_target_membership(target, actual.pid)
 }
 
 fn verify_host_owner_for_record(
@@ -3358,7 +3358,7 @@ impl BootstrapSession {
             self.target.set_leaf_identity(identity.clone());
             self.handle.persist_leaf_identity(identity)?;
             operation.verify()?;
-            verify_target_membership(&self.target, std::process::id() as i32, true)?;
+            verify_target_membership(&self.target, std::process::id() as i32)?;
         }
         Ok(())
     }
@@ -3396,7 +3396,7 @@ impl BootstrapSession {
                         server.pid
                     ));
                 }
-                verify_target_membership(&self.target, pid, true)?;
+                verify_target_membership(&self.target, pid)?;
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3405,7 +3405,7 @@ impl BootstrapSession {
     }
 
     pub(crate) fn release_gate(&mut self) -> Result<(), String> {
-        verify_target_membership(&self.target, std::process::id() as i32, true)?;
+        verify_target_membership(&self.target, std::process::id() as i32)?;
         let gate = self
             .gate_write
             .take()
@@ -3496,7 +3496,7 @@ pub(crate) fn early_server_gate() -> Result<(), String> {
         return Err("bootstrap gate returned an invalid token".to_string());
     }
     let record = handle.read_record()?;
-    verify_target_membership(&record.target, std::process::id() as i32, true)
+    verify_target_membership(&record.target, std::process::id() as i32)
 }
 
 pub(crate) fn lifecycle_from_env() -> Result<Option<LifecycleHandle>, String> {
@@ -3616,7 +3616,7 @@ pub(crate) fn run_systemd_probe() -> Result<(), String> {
         };
         let mut target = target;
         target.set_leaf_identity(identity);
-        if let Err(error) = verify_target_membership(&target, pid, true) {
+        if let Err(error) = verify_target_membership(&target, pid) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!("systemd probe iteration {iteration}: {error}"));
@@ -4082,7 +4082,7 @@ async fn scan_lifecycle(handle: &LifecycleHandle, queue: &Path) -> Result<(), St
                 ..
             }) = &server_observation
             {
-                if let Err(error) = verify_target_membership(&record.target, identity.pid, true) {
+                if let Err(error) = verify_target_membership(&record.target, identity.pid) {
                     let message = format!("committed Host target monitoring failed: {error}");
                     if record.create_state == CreateState::InProgress {
                         handle.scanner_publish_failure_if_current(
@@ -5876,7 +5876,7 @@ fn create_and_join_target(target: &HostTarget, pid: i32) -> Result<(), String> {
             client
                 .start()
                 .map_err(|error| format!("start systemd scope {unit}: {error}"))?;
-            wait_systemd_unit(target, pid, true)
+            verify_systemd_placement(target, pid)
         }
         HostTarget::Cgroupfs { cgroup, .. } => {
             let path = Path::new("/sys/fs/cgroup").join(cgroup.trim_start_matches('/'));
@@ -5892,21 +5892,20 @@ fn create_and_join_target(target: &HostTarget, pid: i32) -> Result<(), String> {
     }
 }
 
-fn verify_target_membership(target: &HostTarget, pid: i32, stable: bool) -> Result<(), String> {
+fn verify_target_membership(target: &HostTarget, pid: i32) -> Result<(), String> {
+    // The systemd target receives the expensive stability gate exactly once,
+    // immediately after StartTransientUnit.  Every later lifecycle operation
+    // is fenced by the persisted parent/leaf inode identities and an exact
+    // /proc cgroup membership check, so it does not need to spawn systemctl.
     verify_live_target_identity(target)?;
-    match target {
-        HostTarget::Systemd { .. } if stable => wait_systemd_unit(target, pid, true),
-        _ => {
-            let actual = current_process_cgroup(pid)?;
-            if actual != target.cgroup() {
-                return Err(format!(
-                    "process {pid} is in {actual}, expected {}",
-                    target.cgroup()
-                ));
-            }
-            Ok(())
-        }
+    let actual = current_process_cgroup(pid)?;
+    if actual != target.cgroup() {
+        return Err(format!(
+            "process {pid} is in {actual}, expected {}",
+            target.cgroup()
+        ));
     }
+    Ok(())
 }
 
 fn verify_live_target_identity(target: &HostTarget) -> Result<(), String> {
@@ -5934,34 +5933,49 @@ fn verify_live_target_identity(target: &HostTarget) -> Result<(), String> {
     Ok(())
 }
 
-fn wait_systemd_unit(target: &HostTarget, pid: i32, five_samples: bool) -> Result<(), String> {
-    let HostTarget::Systemd { unit, cgroup, .. } = target else {
+fn verify_systemd_placement(target: &HostTarget, pid: i32) -> Result<(), String> {
+    let HostTarget::Systemd { cgroup, .. } = target else {
         return Err("systemd verification called for non-systemd target".to_string());
     };
+    let path = Path::new("/sys/fs/cgroup").join(cgroup.trim_start_matches('/'));
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("systemd target has no parent: {}", path.display()))?;
+    let expected_parent = target
+        .parent_identity()
+        .ok_or_else(|| "systemd target has no durable parent identity".to_string())?;
+    // StartTransientUnit returns after systemd has accepted the job.  Wait for
+    // the kernel-visible cgroup placement, then prove that the same parent,
+    // leaf, and process membership remain stable before persisting the leaf.
+    let mut leaf_identity = None;
     for _ in 0..200 {
-        let values = systemd_properties(unit)?;
-        if values.get("Job").is_none_or(String::is_empty)
-            && values.get("ActiveState").map(String::as_str) == Some("active")
+        if path.exists()
+            && current_process_cgroup(pid).ok().as_deref() == Some(cgroup.as_str())
+            && file_identity(parent).ok().as_ref() == Some(expected_parent)
         {
+            leaf_identity = Some(file_identity(&path)?);
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let samples = if five_samples { 5 } else { 1 };
-    for sample in 0..samples {
-        let values = systemd_properties(unit)?;
+    let leaf_identity = leaf_identity.ok_or_else(|| {
+        format!(
+            "systemd placement did not create {} with process {pid}",
+            path.display()
+        )
+    })?;
+    const STABLE_SAMPLES: usize = 5;
+    for sample in 0..STABLE_SAMPLES {
         let actual = current_process_cgroup(pid)?;
-        if values.get("Job").is_some_and(|value| !value.is_empty())
-            || values.get("ActiveState").map(String::as_str) != Some("active")
-            || values.get("SubState").map(String::as_str) != Some("running")
-            || values.get("ControlGroup").map(String::as_str) != Some(cgroup.as_str())
+        if file_identity(parent)? != *expected_parent
+            || file_identity(&path)? != leaf_identity
             || actual != *cgroup
         {
             return Err(format!(
-                "systemd scope {unit} gate failed for pid {pid}: properties={values:?} cgroup={actual} expected={cgroup}"
+                "systemd placement gate failed for pid {pid}: cgroup={actual} expected={cgroup}"
             ));
         }
-        if sample + 1 < samples {
+        if sample + 1 < STABLE_SAMPLES {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -5997,31 +6011,9 @@ fn systemd_properties(unit: &str) -> Result<HashMap<String, String>, String> {
 }
 
 fn verify_watchdog_service() -> Result<(), String> {
-    let values = systemd_properties(WATCHDOG_UNIT)?;
-    let main_pid: i32 = values
-        .get("MainPID")
-        .ok_or_else(|| format!("{WATCHDOG_UNIT} did not report MainPID"))?
-        .parse()
-        .map_err(|error| format!("parse {WATCHDOG_UNIT} MainPID: {error}"))?;
-    if values.get("ActiveState").map(String::as_str) != Some("active")
-        || values.get("SubState").map(String::as_str) != Some("running")
-        || values.get("ControlGroup").map(String::as_str)
-            != Some("/system.slice/cubesandbox-shim-watchdog.service")
-        || main_pid <= 0
-        || current_process_cgroup(main_pid)? != "/system.slice/cubesandbox-shim-watchdog.service"
-    {
-        return Err(format!(
-            "{WATCHDOG_UNIT} is not active in its dedicated cgroup: {values:?}"
-        ));
-    }
-    let watchdog = process_identity(main_pid)?;
+    const WATCHDOG_CGROUP: &str = "/system.slice/cubesandbox-shim-watchdog.service";
     let expected_binary = Path::new(WATCHDOG_BINARY);
     let expected_executable = file_identity(expected_binary)?;
-    if watchdog.executable != expected_executable {
-        return Err(format!(
-            "{WATCHDOG_UNIT} executable identity does not match the installed path"
-        ));
-    }
     let expected_argv = vec![
         WATCHDOG_BINARY.to_string(),
         "-namespace".to_string(),
@@ -6030,11 +6022,37 @@ fn verify_watchdog_service() -> Result<(), String> {
         "node".to_string(),
         WATCHDOG_ACTION.to_string(),
     ];
-    if watchdog.command_sha256 != command_sha256(&expected_argv) {
+    let expected_command = command_sha256(&expected_argv);
+    let cgroup_procs = Path::new("/sys/fs/cgroup")
+        .join(WATCHDOG_CGROUP.trim_start_matches('/'))
+        .join("cgroup.procs");
+    // The watchdog's cgroup and immutable process identity are the authority;
+    // consulting systemctl here would put a CLI fork on every Pod start.
+    let mut candidates = Vec::new();
+    for line in fs::read_to_string(&cgroup_procs)
+        .map_err(|error| format!("read {}: {error}", cgroup_procs.display()))?
+        .lines()
+    {
+        let pid = line
+            .parse::<i32>()
+            .map_err(|error| format!("parse watchdog cgroup pid {line:?}: {error}"))?;
+        let Ok(identity) = process_identity(pid) else {
+            continue;
+        };
+        if identity.cgroup == WATCHDOG_CGROUP
+            && identity.executable == expected_executable
+            && identity.command_sha256 == expected_command
+        {
+            candidates.push(identity);
+        }
+    }
+    if candidates.len() != 1 {
         return Err(format!(
-            "{WATCHDOG_UNIT} argv does not match the installed unit"
+            "{WATCHDOG_UNIT} expected one exact process in {WATCHDOG_CGROUP}, found {}",
+            candidates.len()
         ));
     }
+    let watchdog = candidates.remove(0);
     let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
         .map_err(|error| format!("read boot id for watchdog verification: {error}"))?;
     if watchdog.boot_id != boot_id.trim() || watchdog.start_time_ticks == 0 {
