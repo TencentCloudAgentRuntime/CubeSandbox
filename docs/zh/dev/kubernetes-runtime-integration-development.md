@@ -464,11 +464,11 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 | 顺序 | 实现单元 | 状态 | 目标 | 验收标准/下一步 |
 |---|---|---|---|---|
 | 1 | S5.3a 既有兼容修复回归 | `VALIDATING` | 部署已经完成构建的 SIGKILL、Pod sysctl、cpuset 与 Agent fixture 修复，冻结拆分前功能基线 | SIGKILL、两类 sysctl、CPU Manager/PodResources、restartable sidecar 定向用例通过；失败对象清理后 runtime exact-zero；不跑旧架构全量套件 |
-| 2 | S5.4a SLO 与进程边界设计 | `IN_PROGRESS` | 冻结 `CubeShim → cube-vmm-worker`、`CubeShim → Cubelet` 的调用与所有权，定义一秒口径，并为 restore 所需 FD/device/version 字段预留协议缝 | 设计覆盖启动/停止、Shim/Worker/Cubelet 崩溃、重连、升级和回滚；明确 worker 在分配 Guest 内存前进入 Pod cgroup；SLO、时间戳和测试负载可重复；`K8S-OQ-031/032` 转 `DECIDED` |
+| 2 | S5.4a + S6.1a 启动/快照架构设计 | `IN_PROGRESS` | 联合冻结 `CubeShim → cube-vmm-worker`、`CubeShim → Cubelet` 的调用与所有权、一秒口径，以及 template/Pod snapshot 切点、restore 设备重绑定和 artifact owner；这部分完成前不实现 worker | 设计覆盖 boot/restore/snapshot/停止、Shim/Worker/Cubelet 崩溃、重连、升级和回滚；明确 worker 在分配或恢复 Guest 内存前进入 Pod cgroup；worker IPC 从首版包含版本化 Restore/Snapshot、FD/device replacement 和状态查询；`K8S-OQ-008/031/032` 的架构部分转 `DECIDED` |
 | 3 | S5.4b VMM worker 拆分 | `NOT_STARTED` | 将内嵌 VMM/vCPU/virtiofs/Guest memory 移入每 Pod 一个独立 worker；CubeShim 保留 Sandbox/Task 语义，Cubelet 管理节点资源 lease 与 Host scope | feature flag 下普通 boot 与旧路径结果等价；worker 是 Pod leaf 中唯一重量级进程；Shim kill 后可重连，worker/Cubelet kill 有确定结果；Create/Delete/cancel/containerd restart 和 exact-zero 回归通过 |
 | 4 | S5.4c 非快照启动优化 | `NOT_STARTED` | 删除重复 systemd CLI 门禁，使用单次 D-Bus placement + `/proc`/inode/epoch 轻量验证，同时精简 Guest boot | 正常启动 `systemctl show` 为 0（仅允许诊断 fallback），scope placement 强校验至多一次；缓存镜像 50 次串行和 10 并发无失败；给出普通 boot P50/P95/P99 及距离一秒的剩余预算；生命周期故障矩阵不回退 |
 | 5 | S5.3b Node E2E 支持面收口 | `NOT_STARTED` | 在 worker 普通启动路径上逐项关闭支持范围内的 NodeConformance 缺口，并将环境、产品缺口和明确不支持项分开 | 官方 v1.36.4 用例分片全部执行，无 suite timeout；每个失败有 test 名称、日志、原因、责任层和问题 ID；支持面失败为 0，无法支持项有技术原因和替代方案 |
-| 6 | S6.1～S6.3 快照设计与实现 | `NOT_STARTED` | 先讨论并冻结 runtime template 与用户指定 Pod snapshot 的不同语义，再实现透明模板启动和显式 snapshot 启动 | 见 S6 子阶段；不得用旧 Pod UID、IP、DNS、Secret 或 volume mount 污染新 Pod |
+| 6 | S6.1b～S6.3 快照产品设计与实现 | `NOT_STARTED` | 在 S6.1a 架构约束下与用户冻结 CRD、应用一致性、卷和分发语义，再实现透明模板启动和显式 snapshot 启动 | 见 S6 子阶段；不得用旧 Pod UID、IP、DNS、Secret 或 volume mount 污染新 Pod；若产品决定推翻 S6.1a，先回退 S5.4b 而不是兼容两套隐含格式 |
 | 7 | S5.4d 一秒启动终验 | `NOT_STARTED` | 在最终快照启动路径上关闭一秒 SLO，并验证并发、缓存 miss 和 fallback | 所有镜像预拉取且日志证明无 PullImage；单容器无 probe 的 PodScheduled→Ready P95≤1s，同时 RunPodSandbox 接收→Ready P95≤700ms；50 次串行、10 并发，成功率 100%；P99、普通 boot fallback 和模板 miss 单列，不混入命中样本 |
 | 8 | S5.3c 最终 Node E2E 与报告 | `NOT_STARTED` | 在最终默认快路径上重新执行 Node E2E，并输出可审计的通过率与限制 | 官方 NodeConformance 分片完整执行；支持面失败为 0；显式排除项逐条给出上游测试、Cube 限制与决定；快照启动专项覆盖身份、网络、卷、Secret、重启与清理；最终 exact-zero |
 
@@ -498,11 +498,12 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 - 100 节点验证是否执行取决于资源条件；未执行时明确记录为生产化前置项，不把它算作 PoC 通过证据。
 
 ## 11. S6：Snapshot、Restore 与快照启动
-> Milestone 状态：`NOT_STARTED`。S6.1 可在 S5.4a 冻结进程边界后开始讨论；实现依赖 S5.4b worker 和 S5.3b 正常路径兼容基线。S5.3c/S5.4d 的最终验收反向依赖 S6.2/S6.3。
+> Milestone 状态：`IN_PROGRESS`。S6.1a 与 S5.4a 联合执行并阻塞 worker 实现；S6.1b 在 S5.3b 前可以准备、最迟在 S6.2 前由用户确认。实现依赖 S5.4b worker 和 S5.3b 正常路径兼容基线。S5.3c/S5.4d 的最终验收反向依赖 S6.2/S6.3。
 
 | Work Stage | 状态 | Owner | 已完成 | 验收证据 | 下一步 |
 |---|---|---|---|---|---|
-| S6.1 快照语义与 Artifact 设计 | `NOT_STARTED` | Codex/用户 | — | — | 讨论并冻结 runtime template、同 Pod resume、从应用快照创建新 Pod的语义、制品和 API |
+| S6.1a 快照架构约束 | `IN_PROGRESS` | Codex/用户 | 已确认快照能力会约束 worker 边界，不能等 S5.4b 完成后再讨论 | `K8S-OQ-008/031` | 与 S5.4a 一起冻结切点、进程/资源 owner、worker Restore/Snapshot IPC、TAP/vsock/virtiofs/disk FD 重绑定、manifest compatibility key 和 crash/reconnect 表；完成前不进入 S5.4b |
+| S6.1b 快照产品与 API 语义 | `NOT_STARTED` | Codex/用户 | — | — | 确认显式 PodSnapshot 是否保留进程状态、writable layer/emptyDir/PVC 一致性、CRD/annotation、节点本地/COS 分发、保留和失败状态 |
 | S6.2 Runtime template 快速启动 | `NOT_STARTED` | Codex | — | — | 在 `CreateSandbox` 前的空白 Guest/Agent 切点制作模板，恢复时注入新 Pod 资源并完成一秒门禁 |
 | S6.3 显式 Snapshot 启动新 Pod | `NOT_STARTED` | Codex | — | — | 通过 CRD 管理制品、Pod annotation 引用不可变 digest，恢复多容器文件系统/进程状态和新身份 |
 | S6.4 Pause/Resume | `DEFERRED` | 待指定 | 不属于本轮三个硬目标 | — | 在显式 Snapshot 启动稳定后实现同 Pod 短时暂停恢复和失败收敛 |
@@ -514,7 +515,8 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 
 ### 工作项
 
-- 先冻结两类不可混用的 artifact：`RuntimeTemplate` 切在 Agent ready、`CreateSandbox` 之前；`PodSnapshot` 切在已定义的多容器一致性点。
+- S6.1a 先冻结两类不可混用的低层切点：`RuntimeTemplate` 切在 Agent ready、`CreateSandbox` 之前；`PodSnapshot` 切在已定义的多容器一致性点。worker IPC、设备槽位/FD 重绑定、状态机和 artifact compatibility key 在 S5.4b 前确定。
+- S6.1b 再冻结产品可见语义：CRD/annotation、进程与文件系统一致性、卷、分发、保留和状态条件；这些字段不得反向改变已经冻结的低层 owner/IPC，若确需改变则先修订 S6.1a。
 - 定义 `CubeSandboxSnapshot` CRD/controller；Pod annotation `cubesandbox.io/restore-from` 只引用 controller 已解析的不可变 digest。
 - 生成 VM memory/device state、rootfs/写层引用和兼容性 manifest；明确 OCI image、Guest、Agent、worker、CPU/内存规格的匹配规则。
 - runtime template 恢复时使用新的 worker、Pod UID、sandbox ID、vsock、TAP、Pod IP、hostname、DNS、namespace、rootfs 和 volumes，并重置时间与熵。
@@ -524,7 +526,8 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 
 ### 验收标准
 
-- S6.1 输出经用户确认的状态模型、切点、manifest schema、CRD/annotation 契约、兼容矩阵和失败恢复表；未确认前不实现不可逆格式。
+- S6.1a 输出经用户确认的切点、worker/资源 owner、版本化 IPC、设备恢复模型、最小 manifest compatibility key 和失败恢复表；未完成前不得实现 S5.4b worker。
+- S6.1b 输出经用户确认的应用状态模型、完整 manifest schema、CRD/annotation 契约、卷与分发语义；未完成前不实现不可逆 artifact 格式和 S6.2/S6.3。
 - RuntimeTemplate 恢复的新 Pod 使用新 UID、sandbox ID、Pod IP、hostname、DNS、namespace、rootfs 和 volumes；50 次串行与 10 并发无跨 Pod 残留，并满足 S5.4d 一秒门禁。
 - 多容器 Pod 可制作显式快照并在兼容节点恢复为新 Pod；容器文件系统和进程状态符合 S6.1 定义的一致性级别。
 - Secret 不进入 artifact；ConfigMap/Secret 使用新 Pod 当前投射；PVC snapshot/reference 可验证且失败时不修改原卷。
