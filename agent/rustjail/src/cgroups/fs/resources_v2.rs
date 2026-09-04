@@ -62,7 +62,7 @@ impl Error for TransactionError {}
 struct UndoEntry {
     path: PathBuf,
     old_value: String,
-    compare: CompareKind,
+    compare: UndoCompareKind,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -73,6 +73,19 @@ struct UndoJournal {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 enum CompareKind {
+    Exact,
+    Words,
+    CpuSet,
+    // The memory controller stores byte values in native page counters and
+    // reports the effective, page-aligned value on readback.
+    PageBytes,
+}
+
+// This enum is part of the version 1 durable undo-journal schema. Keep it
+// separate from write-readback comparisons so adding a controller-specific
+// normalization cannot make old agents reject a journal.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum UndoCompareKind {
     Exact,
     Words,
     CpuSet,
@@ -253,7 +266,57 @@ fn values_match(kind: CompareKind, expected: &str, actual: &str) -> Result<bool>
         CompareKind::Exact => Ok(expected.trim() == actual.trim()),
         CompareKind::Words => Ok(expected.split_whitespace().eq(actual.split_whitespace())),
         CompareKind::CpuSet => Ok(parse_cpuset(expected)? == parse_cpuset(actual)?),
+        CompareKind::PageBytes => page_bytes_match(expected, actual),
     }
+}
+
+fn target_values_match(kind: CompareKind, left: &str, right: &str) -> Result<bool> {
+    match kind {
+        CompareKind::PageBytes => Ok(left.trim() == right.trim()),
+        _ => values_match(kind, left, right),
+    }
+}
+
+fn undo_compare(kind: CompareKind) -> UndoCompareKind {
+    match kind {
+        CompareKind::Exact | CompareKind::PageBytes => UndoCompareKind::Exact,
+        CompareKind::Words => UndoCompareKind::Words,
+        CompareKind::CpuSet => UndoCompareKind::CpuSet,
+    }
+}
+
+fn undo_values_match(kind: UndoCompareKind, expected: &str, actual: &str) -> Result<bool> {
+    let kind = match kind {
+        UndoCompareKind::Exact => CompareKind::Exact,
+        UndoCompareKind::Words => CompareKind::Words,
+        UndoCompareKind::CpuSet => CompareKind::CpuSet,
+    };
+    values_match(kind, expected, actual)
+}
+
+fn page_bytes_match(expected: &str, actual: &str) -> Result<bool> {
+    let expected = expected.trim();
+    let actual = actual.trim();
+    if expected == "max" || actual == "max" {
+        return Ok(expected == actual);
+    }
+
+    let expected = expected
+        .parse::<u64>()
+        .with_context(|| format!("invalid expected page-byte value {expected:?}"))?;
+    let actual = actual
+        .parse::<u64>()
+        .with_context(|| format!("invalid actual page-byte value {actual:?}"))?;
+    let page_size = page_size_bytes()?;
+    Ok(actual == expected / page_size * page_size)
+}
+
+fn page_size_bytes() -> Result<u64> {
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        bail!("sysconf(_SC_PAGESIZE) returned {page_size}");
+    }
+    Ok(page_size as u64)
 }
 
 fn add_target(
@@ -263,7 +326,7 @@ fn add_target(
     compare: CompareKind,
 ) -> Result<()> {
     if let Some(existing) = targets.iter().find(|target| target.path == path) {
-        if values_match(compare, &existing.value, &value)? {
+        if target_values_match(compare, &existing.value, &value)? {
             return Ok(());
         }
         bail!(
@@ -498,7 +561,7 @@ fn plan<I: ResourceIo>(
                 &mut memory,
                 root.join("memory.max"),
                 limit_value(limit, "memory.limit")?,
-                CompareKind::Exact,
+                CompareKind::PageBytes,
             )?;
         }
         if let Some(reservation) = value.reservation {
@@ -506,7 +569,7 @@ fn plan<I: ResourceIo>(
                 &mut memory,
                 root.join("memory.low"),
                 limit_value(reservation, "memory.reservation")?,
-                CompareKind::Exact,
+                CompareKind::PageBytes,
             )?;
         }
         if update && value.check_before_update == Some(true) {
@@ -558,7 +621,7 @@ fn plan<I: ResourceIo>(
                 &mut memory,
                 root.join("memory.swap.max"),
                 target,
-                CompareKind::Exact,
+                CompareKind::PageBytes,
             )?;
         }
     }
@@ -592,7 +655,12 @@ fn plan<I: ResourceIo>(
                         .with_context(|| format!("invalid unified {key} value {value:?}"))?
                         .to_string()
                 };
-                add_target(&mut memory, root.join(key), normalized, CompareKind::Exact)?;
+                add_target(
+                    &mut memory,
+                    root.join(key),
+                    normalized,
+                    CompareKind::PageBytes,
+                )?;
             }
             "memory.oom.group" => {
                 if value != "0" && value != "1" {
@@ -629,7 +697,7 @@ fn rollback<I: ResourceIo>(io: &I, entries: &[UndoEntry]) -> Result<()> {
     }
     for entry in entries {
         match io.read(&entry.path) {
-            Ok(value) => match values_match(entry.compare, &entry.old_value, &value) {
+            Ok(value) => match undo_values_match(entry.compare, &entry.old_value, &value) {
                 Ok(true) => {}
                 Ok(false) => errors.push(format!(
                     "rollback readback mismatch for {}: expected {:?}, got {:?}",
@@ -685,7 +753,7 @@ fn apply_with_io<I: ResourceIo>(
         entries.push(UndoEntry {
             path: target.path.clone(),
             old_value,
-            compare: target.compare,
+            compare: undo_compare(target.compare),
         });
     }
     let journal = UndoJournal {
@@ -915,6 +983,7 @@ mod tests {
         writes: RefCell<Vec<PathBuf>>,
         fail_writes: RefCell<BTreeSet<usize>>,
         corrupt_readback: RefCell<Option<PathBuf>>,
+        page_normalized_paths: RefCell<BTreeSet<PathBuf>>,
         journal: RefCell<Option<UndoJournal>>,
     }
 
@@ -952,9 +1021,14 @@ mod tests {
             if self.fail_writes.borrow().contains(&index) {
                 bail!("injected write {index}");
             }
-            self.files
-                .borrow_mut()
-                .insert(path.to_path_buf(), value.to_string());
+            let stored = if self.page_normalized_paths.borrow().contains(path) && value != "max" {
+                let value = value.parse::<u64>().context("normalize fake page-byte value")?;
+                let page_size = page_size_bytes()?;
+                (value / page_size * page_size).to_string()
+            } else {
+                value.to_string()
+            };
+            self.files.borrow_mut().insert(path.to_path_buf(), stored);
             Ok(())
         }
 
@@ -1064,6 +1138,112 @@ mod tests {
         for (shares, weight) in values {
             assert_eq!(cpu_shares_to_weight(shares), weight, "shares={shares}");
         }
+    }
+
+    #[test]
+    fn page_byte_comparison_accepts_only_the_kernel_normalized_value() {
+        let page_size = page_size_bytes().unwrap();
+        let requested = page_size * 19_531 + page_size / 4;
+        let normalized = page_size * 19_531;
+
+        assert!(values_match(
+            CompareKind::PageBytes,
+            &requested.to_string(),
+            &normalized.to_string()
+        )
+        .unwrap());
+        assert!(!values_match(
+            CompareKind::PageBytes,
+            &requested.to_string(),
+            &(normalized - page_size).to_string()
+        )
+        .unwrap());
+        assert!(values_match(CompareKind::PageBytes, "max", "max").unwrap());
+        assert!(!values_match(CompareKind::PageBytes, "max", "0").unwrap());
+        assert!(values_match(CompareKind::PageBytes, "invalid", "0").is_err());
+
+        assert!(!target_values_match(
+            CompareKind::PageBytes,
+            &requested.to_string(),
+            &normalized.to_string()
+        )
+        .unwrap());
+        assert!(!target_values_match(
+            CompareKind::PageBytes,
+            &normalized.to_string(),
+            &requested.to_string()
+        )
+        .unwrap());
+        assert_eq!(undo_compare(CompareKind::PageBytes), UndoCompareKind::Exact);
+
+        let journal = UndoJournal {
+            version: 1,
+            entries: vec![UndoEntry {
+                path: PathBuf::from("/cg/x/memory.max"),
+                old_value: normalized.to_string(),
+                compare: undo_compare(CompareKind::PageBytes),
+            }],
+        };
+        let encoded = serde_json::to_string(&journal).unwrap();
+        assert!(encoded.contains("Exact"));
+        assert!(!encoded.contains("PageBytes"));
+    }
+
+    #[test]
+    fn page_rounded_memory_limit_commits_and_rolls_back_transactionally() {
+        let io = base_io();
+        io.page_normalized_paths
+            .borrow_mut()
+            .insert(PathBuf::from("/cg/x/memory.max"));
+        let page_size = page_size_bytes().unwrap();
+        let requested = page_size * 19_531 + page_size / 4;
+        let normalized = page_size * 19_531;
+        let resources = LinuxResources {
+            memory: Some(LinuxMemory {
+                limit: Some(requested as i64),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        apply_with_io(
+            &io,
+            Path::new("/cg/x"),
+            Path::new("/journal"),
+            &resources,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            io.files.borrow()[Path::new("/cg/x/memory.max")],
+            normalized.to_string()
+        );
+        assert!(io.journal.borrow().is_none());
+
+        io.writes.borrow_mut().clear();
+        io.fail_writes.borrow_mut().insert(2);
+        let rollback = LinuxResources {
+            memory: Some(LinuxMemory {
+                limit: Some((requested + page_size) as i64),
+                ..Default::default()
+            }),
+            pids: Some(LinuxPids { limit: 32 }),
+            ..Default::default()
+        };
+        let error = apply_with_io(
+            &io,
+            Path::new("/cg/x"),
+            Path::new("/journal"),
+            &rollback,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, TransactionFailureKind::RolledBack);
+        assert_eq!(
+            io.files.borrow()[Path::new("/cg/x/memory.max")],
+            normalized.to_string()
+        );
+        assert!(io.journal.borrow().is_none());
     }
 
     #[test]
