@@ -20,7 +20,9 @@ use containerd_shim::protos::types::mount::Mount;
 use oci_spec::runtime::Spec;
 use serde_json::json;
 
-use crate::common::GUEST_VIRTIOFS_MNT_PATH_DEPRECATED;
+use crate::common::{
+    ANNO_ROOTFS_WLAYER_PATH, GUEST_VIRTIOFS_MNT_PATH, GUEST_VIRTIOFS_MNT_PATH_DEPRECATED,
+};
 use crate::container::rootfs::{OverlayInfo, RootfsInfo, ANNOTATION_K_ROOTFS_INFO};
 use crate::sandbox::config::ANNO_VMM_FS;
 use crate::service::runtime_resource::{
@@ -32,6 +34,7 @@ pub const ENABLE_ANNOTATION: &str = "io.containerd.cube.s0.standard-rootfs";
 pub const SHARE_BASE: &str = "/data/cubelet/s0.2-share";
 const VIRTIOFS_SHARED_DIR: &str = "/data/cubelet";
 const GUEST_SANDBOX_RESOLV_CONF: &str = "/etc/resolv.conf";
+const MANAGED_ROOTFS_WRITABLE_DIR: &str = "rootfs-writable";
 static EXPORT_ATTEMPT: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -258,8 +261,61 @@ fn prepare_at(
         &mut prepared.mounts,
     )?;
 
-    inject_annotations(spec, share_root, guest_lowerdirs, inject_virtiofs)?;
+    // The Guest's legacy default upperdir lives under /run, which is tmpfs.
+    // Besides consuming VM memory, tmpfs pages cannot be written back under a
+    // container memory limit. Kubernetes' standard file-cache pressure test
+    // therefore OOMs instead of reclaiming. Managed sandboxes already have a
+    // writable, cacheless virtio-fs export for Pod volumes; allocate a private
+    // generation below that export and use it for a writable OCI rootfs.
+    let writable_layer = managed_volume_root
+        .filter(|_| should_prepare_managed_writable_layer(spec, true))
+        .map(|volume_root| prepare_managed_writable_layer(volume_root, &export_id))
+        .transpose()?;
+
+    inject_annotations(
+        spec,
+        share_root,
+        guest_lowerdirs,
+        inject_virtiofs,
+        writable_layer.as_deref(),
+    )?;
     Ok(prepared)
+}
+
+fn rootfs_is_readonly(spec: &Spec) -> bool {
+    match spec.root().as_ref() {
+        Some(root) => root.readonly().unwrap_or(false),
+        None => true,
+    }
+}
+
+fn should_prepare_managed_writable_layer(spec: &Spec, managed: bool) -> bool {
+    managed
+        && !rootfs_is_readonly(spec)
+        && !spec
+            .annotations()
+            .as_ref()
+            .is_some_and(|annotations| annotations.contains_key(ANNO_ROOTFS_WLAYER_PATH))
+}
+
+fn prepare_managed_writable_layer(
+    managed_volume_root: &Path,
+    export_id: &str,
+) -> Result<PathBuf, String> {
+    let host = managed_volume_root
+        .join(export_id)
+        .join(MANAGED_ROOTFS_WRITABLE_DIR);
+    fs::create_dir_all(&host).map_err(|error| {
+        format!(
+            "create managed writable rootfs {} failed: {error}",
+            host.display()
+        )
+    })?;
+    Ok(Path::new(GUEST_VIRTIOFS_MNT_PATH)
+        .join(MANAGED_VOLUME_VIRTIOFS_ID)
+        .join(MANAGED_VOLUME_EXPORT_DIR)
+        .join(export_id)
+        .join(MANAGED_ROOTFS_WRITABLE_DIR))
 }
 
 /// Export host bind mounts through the sandbox's existing virtio-fs share and
@@ -419,6 +475,7 @@ fn inject_annotations(
     share_root: &Path,
     guest_lowerdirs: Vec<String>,
     inject_virtiofs: bool,
+    writable_layer: Option<&Path>,
 ) -> Result<(), String> {
     let mut annotations: HashMap<String, String> =
         spec.annotations().as_ref().cloned().unwrap_or_default();
@@ -459,6 +516,12 @@ fn inject_annotations(
         serde_json::to_string(&rootfs_info)
             .map_err(|e| format!("serialize S0 rootfs annotation failed: {e}"))?,
     );
+    if let Some(path) = writable_layer {
+        annotations.insert(
+            ANNO_ROOTFS_WLAYER_PATH.to_string(),
+            path.to_string_lossy().into_owned(),
+        );
+    }
     spec.set_annotations(Some(annotations));
     Ok(())
 }
@@ -731,6 +794,7 @@ mod tests {
                 "sandbox-a/rootfs/task-a/layers/001".to_string(),
             ],
             true,
+            None,
         )
         .unwrap();
         let annotations = spec.annotations().as_ref().unwrap();
@@ -833,6 +897,86 @@ mod tests {
     }
 
     #[test]
+    fn managed_writable_layer_uses_the_existing_volume_export() {
+        let root = std::env::temp_dir().join(format!(
+            "cubesandbox-managed-writable-rootfs-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let volume_root = root.join(MANAGED_VOLUME_EXPORT_DIR);
+        fs::create_dir_all(&volume_root).unwrap();
+
+        let guest = prepare_managed_writable_layer(&volume_root, "task-a-42-7").unwrap();
+
+        assert_eq!(
+            guest,
+            PathBuf::from("/run/virtiofs/cubeVolumes/volumes/task-a-42-7/rootfs-writable")
+        );
+        assert!(volume_root
+            .join("task-a-42-7")
+            .join(MANAGED_ROOTFS_WRITABLE_DIR)
+            .is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn writable_layer_annotation_is_injected_only_when_selected() {
+        let writable = Path::new("/run/virtiofs/cubeVolumes/volumes/task-a-42-7/rootfs-writable");
+        let mut spec = Spec::default();
+        inject_annotations(
+            &mut spec,
+            Path::new("/data/cubelet/s11/shared/sb-generation"),
+            vec!["sb-generation/rootfs/task-a-42/layers/000".to_string()],
+            false,
+            Some(writable),
+        )
+        .unwrap();
+        assert_eq!(
+            spec.annotations().as_ref().unwrap()[ANNO_ROOTFS_WLAYER_PATH],
+            writable.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn managed_writable_layer_selection_preserves_fail_closed_and_explicit_semantics() {
+        let spec = |root: Option<bool>, explicit_writable_layer: bool| {
+            let root = match root {
+                Some(readonly) => json!({"path": "rootfs", "readonly": readonly}),
+                None => serde_json::Value::Null,
+            };
+            let annotations = explicit_writable_layer
+                .then(|| json!({ANNO_ROOTFS_WLAYER_PATH: "/run/virtiofs/explicit-writable-layer"}));
+            serde_json::from_value::<Spec>(json!({
+                "root": root,
+                "annotations": annotations,
+            }))
+            .unwrap()
+        };
+
+        for (name, spec, managed, expected) in [
+            ("managed writable", spec(Some(false), false), true, true),
+            ("managed readonly", spec(Some(true), false), true, false),
+            ("explicit wlayer", spec(Some(false), true), true, false),
+            ("legacy unmanaged", spec(Some(false), false), false, false),
+            ("missing root", spec(None, false), true, false),
+        ] {
+            assert_eq!(
+                should_prepare_managed_writable_layer(&spec, managed),
+                expected,
+                "{name}"
+            );
+        }
+
+        let root_without_readonly: Spec = serde_json::from_value(json!({
+            "root": {"path": "rootfs"}
+        }))
+        .unwrap();
+        assert!(should_prepare_managed_writable_layer(
+            &root_without_readonly,
+            true
+        ));
+    }
+
+    #[test]
     fn managed_bind_mount_skips_guest_shared_shm() {
         let mut mount = oci_spec::runtime::Mount::default();
         mount.set_typ(Some("bind".to_string()));
@@ -865,6 +1009,7 @@ mod tests {
             Path::new("/data/cubelet/s11/shared/sb-generation"),
             vec!["sb-generation/rootfs/task-a-42/layers/000".to_string()],
             false,
+            None,
         )
         .unwrap();
 
