@@ -108,6 +108,23 @@ fn real_worker_exec_contract() {
     );
     client.shutdown().unwrap();
 
+    // Linux binds PR_SET_PDEATHSIG to the thread that forked the child. A
+    // healthy multithreaded CubeShim may retire that Tokio worker thread after
+    // block_in_place without exiting the process. The authenticated Hello must
+    // therefore switch liveness fencing to the control socket before this
+    // temporary spawning thread exits.
+    let client = std::thread::spawn(|| {
+        WorkerProcessProbe::spawn("worker-spawning-thread-exit".to_string()).unwrap()
+    })
+    .join()
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !process_is_dead(client.process_id()),
+        "worker died when only its spawning thread exited"
+    );
+    client.shutdown().unwrap();
+
     let client = WorkerProcessProbe::spawn("worker-process-early-exit".to_string()).unwrap();
     kill(Pid::from_raw(client.process_id() as i32), Signal::SIGKILL).unwrap();
     assert!(matches!(

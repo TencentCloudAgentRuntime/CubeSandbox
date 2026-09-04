@@ -745,6 +745,14 @@ fn run_worker(
         );
         if result.is_ok() && !hello_complete {
             hello_complete = true;
+            // PR_SET_PDEATHSIG tracks the specific thread that called fork,
+            // not the parent thread group. CubeShim launches workers from a
+            // Tokio worker; block_in_place may later retire that otherwise
+            // healthy runtime thread and would spuriously SIGKILL the VMM.
+            // Once the authenticated Hello proves the control peer, the
+            // seqpacket EOF is the process-lifetime fence and the durable
+            // lifecycle scanner remains the exact stuck-worker fallback.
+            clear_parent_death_signal()?;
             // The worker is a long-lived server and an idle control channel is
             // healthy.  Keep writes bounded in case the still-live parent
             // stops reading, but never treat the absence of a new request as
@@ -774,6 +782,16 @@ fn run_worker(
         }
     }
     drop(vmm);
+    Ok(())
+}
+
+fn clear_parent_death_signal() -> CResult<()> {
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, 0) } < 0 {
+        return Err(format!(
+            "clear cube-vmm-worker parent-death signal: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
     Ok(())
 }
 
