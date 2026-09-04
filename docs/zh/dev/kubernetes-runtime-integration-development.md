@@ -21,6 +21,7 @@
 
 - **CubeShim** 是 containerd 适配层：承接 Sandbox/Task API，转换 OCI spec、rootfs、volume、stdio 和事件；不实现 Kubernetes controller。
 - **Cubelet** 是节点资源层：准备/释放 KVM、Guest assets 和网络 attachment，并负责残留资源对账；不实现另一套 CRI。
+- **cube-vmm-worker** 是 CubeShim 拉起的每 Pod VMM 数据面进程：只承载 VMM、vCPU、Guest memory、virtiofs 和设备，不理解 Kubernetes/containerd，也不直接调用 Cubelet。
 - **Guest Agent** 是 VM 内容器执行层：管理 namespace、mount、cgroup 和进程；不理解 Pod、Deployment、RuntimeClass 等 Kubernetes API。
 - **containerd/kubelet** 保持标准职责：镜像、snapshotter、CNI 和 Pod 状态机不复制到 CubeSandbox。
 - **CubeMaster legacy 链路**继续可用，Kubernetes 功能通过独立入口和 feature gate 增量加入。
@@ -31,6 +32,7 @@
 
 - 优先使用 containerd Sandbox API、Task API、OCI Runtime Spec 和 CNI 结果，不 fork 上游协议。
 - CubeShim ↔ Cubelet、CubeShim ↔ Agent 的新增 RPC 必须版本化，并提供 `GetCapabilities`/feature negotiation。
+- cube-vmm-worker 只接受 CubeShim 的版本化本地 IPC；CubeShim 从 Cubelet 获取节点资源，再通过继承 FD 或 `SCM_RIGHTS` 交付 worker，不建立 worker ↔ Cubelet 控制连接。
 - 新 protobuf 字段保持 optional/backward-compatible；先让接收方识别，再让调用方启用。
 - 不支持的字段明确报错，不静默丢弃安全或生命周期语义。
 - 实验能力默认关闭，通过配置或 RuntimeClass handler 打开；失败时可以退回 runc 或 legacy Cube 链路。
@@ -53,6 +55,9 @@
 
 ```text
 CubeShim/shim/src/
+├── bin/
+│   └── cube-vmm-worker.rs     # 每 Pod VMM worker 入口，不包含 CRI/RuntimeResource client
+├── worker/                    # Shim↔worker 版本化 IPC、启动 gate、重连与进程身份
 ├── service/
 │   ├── srv.rs                 # Shim 进程入口
 │   ├── sandbox_srv.rs         # 新增：containerd Sandbox Service adapter
@@ -464,8 +469,8 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 | 顺序 | 实现单元 | 状态 | 目标 | 验收标准/下一步 |
 |---|---|---|---|---|
 | 1 | S5.3a 既有兼容修复回归 | `VALIDATING` | 部署已经完成构建的 SIGKILL、Pod sysctl、cpuset 与 Agent fixture 修复，冻结拆分前功能基线 | SIGKILL、两类 sysctl、CPU Manager/PodResources、restartable sidecar 定向用例通过；失败对象清理后 runtime exact-zero；不跑旧架构全量套件 |
-| 2 | S5.4a SLO 与进程边界设计 | `IN_PROGRESS` | 冻结 `CubeShim → cube-vmm-worker`、`CubeShim → Cubelet` 的调用与所有权并定义启动 SLO；只保留版本化 IPC/FD 传递扩展缝，不提前冻结 template、snapshot 或 pause/resume 语义 | 设计覆盖普通 boot/停止、Shim/Worker/Cubelet 崩溃、重连、升级和 feature-flag 回滚；明确 worker 在分配 Guest 内存前进入 Pod cgroup；SLO、时间戳和测试负载可重复；`K8S-OQ-031/032` 转 `DECIDED`，`K8S-OQ-008` 保持延期 |
-| 3 | S5.4b VMM worker 拆分 | `NOT_STARTED` | 将内嵌 VMM/vCPU/virtiofs/Guest memory 移入每 Pod 一个独立 worker；CubeShim 保留 Sandbox/Task 语义，Cubelet 管理节点资源 lease 与 Host scope | feature flag 下普通 boot 与旧路径结果等价；worker 是 Pod leaf 中唯一重量级进程；Shim kill 后可重连，worker/Cubelet kill 有确定结果；Create/Delete/cancel/containerd restart 和 exact-zero 回归通过 |
+| 2 | S5.4a SLO 与进程边界设计 | `IN_PROGRESS` | 已冻结 CubeShim 是唯一编排者和 sandbox leaf/scope owner、worker 不直接调用 Cubelet；继续定义普通启动 IPC、进程恢复和启动 SLO，只保留版本化 IPC/FD 传递扩展缝，不提前冻结 template、snapshot 或 pause/resume 语义 | `K8S-OQ-031=DECIDED`；继续覆盖普通 boot/停止、Shim/Worker/Cubelet 崩溃、重连、升级和 feature-flag 回滚，冻结 SLO、时间戳和测试负载并关闭 `K8S-OQ-032`；`K8S-OQ-008` 保持延期 |
+| 3 | S5.4b VMM worker 拆分 | `NOT_STARTED` | 将内嵌 VMM/vCPU/virtiofs/Guest memory 移入每 Pod 一个独立 worker；CubeShim 保留 Sandbox/Task 语义并管理 sandbox leaf/scope，Cubelet 只管理 RuntimeResource lease，worker 只接受 CubeShim 控制 | feature flag 下普通 boot 与旧路径结果等价；worker 是 Pod leaf 中唯一重量级进程且在分配 Guest memory/vCPU 前完成 placement；Shim kill 后可重连，worker/Cubelet kill 有确定结果；Create/Delete/cancel/containerd restart 和 exact-zero 回归通过 |
 | 4 | S5.4c 非快照启动优化与 E2E 入口门禁 | `NOT_STARTED` | 删除重复 systemd CLI 门禁，使用单次 D-Bus placement + `/proc`/inode/epoch 轻量验证，同时精简 Guest boot；确保 E2E 验证的是新 worker 快路径而非已知 6.5 秒旧路径 | 正常启动 `systemctl show` 为 0（仅允许诊断 fallback），scope placement 强校验至多一次；缓存镜像 50 次串行和 10 并发无失败；报告普通 boot P50/P95/P99 和一秒 SLO差距；生命周期故障矩阵不回退；满足 S5.4a 冻结的 E2E 入口性能门禁 |
 | 5 | S5.3b Node E2E 支持面收口 | `NOT_STARTED` | 在 worker 普通启动路径上逐项关闭支持范围内的 NodeConformance 缺口，并将环境、产品缺口和明确不支持项分开 | 官方 v1.36.4 用例分片全部执行，无 suite timeout；每个失败有 test 名称、日志、原因、责任层和问题 ID；支持面失败为 0，无法支持项有技术原因和替代方案 |
 | 6 | S5.3c 最终 Node E2E 与报告 | `NOT_STARTED` | 在优化后的 worker 普通启动路径上完成当前 Kubernetes 验收，不等待 template/snapshot/pause-resume | 官方 NodeConformance 分片完整执行；支持面失败为 0；显式排除项逐条给出上游测试、Cube 限制与决定；环境恢复、runtime exact-zero 和 reviewer 审计完成 |
@@ -473,6 +478,20 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 | 8 | S5.4d 最终一秒门禁与回归 | `NOT_STARTED` | 若普通 boot 尚未达到一秒目标，使用 RuntimeTemplate 快路径关闭最终 SLO；新默认路径必须补做 Node E2E 回归 | 所有镜像预拉取且日志证明无 PullImage；单容器无 probe 的 PodScheduled→Ready P95≤1s，同时 RunPodSandbox 接收→Ready P95≤700ms；50 次串行、10 并发，成功率 100%；P99、普通 boot fallback 和模板 miss 单列；若模板成为默认路径，NodeConformance 支持面回归仍为 0 失败 |
 
 一秒门禁默认使用 P95 而不是单次最好值，且“不包含镜像拉取”必须由节点预拉取和运行日志共同证明。S5.4c 先给普通 boot 建立性能门禁，避免在已知慢路径上消耗完整 E2E 时间；S5.3c 随后完成 worker 普通路径的 Kubernetes 验收。若普通 boot 未达到最终一秒目标，S6.2 再用 runtime template restore 关闭差距，不把模板 miss 或 fallback 隐藏在命中样本中；若模板成为默认启动路径，必须补跑受影响的 Node E2E，而不是沿用普通路径结果。
+
+### S5.4a 已确认的 worker 通信与所有权边界
+
+| 对象/接口 | 唯一 owner | 约束 |
+|---|---|---|
+| Kubernetes Pod parent cgroup | kubelet | Cube 只读，不创建、不写、不删除 |
+| sandbox leaf/scope | CubeShim | 从标准 CRI `cgroup_parent` 和 sandbox ID 推导；CubeShim 以一次 systemd D-Bus placement 创建并回收 |
+| RuntimeResource lease、Guest assets、TAP/network attachment、shared root | Cubelet | 只通过既有 `RuntimeResource` 与 FD handoff 服务暴露给 CubeShim |
+| VMM、vCPU、Guest memory、virtiofs、设备生命周期 | cube-vmm-worker | 每 Pod 一个进程，只接受 CubeShim IPC；不链接 Cubelet client，不持有 RuntimeResource 凭据 |
+| Sandbox/Task 状态、Guest Agent 操作、持久 lifecycle record | CubeShim | containerd 的唯一 Cube 适配和编排入口；Cubelet 与 worker 都不复制该状态机 |
+
+普通启动按以下顺序线性化：CubeShim 先调用 Cubelet `PrepareSandbox` 并取得 lease/assets/TAP FD，持久化 VM INTENT，再以启动 gate 拉起 worker；CubeShim 将 worker PID 原子放入 sandbox leaf 并通过 PID start-time、`/proc/<pid>/cgroup` 和 cgroup inode 回读身份，确认完成前 worker 不得创建 VMM thread、vCPU 或 Guest memory；随后 CubeShim 通过继承 FD 或 Unix socket `SCM_RIGHTS` 交付 TAP/设备 FD 和启动配置，解除 gate，等待 worker `Ready`，最后继续由 CubeShim 直接操作 Guest Agent。
+
+worker 正常退出由 CubeShim 等待并完成 Cubelet `ReleaseSandbox`；worker 异常退出使 Sandbox 明确失败并进入幂等清理。CubeShim 异常退出时，仅当 durable lifecycle 已提交且 worker PID/start-time/executable/socket/epoch 全部匹配，替代 Shim 才能重连；否则 watchdog/reaper 终止精确 worker 后释放 RuntimeResource。Cubelet 重启不影响已运行 worker，CubeShim 使用 lease/generation 做 `Inspect`/重试。以后增加 Restore/Snapshot/Pause/Resume 时扩展 CubeShim↔worker 协议，仍不新增 worker↔Cubelet 控制面。
 
 
 ### 目标
