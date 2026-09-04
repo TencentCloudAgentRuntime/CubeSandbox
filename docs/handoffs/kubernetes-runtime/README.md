@@ -4,13 +4,15 @@
 
 S5.3 `IN_PROGRESS`：S3.4/S3.4d 已获同一 reviewer `APPROVE S3.4 DONE`，P0/P1/P2=0。
 正确 RuntimeClass/overhead 模式已通过官方 `/configz` 与 `PrivilegedPod` 定向门禁；
-Guest dummy netdev 缺口已由 `f9120d79` 关闭。W1 正在执行修复后的 477 项完整运行，TAT
-invocation 为 `inv-a86wisgb60`，尚未形成最终通过率。
+Guest dummy netdev 缺口已由 `f9120d79` 关闭。首轮 477 项 full-4 已在 6 小时 suite
+timeout 结束：实际执行 398 项，357 通过、41 失败、79 未执行；这是旧制品基线，不是最终
+验收轮。
 
 ## 基线
 
-最后一项已验证实现 commit 为 `f9120d79`；S3.4c 最终证据 commit 为 `24d2d188`。W1
-当前 CubeShim/Agent ext4 SHA-256 为 `e0052c7e…`/`c768706b…`；`cube-runtime`
+最后一项已完成云端构建验证的实现 commit 为 `8dc39f77`；S3.4c 最终证据 commit 为
+`24d2d188`。W1 尚未部署本轮候选，当前 CubeShim/Agent ext4 SHA-256 为
+`e0052c7e…`/`c768706b…`；`cube-runtime`
 保持既有制品；运行时根为
 `/opt/cubesandbox-s0-multinode-runtime-2269a3b3`。W1 PVM Guest kernel SHA-256 为
 `633bb982…`，旧 `f9ecd86a…` 已保留为可回滚副本。
@@ -24,9 +26,10 @@ ephemeral-storage、QoS/多容器双层数值和最终清理；
 
 ## 未完成
 
-S5.3 的 477 项完整 NodeConformance 正在运行，尚未形成最终通过率、失败清单、清理证据
-和 reviewer 结论。memory EmptyDir 在 Guest 中呈现 FUSE mount identity 的兼容性缺口已
-确认，按 `K8S-OQ-025` 记录；不影响内容、权限和清理，但会失败于标准 `tmpfs` 类型断言。
+S5.3 尚未形成最终支持面通过率、环境清理证据和 reviewer 结论。full-4 中有 10 项为
+memory EmptyDir 在 Guest 中呈现 FUSE mount identity 的已知兼容性缺口，按
+`K8S-OQ-025` 记录；不影响内容、权限和清理，但会失败于标准 `tmpfs` 类型断言。其余失败
+仍需完成定向回归与逐项归因；79 项因 suite timeout 未执行。
 
 ## 验证
 
@@ -54,9 +57,17 @@ identity 差异、旧 kubelet 配置路径问题及 `PrivilegedPod` dummy netdev
 构建产物 SHA-256 为 `633bb982…`，`inv-v86wfwg2wn` 保留旧 kernel 后部署；官方
 `PrivilegedPod` `inv-v86wga0nm0` 为 1/1 通过，`inv-986wi0gicj` 最终 exact-zero。
 
+full-4 `inv-a86wisgb60` 运行满 21600 秒，最终 `Ran 398 of 1197 Specs`，结果为
+357 Passed、41 Failed、799 Skipped，并生成 ginkgo.json SHA-256 `f641f3bb…` 与 junit.xml
+SHA-256 `c0c48906…`。其中 SIGKILL、Pod sysctl 与多项 sidecar 退出码由 `6d9c021a` 修复；
+CPU Manager 暴露 host cpuset `2` 超出双 vCPU Guest `0-1`，`8dc39f77` 增加 Pod 级稳定
+host→Guest CPU/NUMA 映射。云构建 `inv-6876060ap8` 已通过 cpuset 4/4、service 164/164、
+all-targets 和 release build，Shim SHA-256 为 `550d5f35…`；尚未部署到 W1。
+
 ## 阻塞
 
-无外部阻塞或待用户决策。`K8S-OQ-028` 已关闭；当前完整 NodeConformance 为时间型依赖。
+无外部阻塞或待用户决策。`K8S-OQ-028` 已关闭。首轮完整 NodeConformance 已因 6 小时
+suite timeout 结束；后续通过先跑已修复项与 runner 门禁、再跑支持面回归来避免重复耗时。
 P1 已知限制为持续长 exec + 同容器 resize 仍可能使首次
 Update/探针超时；kubelet 重试后 resize 收敛，资源可精确清理。该组合不属于首版支持面，
 在 `K8S-OQ-022` 转 S5.4 整改。另有 12 Sandbox 创建即取消的瞬时 `FailedKillPod`，重试
@@ -78,9 +89,11 @@ policy/binding 正在启用；临时 auth carrier 和两项 ClusterRoleBinding �
 
 ## 下一步
 
-1. 监控 `inv-a86wisgb60` 的 477 项完整 NodeConformance，保留 JUnit/Ginkgo JSON/日志
-   摘要并逐项分类；只修复阻断主路径的问题，非严重差异按问题 ID 延期。
-2. 对支持面内失败执行定向回归，并形成最终支持面通过率。
+1. 等 W1 exact-zero 后部署 `8dc39f77` Shim 与 `a2626846` Agent，定向回归
+   SIGKILL、两类 sysctl、CPU Manager/PodResources 和 restartable sidecar 生命周期。
+2. 为 FQDN、PodResources/Summary/metrics 和 kubelet CA reload 修正 runner 参数；逐项分类
+   hostNetwork、tmpfs、MirrorPod、device-plugin、recursive-ro 与 node-pod 网络失败，形成最终
+   支持面通过率。只修复阻断主路径的问题，非严重差异按问题 ID 延期。
 3. 清理 e2e namespace 后确认 W1 exact-zero；依次删除 mutation policy/binding、恢复
    `kubelet.service`、删除 e2e containerd 片段、删除 auth carrier/SA/RBAC；随后启动
    control/W2 kubelet，等待 3/3 Ready，并再次做双 Worker exact-zero。
