@@ -182,9 +182,22 @@ message ThrottlingData {
 	uint64 throttled_time = 3;
 }
 
+message PSIData {
+	double avg10 = 1;
+	double avg60 = 2;
+	double avg300 = 3;
+	uint64 total = 4;
+}
+
+message PSIStats {
+	PSIData some = 1;
+	PSIData full = 2;
+}
+
 message CpuStats {
 	CpuUsage cpu_usage = 1;
 	ThrottlingData throttling_data = 2;
+	PSIStats psi = 3;
 }
 
 message PidsStats {
@@ -206,6 +219,7 @@ message MemoryStats {
 	MemoryData kernel_usage = 4;
 	bool use_hierarchy = 5;
 	map<string, uint64> stats = 6;
+	PSIStats psi = 7;
 }
 
 
@@ -225,6 +239,7 @@ message BlkioStats {
 	repeated BlkioStatsEntry io_merged_recursive = 6;
 	repeated BlkioStatsEntry io_time_recursive = 7;
 	repeated BlkioStatsEntry sectors_recursive = 8;
+	PSIStats psi = 9;
 }
 
 message HugetlbStats {

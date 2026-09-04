@@ -30,7 +30,7 @@ use slog::info;
 use protobuf::MessageField;
 use protocols::agent::{
     BlkioStats, BlkioStatsEntry, CgroupStats, CpuStats, CpuUsage, HugetlbStats, MemoryData,
-    MemoryStats, PidsStats, ThrottlingData,
+    MemoryStats, PSIData, PSIStats, PidsStats, ThrottlingData,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -162,6 +162,12 @@ impl CgroupManager for Manager {
     }
 
     fn get_stats(&self) -> Result<CgroupStats> {
+        let pressure_root = self
+            .cgroup
+            .v2()
+            .then(|| cgroup_filesystem_path(&self.cpath))
+            .transpose()?;
+
         // CpuStats
         let cpu_usage = get_cpuacct_stats_strict(&self.cgroup)?;
 
@@ -170,27 +176,44 @@ impl CgroupManager for Manager {
         let cpu_stats = MessageField::some(CpuStats {
             cpu_usage,
             throttling_data,
+            psi: pressure_root
+                .as_ref()
+                .map(|root| read_pressure_stats(&root.join("cpu.pressure")))
+                .transpose()?
+                .map(MessageField::some)
+                .unwrap_or_default(),
             ..Default::default()
         });
 
         // Memorystats
-        let memory_stats = get_memory_stats_strict(&self.cgroup)?;
+        let mut memory_stats = get_memory_stats_strict(&self.cgroup)?
+            .into_option()
+            .ok_or_else(|| anyhow!("memory stats are unavailable"))?;
+        if let Some(root) = pressure_root.as_ref() {
+            memory_stats.psi =
+                MessageField::some(read_pressure_stats(&root.join("memory.pressure"))?);
+        }
 
         // PidsStats
-        let pids_stats = get_pids_stats(&self.cgroup);
+        let pids_stats = get_pids_stats_strict(&self.cgroup)?;
 
         // BlkioStats
         // note that virtiofs has no blkio stats
-        let blkio_stats = get_blkio_stats(&self.cgroup);
+        let mut blkio_stats = get_blkio_stats(&self.cgroup)
+            .into_option()
+            .unwrap_or_default();
+        if let Some(root) = pressure_root.as_ref() {
+            blkio_stats.psi = MessageField::some(read_pressure_stats(&root.join("io.pressure"))?);
+        }
 
         // HugetlbStats
         let hugetlb_stats = get_hugetlb_stats(&self.cgroup);
 
         Ok(CgroupStats {
             cpu_stats,
-            memory_stats,
+            memory_stats: MessageField::some(memory_stats),
             pids_stats,
-            blkio_stats,
+            blkio_stats: MessageField::some(blkio_stats),
             hugetlb_stats,
             ..Default::default()
         })
@@ -950,6 +973,37 @@ fn parse_v2_limit(value: &str, key: &str) -> Result<u64> {
         .with_context(|| format!("invalid cgroup value for {}: {}", key, value.trim()))
 }
 
+fn parse_v2_memory_data(
+    current: &str,
+    limit: &str,
+    peak: &str,
+    prefix: &str,
+) -> Result<MemoryData> {
+    let parse_counter = |value: &str, key: &str| {
+        value
+            .trim()
+            .parse::<u64>()
+            .with_context(|| format!("invalid cgroup value for {key}: {}", value.trim()))
+    };
+    Ok(MemoryData {
+        usage: parse_counter(current, &format!("{prefix}.current"))?,
+        limit: parse_v2_limit(limit, &format!("{prefix}.max"))?,
+        max_usage: parse_counter(peak, &format!("{prefix}.peak"))?,
+        ..Default::default()
+    })
+}
+
+fn parse_v2_pids_stats(current: &str, limit: &str) -> Result<PidsStats> {
+    Ok(PidsStats {
+        current: current
+            .trim()
+            .parse::<u64>()
+            .context("invalid cgroup value for pids.current")?,
+        limit: parse_v2_limit(limit, "pids.max")?,
+        ..Default::default()
+    })
+}
+
 fn parse_v2_memory_stats(
     current: &str,
     limit: &str,
@@ -972,6 +1026,69 @@ fn parse_v2_memory_stats(
 
 fn read_required(path: &Path) -> Result<String> {
     fs::read_to_string(path).with_context(|| format!("read cgroup stat {}", path.display()))
+}
+
+fn parse_pressure_data<'a>(line: &'a str, source: &str) -> Result<(&'a str, PSIData)> {
+    let mut fields = line.split_whitespace();
+    let kind = fields
+        .next()
+        .ok_or_else(|| anyhow!("missing PSI pressure kind in {source}"))?;
+    let mut values = HashMap::new();
+    for field in fields {
+        let (key, value) = field
+            .split_once('=')
+            .ok_or_else(|| anyhow!("invalid PSI field {field:?} in {source}"))?;
+        values.insert(key, value);
+    }
+    let average = |key: &str| -> Result<f64> {
+        let value = values
+            .get(key)
+            .ok_or_else(|| anyhow!("missing PSI field {key} in {source}"))?
+            .parse::<f64>()
+            .with_context(|| format!("invalid PSI field {key} in {source}"))?;
+        if !value.is_finite() || value < 0.0 {
+            return Err(anyhow!("invalid PSI field {key} in {source}: {value}"));
+        }
+        Ok(value)
+    };
+    let total = values
+        .get("total")
+        .ok_or_else(|| anyhow!("missing PSI field total in {source}"))?
+        .parse::<u64>()
+        .with_context(|| format!("invalid PSI field total in {source}"))?;
+    Ok((
+        kind,
+        PSIData {
+            avg10: average("avg10")?,
+            avg60: average("avg60")?,
+            avg300: average("avg300")?,
+            total,
+            ..Default::default()
+        },
+    ))
+}
+
+fn parse_pressure_stats(value: &str, source: &str) -> Result<PSIStats> {
+    let mut some = None;
+    let mut full = None;
+    for line in value.lines().filter(|line| !line.trim().is_empty()) {
+        let (kind, data) = parse_pressure_data(line, source)?;
+        match kind {
+            "some" if some.is_none() => some = Some(data),
+            "full" if full.is_none() => full = Some(data),
+            "some" | "full" => return Err(anyhow!("duplicate PSI {kind} line in {source}")),
+            _ => return Err(anyhow!("unknown PSI pressure kind {kind:?} in {source}")),
+        }
+    }
+    Ok(PSIStats {
+        some: MessageField::some(some.ok_or_else(|| anyhow!("missing PSI some line in {source}"))?),
+        full: MessageField::some(full.ok_or_else(|| anyhow!("missing PSI full line in {source}"))?),
+        ..Default::default()
+    })
+}
+
+fn read_pressure_stats(path: &Path) -> Result<PSIStats> {
+    parse_pressure_stats(&read_required(path)?, &path.display().to_string())
 }
 
 fn get_cpuacct_stats_strict(cg: &cgroups::Cgroup) -> Result<MessageField<CpuUsage>> {
@@ -1078,6 +1195,12 @@ fn get_memory_stats_strict(cg: &cgroups::Cgroup) -> Result<MessageField<MemorySt
         limit: stats.limit,
         ..Default::default()
     });
+    value.swap_usage = MessageField::some(parse_v2_memory_data(
+        &read_required(&path.join("memory.swap.current"))?,
+        &read_required(&path.join("memory.swap.max"))?,
+        &read_required(&path.join("memory.swap.peak"))?,
+        "memory.swap",
+    )?);
     Ok(MessageField::some(value))
 }
 
@@ -1134,25 +1257,31 @@ fn get_memory_stats(cg: &cgroups::Cgroup) -> MessageField<MemoryStats> {
     })
 }
 
-fn get_pids_stats(cg: &cgroups::Cgroup) -> MessageField<PidsStats> {
-    let pid_controller: &PidController = get_controller_or_return_singular_none!(cg);
+fn get_pids_stats_strict(cg: &cgroups::Cgroup) -> Result<MessageField<PidsStats>> {
+    let pid_controller: &PidController = cg
+        .controller_of()
+        .ok_or_else(|| anyhow!("PIDs controller is unavailable"))?;
+    if cg.v2() {
+        let path = pid_controller.path();
+        return Ok(MessageField::some(parse_v2_pids_stats(
+            &read_required(&path.join("pids.current"))?,
+            &read_required(&path.join("pids.max"))?,
+        )?));
+    }
 
-    let current = pid_controller.get_pid_current().unwrap_or(0);
-    let max = pid_controller.get_pid_max();
-
-    let limit = match max {
-        Err(_) => 0,
-        Ok(max) => match max {
-            MaxValue::Value(v) => v,
-            MaxValue::Max => 0,
-        },
-    } as u64;
-
-    MessageField::some(PidsStats {
+    let current = pid_controller
+        .get_pid_current()
+        .context("read pids.current")?;
+    let limit = match pid_controller.get_pid_max().context("read pids.max")? {
+        MaxValue::Value(value) => u64::try_from(value)
+            .map_err(|_| anyhow!("negative cgroup v1 pids.max value {value}"))?,
+        MaxValue::Max => u64::MAX,
+    };
+    Ok(MessageField::some(PidsStats {
         current,
         limit,
         ..Default::default()
-    })
+    }))
 }
 
 /*
@@ -1927,6 +2056,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_pressure_stats_preserves_kernel_units() {
+        let got = parse_pressure_stats(
+            "some avg10=0.25 avg60=1.50 avg300=2.75 total=1234\nfull avg10=0.10 avg60=0.20 avg300=0.30 total=567\n",
+            "cpu.pressure",
+        )
+        .unwrap();
+        assert_eq!(got.some().avg10, 0.25);
+        assert_eq!(got.some().avg60, 1.5);
+        assert_eq!(got.some().avg300, 2.75);
+        assert_eq!(got.some().total, 1234);
+        assert_eq!(got.full().avg10, 0.1);
+        assert_eq!(got.full().total, 567);
+    }
+
+    #[test]
+    fn parse_pressure_stats_rejects_incomplete_input() {
+        let error = parse_pressure_stats(
+            "some avg10=0.25 avg60=1.50 avg300=2.75 total=1234\n",
+            "memory.pressure",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("missing PSI full"));
+    }
+
+    #[test]
     fn parse_v1_cpuacct_stats_preserves_nanosecond_and_tick_semantics() {
         let got =
             parse_v1_cpuacct_stats("12000\n", "user 7\nsystem 5\n", "4000 8000\n", 100).unwrap();
@@ -1998,6 +2152,30 @@ mod tests {
     fn parse_v2_memory_stats_reads_numeric_limit() {
         let got = parse_v2_memory_stats("4096\n", "16384\n", "8192\n", "max 4\n").unwrap();
         assert_eq!(got.limit, 16_384);
+    }
+
+    #[test]
+    fn parse_v2_swap_stats_preserves_unlimited_and_finite_limits() {
+        let unlimited = parse_v2_memory_data("1024\n", "max\n", "2048\n", "memory.swap").unwrap();
+        assert_eq!(unlimited.usage, 1024);
+        assert_eq!(unlimited.limit, u64::MAX);
+        assert_eq!(unlimited.max_usage, 2048);
+
+        let finite = parse_v2_memory_data("512\n", "4096\n", "1024\n", "memory.swap").unwrap();
+        assert_eq!(finite.limit, 4096);
+        assert!(parse_v2_memory_data("bad\n", "4096\n", "1024\n", "memory.swap").is_err());
+        assert!(parse_v2_memory_data("512\n", "bad\n", "1024\n", "memory.swap").is_err());
+        assert!(parse_v2_memory_data("512\n", "4096\n", "bad\n", "memory.swap").is_err());
+    }
+
+    #[test]
+    fn parse_v2_pids_stats_preserves_unlimited_and_rejects_malformed_values() {
+        let unlimited = parse_v2_pids_stats("7\n", "max\n").unwrap();
+        assert_eq!(unlimited.current, 7);
+        assert_eq!(unlimited.limit, u64::MAX);
+        assert_eq!(parse_v2_pids_stats("7\n", "128\n").unwrap().limit, 128);
+        assert!(parse_v2_pids_stats("bad\n", "128\n").is_err());
+        assert!(parse_v2_pids_stats("7\n", "bad\n").is_err());
     }
 
     #[test]

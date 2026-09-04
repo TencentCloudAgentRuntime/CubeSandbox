@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,7 +16,10 @@ use containerd_shim::{
     },
     protos::{
         api,
-        cgroups::metrics::{CPUStat, CPUUsage, MemoryEntry, MemoryStat, Metrics, Throttle},
+        cgroups_v2::metrics::{
+            CPUStat, IOEntry, IOStat, MemoryEvents, MemoryStat, Metrics, PSIData, PSIStats,
+            PidsStat,
+        },
         protobuf::MessageDyn,
         shim_async::Task,
         ttrpc::Error::Others,
@@ -44,7 +47,7 @@ use crate::service::update_ext;
 use crate::{debugf, errf, infof, warnf};
 const MODULE: &str = "Shim";
 const INTERNAL_PROBE_EXEC_ID_PREFIX: &str = "cubesandbox-internal-probe-";
-const CGROUP_V1_METRICS_TYPE_URL: &str = "io.containerd.cgroups.v1.Metrics";
+const CGROUP_V2_METRICS_TYPE_URL: &str = "io.containerd.cgroups.v2.Metrics";
 const RESOURCE_METRICS_VERSION_V1: u32 = 1;
 
 fn create_error_with_rootfs_cleanup(
@@ -144,6 +147,24 @@ async fn persist_legacy_create_result<T>(
     })
 }
 
+fn normalize_guest_psi(stats: &protoc::agent::PSIStats) -> Result<PSIStats, String> {
+    if !stats.has_some() || !stats.has_full() {
+        return Err("guest response is missing PSI some or full stats".to_string());
+    }
+    let convert = |data: &protoc::agent::PSIData| PSIData {
+        avg10: data.get_avg10(),
+        avg60: data.get_avg60(),
+        avg300: data.get_avg300(),
+        total: data.get_total(),
+        ..Default::default()
+    };
+    Ok(PSIStats {
+        some: Some(convert(stats.get_some())).into(),
+        full: Some(convert(stats.get_full())).into(),
+        ..Default::default()
+    })
+}
+
 fn normalize_guest_stats(stats: &protoc::agent::StatsContainerResponse) -> Result<Metrics, String> {
     let version = stats.get_resource_metrics_version();
     if version != RESOURCE_METRICS_VERSION_V1 {
@@ -156,53 +177,148 @@ fn normalize_guest_stats(stats: &protoc::agent::StatsContainerResponse) -> Resul
         return Err("guest response is missing cgroup stats".to_string());
     }
     let guest = stats.get_cgroup_stats();
-    if !guest.has_cpu_stats() || !guest.has_memory_stats() {
-        return Err("guest response is missing CPU or memory stats".to_string());
+    if !guest.has_cpu_stats() || !guest.has_memory_stats() || !guest.has_pids_stats() {
+        return Err("guest response is missing CPU, memory, or PIDs stats".to_string());
     }
     let guest_cpu = guest.get_cpu_stats();
     if !guest_cpu.has_cpu_usage() || !guest_cpu.has_throttling_data() {
         return Err("guest response is missing CPU usage or throttling stats".to_string());
     }
-    if !guest.get_memory_stats().has_usage() {
+    let guest_memory_stats = guest.get_memory_stats();
+    if !guest_memory_stats.has_usage() {
         return Err("guest response is missing memory usage stats".to_string());
     }
     let guest_usage = guest_cpu.get_cpu_usage();
     let guest_throttling = guest_cpu.get_throttling_data();
-    let guest_memory = guest.get_memory_stats().get_usage();
+    let guest_memory = guest_memory_stats.get_usage();
+    let raw_memory = guest_memory_stats.get_stats();
+    let memory_counter = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| raw_memory.get(*key).copied())
+            .unwrap_or_default()
+    };
 
     let cpu = CPUStat {
-        usage: Some(CPUUsage {
-            total: guest_usage.get_total_usage(),
-            kernel: guest_usage.get_usage_in_kernelmode(),
-            user: guest_usage.get_usage_in_usermode(),
-            per_cpu: guest_usage.get_percpu_usage().to_vec(),
-            ..Default::default()
-        })
-        .into(),
-        throttling: Some(Throttle {
-            periods: guest_throttling.get_periods(),
-            throttled_periods: guest_throttling.get_throttled_periods(),
-            throttled_time: guest_throttling.get_throttled_time(),
-            ..Default::default()
-        })
-        .into(),
+        usage_usec: guest_usage.get_total_usage() / 1_000,
+        user_usec: guest_usage.get_usage_in_usermode() / 1_000,
+        system_usec: guest_usage.get_usage_in_kernelmode() / 1_000,
+        nr_periods: guest_throttling.get_periods(),
+        nr_throttled: guest_throttling.get_throttled_periods(),
+        throttled_usec: guest_throttling.get_throttled_time() / 1_000,
+        psi: guest_cpu
+            .has_psi()
+            .then(|| normalize_guest_psi(guest_cpu.get_psi()))
+            .transpose()?
+            .into(),
         ..Default::default()
     };
     let memory = MemoryStat {
-        usage: Some(MemoryEntry {
-            usage: guest_memory.get_usage(),
-            max: guest_memory.get_max_usage(),
-            failcnt: guest_memory.get_failcnt(),
-            limit: guest_memory.get_limit(),
-            ..Default::default()
-        })
-        .into(),
+        anon: memory_counter(&["anon", "total_rss", "rss"]),
+        file: memory_counter(&["file", "total_cache", "cache"]),
+        kernel_stack: memory_counter(&["kernel_stack"]),
+        slab: memory_counter(&["slab"]),
+        sock: memory_counter(&["sock"]),
+        shmem: memory_counter(&["shmem"]),
+        file_mapped: memory_counter(&["file_mapped", "total_mapped_file", "mapped_file"]),
+        file_dirty: memory_counter(&["file_dirty", "total_dirty", "dirty"]),
+        file_writeback: memory_counter(&["file_writeback", "total_writeback", "writeback"]),
+        anon_thp: memory_counter(&["anon_thp", "total_rss_huge", "rss_huge"]),
+        inactive_anon: memory_counter(&["inactive_anon", "total_inactive_anon"]),
+        active_anon: memory_counter(&["active_anon", "total_active_anon"]),
+        inactive_file: memory_counter(&["inactive_file", "total_inactive_file"]),
+        active_file: memory_counter(&["active_file", "total_active_file"]),
+        unevictable: memory_counter(&["unevictable", "total_unevictable"]),
+        slab_reclaimable: memory_counter(&["slab_reclaimable"]),
+        slab_unreclaimable: memory_counter(&["slab_unreclaimable"]),
+        pgfault: memory_counter(&["pgfault", "total_pgfault"]),
+        pgmajfault: memory_counter(&["pgmajfault", "total_pgmajfault"]),
+        workingset_refault: memory_counter(&["workingset_refault"])
+            .saturating_add(memory_counter(&["workingset_refault_anon"]))
+            .saturating_add(memory_counter(&["workingset_refault_file"])),
+        workingset_activate: memory_counter(&["workingset_activate"])
+            .saturating_add(memory_counter(&["workingset_activate_anon"]))
+            .saturating_add(memory_counter(&["workingset_activate_file"])),
+        workingset_nodereclaim: memory_counter(&["workingset_nodereclaim"]),
+        pgrefill: memory_counter(&["pgrefill"]),
+        pgscan: memory_counter(&["pgscan"]),
+        pgsteal: memory_counter(&["pgsteal"]),
+        pgactivate: memory_counter(&["pgactivate"]),
+        pgdeactivate: memory_counter(&["pgdeactivate"]),
+        pglazyfree: memory_counter(&["pglazyfree"]),
+        pglazyfreed: memory_counter(&["pglazyfreed"]),
+        thp_fault_alloc: memory_counter(&["thp_fault_alloc"]),
+        thp_collapse_alloc: memory_counter(&["thp_collapse_alloc"]),
+        usage: guest_memory.get_usage(),
+        usage_limit: guest_memory.get_limit(),
+        swap_usage: guest_memory_stats
+            .has_swap_usage()
+            .then(|| guest_memory_stats.get_swap_usage().get_usage())
+            .unwrap_or_default(),
+        swap_limit: guest_memory_stats
+            .has_swap_usage()
+            .then(|| guest_memory_stats.get_swap_usage().get_limit())
+            .unwrap_or_default(),
+        max_usage: guest_memory.get_max_usage(),
+        swap_max_usage: guest_memory_stats
+            .has_swap_usage()
+            .then(|| guest_memory_stats.get_swap_usage().get_max_usage())
+            .unwrap_or_default(),
+        psi: guest_memory_stats
+            .has_psi()
+            .then(|| normalize_guest_psi(guest_memory_stats.get_psi()))
+            .transpose()?
+            .into(),
+        ..Default::default()
+    };
+    let guest_pids = guest.get_pids_stats();
+    let pids = PidsStat {
+        current: guest_pids.get_current(),
+        limit: guest_pids.get_limit(),
         ..Default::default()
     };
 
+    let io = if guest.has_blkio_stats() {
+        let guest_io = guest.get_blkio_stats();
+        let mut devices = BTreeMap::<(u64, u64), IOEntry>::new();
+        for item in guest_io.get_io_service_bytes_recursive() {
+            let entry = devices
+                .entry((item.get_major(), item.get_minor()))
+                .or_insert_with(|| IOEntry {
+                    major: item.get_major(),
+                    minor: item.get_minor(),
+                    ..Default::default()
+                });
+            match item.get_op().to_ascii_lowercase().as_str() {
+                "read" => entry.rbytes = item.get_value(),
+                "write" => entry.wbytes = item.get_value(),
+                "rios" => entry.rios = item.get_value(),
+                "wios" => entry.wios = item.get_value(),
+                _ => {}
+            }
+        }
+        Some(IOStat {
+            usage: devices.into_values().collect(),
+            psi: guest_io
+                .has_psi()
+                .then(|| normalize_guest_psi(guest_io.get_psi()))
+                .transpose()?
+                .into(),
+            ..Default::default()
+        })
+    } else {
+        None
+    };
+
     Ok(Metrics {
+        pids: Some(pids).into(),
         cpu: Some(cpu).into(),
         memory: Some(memory).into(),
+        io: io.into(),
+        memory_events: Some(MemoryEvents {
+            max: guest_memory.get_failcnt(),
+            ..Default::default()
+        })
+        .into(),
         ..Default::default()
     })
 }
@@ -215,7 +331,7 @@ fn encode_guest_stats(
         .write_to_bytes()
         .map_err(|e| format!("encode cgroup metrics failed: {}", e))?;
     Ok(protobuf::well_known_types::any::Any {
-        type_url: CGROUP_V1_METRICS_TYPE_URL.to_string(),
+        type_url: CGROUP_V2_METRICS_TYPE_URL.to_string(),
         value,
         ..Default::default()
     })
@@ -223,11 +339,31 @@ fn encode_guest_stats(
 
 #[cfg(test)]
 mod stats_tests {
-    use super::{encode_guest_stats, normalize_guest_stats, CGROUP_V1_METRICS_TYPE_URL};
+    use super::{encode_guest_stats, normalize_guest_stats, CGROUP_V2_METRICS_TYPE_URL};
     use protoc::agent::{
-        CgroupStats, CpuStats, CpuUsage as GuestCpuUsage, MemoryData, MemoryStats,
-        StatsContainerResponse, ThrottlingData,
+        BlkioStats, CgroupStats, CpuStats, CpuUsage as GuestCpuUsage, MemoryData, MemoryStats,
+        PSIData as GuestPSIData, PSIStats as GuestPSIStats, PidsStats, StatsContainerResponse,
+        ThrottlingData,
     };
+
+    fn pressure_stats(total: u64) -> GuestPSIStats {
+        let mut stats = GuestPSIStats::new();
+        stats.set_some(GuestPSIData {
+            avg10: 0.25,
+            avg60: 0.5,
+            avg300: 0.75,
+            total,
+            ..Default::default()
+        });
+        stats.set_full(GuestPSIData {
+            avg10: 0.1,
+            avg60: 0.2,
+            avg300: 0.3,
+            total: total / 2,
+            ..Default::default()
+        });
+        stats
+    }
 
     fn complete_guest_stats_response() -> StatsContainerResponse {
         let mut response = StatsContainerResponse::new();
@@ -245,9 +381,10 @@ mod stats_tests {
         cpu.set_throttling_data(ThrottlingData {
             periods: 9,
             throttled_periods: 3,
-            throttled_time: 17,
+            throttled_time: 17_000,
             ..Default::default()
         });
+        cpu.set_psi(pressure_stats(100));
         cgroup.set_cpu_stats(cpu);
 
         let mut memory = MemoryStats::new();
@@ -258,7 +395,45 @@ mod stats_tests {
             limit: 16384,
             ..Default::default()
         });
+        memory.set_swap_usage(MemoryData {
+            usage: 1024,
+            max_usage: 2048,
+            failcnt: 1,
+            limit: 4096,
+            ..Default::default()
+        });
+        memory.set_kernel_usage(MemoryData {
+            usage: 512,
+            max_usage: 1024,
+            failcnt: 0,
+            limit: 2048,
+            ..Default::default()
+        });
+        memory.mut_stats().extend([
+            ("anon".to_string(), 3072),
+            ("anon_thp".to_string(), 1024),
+            ("file".to_string(), 768),
+            ("file_mapped".to_string(), 256),
+            ("file_dirty".to_string(), 128),
+            ("file_writeback".to_string(), 64),
+            ("pgfault".to_string(), 33),
+            ("pgmajfault".to_string(), 2),
+            ("inactive_anon".to_string(), 11),
+            ("active_anon".to_string(), 22),
+            ("inactive_file".to_string(), 44),
+            ("active_file".to_string(), 55),
+            ("unevictable".to_string(), 3),
+        ]);
+        memory.set_psi(pressure_stats(200));
         cgroup.set_memory_stats(memory);
+        cgroup.set_pids_stats(PidsStats {
+            current: 7,
+            limit: 128,
+            ..Default::default()
+        });
+        let mut io = BlkioStats::new();
+        io.set_psi(pressure_stats(300));
+        cgroup.set_blkio_stats(io);
         response.set_cgroup_stats(cgroup);
         response.set_resource_metrics_version(1);
         response
@@ -269,24 +444,40 @@ mod stats_tests {
         let response = complete_guest_stats_response();
 
         let metrics = normalize_guest_stats(&response).unwrap();
-        assert_eq!(metrics.cpu().usage().total, 101_000);
-        assert_eq!(metrics.cpu().usage().kernel, 31_000);
-        assert_eq!(metrics.cpu().usage().user, 70_000);
-        assert_eq!(metrics.cpu().throttling().periods, 9);
-        assert_eq!(metrics.cpu().throttling().throttled_periods, 3);
-        assert_eq!(metrics.cpu().throttling().throttled_time, 17);
-        assert_eq!(metrics.memory().usage().usage, 4096);
-        assert_eq!(metrics.memory().usage().max, 8192);
-        assert_eq!(metrics.memory().usage().failcnt, 2);
-        assert_eq!(metrics.memory().usage().limit, 16384);
+        assert_eq!(metrics.cpu().usage_usec, 101);
+        assert_eq!(metrics.cpu().system_usec, 31);
+        assert_eq!(metrics.cpu().user_usec, 70);
+        assert_eq!(metrics.cpu().nr_periods, 9);
+        assert_eq!(metrics.cpu().nr_throttled, 3);
+        assert_eq!(metrics.cpu().throttled_usec, 17);
+        assert_eq!(metrics.cpu().psi().some().total, 100);
+        assert_eq!(metrics.memory().usage, 4096);
+        assert_eq!(metrics.memory().max_usage, 8192);
+        assert_eq!(metrics.memory().usage_limit, 16384);
+        assert_eq!(metrics.memory().file, 768);
+        assert_eq!(metrics.memory().anon, 3072);
+        assert_eq!(metrics.memory().anon_thp, 1024);
+        assert_eq!(metrics.memory().file_mapped, 256);
+        assert_eq!(metrics.memory().file_dirty, 128);
+        assert_eq!(metrics.memory().file_writeback, 64);
+        assert_eq!(metrics.memory().pgfault, 33);
+        assert_eq!(metrics.memory().pgmajfault, 2);
+        assert_eq!(metrics.memory().inactive_file, 44);
+        assert_eq!(metrics.memory().swap_usage, 1024);
+        assert_eq!(metrics.memory().swap_limit, 4096);
+        assert_eq!(metrics.memory().psi().some().total, 200);
+        assert_eq!(metrics.pids().current, 7);
+        assert_eq!(metrics.pids().limit, 128);
+        assert_eq!(metrics.io().psi().some().total, 300);
+        assert_eq!(metrics.memory_events().max, 2);
 
         let encoded = encode_guest_stats(&response).unwrap();
-        assert_eq!(encoded.type_url, CGROUP_V1_METRICS_TYPE_URL);
+        assert_eq!(encoded.type_url, CGROUP_V2_METRICS_TYPE_URL);
         assert!(!encoded.value.is_empty());
     }
 
     #[test]
-    fn rejects_incomplete_guest_cpu_and_memory_stats() {
+    fn rejects_incomplete_guest_cgroup_v2_stats() {
         let mut missing_cpu_stats = complete_guest_stats_response();
         missing_cpu_stats.mut_cgroup_stats().clear_cpu_stats();
 
@@ -311,16 +502,19 @@ mod stats_tests {
             .mut_memory_stats()
             .clear_usage();
 
+        let mut missing_pids = complete_guest_stats_response();
+        missing_pids.mut_cgroup_stats().clear_pids_stats();
+
         for (name, response, expected) in [
             (
                 "cpu stats",
                 missing_cpu_stats,
-                "guest response is missing CPU or memory stats",
+                "guest response is missing CPU, memory, or PIDs stats",
             ),
             (
                 "memory stats",
                 missing_memory_stats,
-                "guest response is missing CPU or memory stats",
+                "guest response is missing CPU, memory, or PIDs stats",
             ),
             (
                 "CPU usage",
@@ -337,6 +531,11 @@ mod stats_tests {
                 missing_memory_usage,
                 "guest response is missing memory usage stats",
             ),
+            (
+                "PIDs stats",
+                missing_pids,
+                "guest response is missing CPU, memory, or PIDs stats",
+            ),
         ] {
             assert_eq!(
                 normalize_guest_stats(&response).unwrap_err(),
@@ -344,6 +543,22 @@ mod stats_tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn accepts_version_one_agent_without_psi_fields() {
+        let mut response = complete_guest_stats_response();
+        response.mut_cgroup_stats().mut_cpu_stats().clear_psi();
+        response.mut_cgroup_stats().mut_memory_stats().clear_psi();
+        response.mut_cgroup_stats().mut_blkio_stats().clear_psi();
+
+        let metrics = normalize_guest_stats(&response).unwrap();
+        assert!(!metrics.cpu().has_psi());
+        assert!(!metrics.memory().has_psi());
+        assert!(!metrics.io().has_psi());
+        assert_eq!(metrics.cpu().usage_usec, 101);
+        assert_eq!(metrics.memory().usage, 4096);
+        assert_eq!(metrics.pids().current, 7);
     }
 
     #[test]

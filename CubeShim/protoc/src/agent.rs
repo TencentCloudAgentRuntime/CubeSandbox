@@ -3567,10 +3567,507 @@ impl ::protobuf::reflect::ProtobufValue for ThrottlingData {
 #[derive(PartialEq,Clone,Default)]
 #[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(feature = "with-serde", serde(default))]
+pub struct PSIData {
+    // message fields
+    pub avg10: f64,
+    pub avg60: f64,
+    pub avg300: f64,
+    pub total: u64,
+    // special fields
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub unknown_fields: ::protobuf::UnknownFields,
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a PSIData {
+    fn default() -> &'a PSIData {
+        <PSIData as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl PSIData {
+    pub fn new() -> PSIData {
+        ::std::default::Default::default()
+    }
+
+    // double avg10 = 1;
+
+
+    pub fn get_avg10(&self) -> f64 {
+        self.avg10
+    }
+    pub fn clear_avg10(&mut self) {
+        self.avg10 = 0.;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_avg10(&mut self, v: f64) {
+        self.avg10 = v;
+    }
+
+    // double avg60 = 2;
+
+
+    pub fn get_avg60(&self) -> f64 {
+        self.avg60
+    }
+    pub fn clear_avg60(&mut self) {
+        self.avg60 = 0.;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_avg60(&mut self, v: f64) {
+        self.avg60 = v;
+    }
+
+    // double avg300 = 3;
+
+
+    pub fn get_avg300(&self) -> f64 {
+        self.avg300
+    }
+    pub fn clear_avg300(&mut self) {
+        self.avg300 = 0.;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_avg300(&mut self, v: f64) {
+        self.avg300 = v;
+    }
+
+    // uint64 total = 4;
+
+
+    pub fn get_total(&self) -> u64 {
+        self.total
+    }
+    pub fn clear_total(&mut self) {
+        self.total = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_total(&mut self, v: u64) {
+        self.total = v;
+    }
+}
+
+impl ::protobuf::Message for PSIData {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeFixed64 {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_double()?;
+                    self.avg10 = tmp;
+                },
+                2 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeFixed64 {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_double()?;
+                    self.avg60 = tmp;
+                },
+                3 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeFixed64 {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_double()?;
+                    self.avg300 = tmp;
+                },
+                4 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.total = tmp;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.avg10 != 0. {
+            my_size += 9;
+        }
+        if self.avg60 != 0. {
+            my_size += 9;
+        }
+        if self.avg300 != 0. {
+            my_size += 9;
+        }
+        if self.total != 0 {
+            my_size += ::protobuf::rt::value_size(4, self.total, ::protobuf::wire_format::WireTypeVarint);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        if self.avg10 != 0. {
+            os.write_double(1, self.avg10)?;
+        }
+        if self.avg60 != 0. {
+            os.write_double(2, self.avg60)?;
+        }
+        if self.avg300 != 0. {
+            os.write_double(3, self.avg300)?;
+        }
+        if self.total != 0 {
+            os.write_uint64(4, self.total)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: ::std::boxed::Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> PSIData {
+        PSIData::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
+        descriptor.get(|| {
+            let mut fields = ::std::vec::Vec::new();
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeDouble>(
+                "avg10",
+                |m: &PSIData| { &m.avg10 },
+                |m: &mut PSIData| { &mut m.avg10 },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeDouble>(
+                "avg60",
+                |m: &PSIData| { &m.avg60 },
+                |m: &mut PSIData| { &mut m.avg60 },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeDouble>(
+                "avg300",
+                |m: &PSIData| { &m.avg300 },
+                |m: &mut PSIData| { &mut m.avg300 },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                "total",
+                |m: &PSIData| { &m.total },
+                |m: &mut PSIData| { &mut m.total },
+            ));
+            ::protobuf::reflect::MessageDescriptor::new_pb_name::<PSIData>(
+                "PSIData",
+                fields,
+                file_descriptor_proto()
+            )
+        })
+    }
+
+    fn default_instance() -> &'static PSIData {
+        static instance: ::protobuf::rt::LazyV2<PSIData> = ::protobuf::rt::LazyV2::INIT;
+        instance.get(PSIData::new)
+    }
+}
+
+impl ::protobuf::Clear for PSIData {
+    fn clear(&mut self) {
+        self.avg10 = 0.;
+        self.avg60 = 0.;
+        self.avg300 = 0.;
+        self.total = 0;
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::std::fmt::Debug for PSIData {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::protobuf::text_format::fmt(self, f)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for PSIData {
+    fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
+        ::protobuf::reflect::ReflectValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+#[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "with-serde", serde(default))]
+pub struct PSIStats {
+    // message fields
+    pub some: ::protobuf::SingularPtrField<PSIData>,
+    pub full: ::protobuf::SingularPtrField<PSIData>,
+    // special fields
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub unknown_fields: ::protobuf::UnknownFields,
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a PSIStats {
+    fn default() -> &'a PSIStats {
+        <PSIStats as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl PSIStats {
+    pub fn new() -> PSIStats {
+        ::std::default::Default::default()
+    }
+
+    // .grpc.PSIData some = 1;
+
+
+    pub fn get_some(&self) -> &PSIData {
+        self.some.as_ref().unwrap_or_else(|| <PSIData as ::protobuf::Message>::default_instance())
+    }
+    pub fn clear_some(&mut self) {
+        self.some.clear();
+    }
+
+    pub fn has_some(&self) -> bool {
+        self.some.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_some(&mut self, v: PSIData) {
+        self.some = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_some(&mut self) -> &mut PSIData {
+        if self.some.is_none() {
+            self.some.set_default();
+        }
+        self.some.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_some(&mut self) -> PSIData {
+        self.some.take().unwrap_or_else(|| PSIData::new())
+    }
+
+    // .grpc.PSIData full = 2;
+
+
+    pub fn get_full(&self) -> &PSIData {
+        self.full.as_ref().unwrap_or_else(|| <PSIData as ::protobuf::Message>::default_instance())
+    }
+    pub fn clear_full(&mut self) {
+        self.full.clear();
+    }
+
+    pub fn has_full(&self) -> bool {
+        self.full.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_full(&mut self, v: PSIData) {
+        self.full = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_full(&mut self) -> &mut PSIData {
+        if self.full.is_none() {
+            self.full.set_default();
+        }
+        self.full.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_full(&mut self) -> PSIData {
+        self.full.take().unwrap_or_else(|| PSIData::new())
+    }
+}
+
+impl ::protobuf::Message for PSIStats {
+    fn is_initialized(&self) -> bool {
+        for v in &self.some {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.full {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.some)?;
+                },
+                2 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.full)?;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if let Some(ref v) = self.some.as_ref() {
+            let len = v.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
+        if let Some(ref v) = self.full.as_ref() {
+            let len = v.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        if let Some(ref v) = self.some.as_ref() {
+            os.write_tag(1, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
+        if let Some(ref v) = self.full.as_ref() {
+            os.write_tag(2, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: ::std::boxed::Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> PSIStats {
+        PSIStats::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
+        descriptor.get(|| {
+            let mut fields = ::std::vec::Vec::new();
+            fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<PSIData>>(
+                "some",
+                |m: &PSIStats| { &m.some },
+                |m: &mut PSIStats| { &mut m.some },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<PSIData>>(
+                "full",
+                |m: &PSIStats| { &m.full },
+                |m: &mut PSIStats| { &mut m.full },
+            ));
+            ::protobuf::reflect::MessageDescriptor::new_pb_name::<PSIStats>(
+                "PSIStats",
+                fields,
+                file_descriptor_proto()
+            )
+        })
+    }
+
+    fn default_instance() -> &'static PSIStats {
+        static instance: ::protobuf::rt::LazyV2<PSIStats> = ::protobuf::rt::LazyV2::INIT;
+        instance.get(PSIStats::new)
+    }
+}
+
+impl ::protobuf::Clear for PSIStats {
+    fn clear(&mut self) {
+        self.some.clear();
+        self.full.clear();
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::std::fmt::Debug for PSIStats {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::protobuf::text_format::fmt(self, f)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for PSIStats {
+    fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
+        ::protobuf::reflect::ReflectValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+#[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "with-serde", serde(default))]
 pub struct CpuStats {
     // message fields
     pub cpu_usage: ::protobuf::SingularPtrField<CpuUsage>,
     pub throttling_data: ::protobuf::SingularPtrField<ThrottlingData>,
+    pub psi: ::protobuf::SingularPtrField<PSIStats>,
     // special fields
     #[cfg_attr(feature = "with-serde", serde(skip))]
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -3654,6 +4151,39 @@ impl CpuStats {
     pub fn take_throttling_data(&mut self) -> ThrottlingData {
         self.throttling_data.take().unwrap_or_else(|| ThrottlingData::new())
     }
+
+    // .grpc.PSIStats psi = 3;
+
+
+    pub fn get_psi(&self) -> &PSIStats {
+        self.psi.as_ref().unwrap_or_else(|| <PSIStats as ::protobuf::Message>::default_instance())
+    }
+    pub fn clear_psi(&mut self) {
+        self.psi.clear();
+    }
+
+    pub fn has_psi(&self) -> bool {
+        self.psi.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_psi(&mut self, v: PSIStats) {
+        self.psi = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_psi(&mut self) -> &mut PSIStats {
+        if self.psi.is_none() {
+            self.psi.set_default();
+        }
+        self.psi.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_psi(&mut self) -> PSIStats {
+        self.psi.take().unwrap_or_else(|| PSIStats::new())
+    }
 }
 
 impl ::protobuf::Message for CpuStats {
@@ -3664,6 +4194,11 @@ impl ::protobuf::Message for CpuStats {
             }
         };
         for v in &self.throttling_data {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.psi {
             if !v.is_initialized() {
                 return false;
             }
@@ -3680,6 +4215,9 @@ impl ::protobuf::Message for CpuStats {
                 },
                 2 => {
                     ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.throttling_data)?;
+                },
+                3 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.psi)?;
                 },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
@@ -3701,6 +4239,10 @@ impl ::protobuf::Message for CpuStats {
             let len = v.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         }
+        if let Some(ref v) = self.psi.as_ref() {
+            let len = v.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -3714,6 +4256,11 @@ impl ::protobuf::Message for CpuStats {
         }
         if let Some(ref v) = self.throttling_data.as_ref() {
             os.write_tag(2, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
+        if let Some(ref v) = self.psi.as_ref() {
+            os.write_tag(3, ::protobuf::wire_format::WireTypeLengthDelimited)?;
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         }
@@ -3765,6 +4312,11 @@ impl ::protobuf::Message for CpuStats {
                 |m: &CpuStats| { &m.throttling_data },
                 |m: &mut CpuStats| { &mut m.throttling_data },
             ));
+            fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<PSIStats>>(
+                "psi",
+                |m: &CpuStats| { &m.psi },
+                |m: &mut CpuStats| { &mut m.psi },
+            ));
             ::protobuf::reflect::MessageDescriptor::new_pb_name::<CpuStats>(
                 "CpuStats",
                 fields,
@@ -3783,6 +4335,7 @@ impl ::protobuf::Clear for CpuStats {
     fn clear(&mut self) {
         self.cpu_usage.clear();
         self.throttling_data.clear();
+        self.psi.clear();
         self.unknown_fields.clear();
     }
 }
@@ -4262,6 +4815,7 @@ pub struct MemoryStats {
     pub kernel_usage: ::protobuf::SingularPtrField<MemoryData>,
     pub use_hierarchy: bool,
     pub stats: ::std::collections::HashMap<::std::string::String, u64>,
+    pub psi: ::protobuf::SingularPtrField<PSIStats>,
     // special fields
     #[cfg_attr(feature = "with-serde", serde(skip))]
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -4433,6 +4987,39 @@ impl MemoryStats {
     pub fn take_stats(&mut self) -> ::std::collections::HashMap<::std::string::String, u64> {
         ::std::mem::replace(&mut self.stats, ::std::collections::HashMap::new())
     }
+
+    // .grpc.PSIStats psi = 7;
+
+
+    pub fn get_psi(&self) -> &PSIStats {
+        self.psi.as_ref().unwrap_or_else(|| <PSIStats as ::protobuf::Message>::default_instance())
+    }
+    pub fn clear_psi(&mut self) {
+        self.psi.clear();
+    }
+
+    pub fn has_psi(&self) -> bool {
+        self.psi.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_psi(&mut self, v: PSIStats) {
+        self.psi = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_psi(&mut self) -> &mut PSIStats {
+        if self.psi.is_none() {
+            self.psi.set_default();
+        }
+        self.psi.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_psi(&mut self) -> PSIStats {
+        self.psi.take().unwrap_or_else(|| PSIStats::new())
+    }
 }
 
 impl ::protobuf::Message for MemoryStats {
@@ -4448,6 +5035,11 @@ impl ::protobuf::Message for MemoryStats {
             }
         };
         for v in &self.kernel_usage {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
+        for v in &self.psi {
             if !v.is_initialized() {
                 return false;
             }
@@ -4485,6 +5077,9 @@ impl ::protobuf::Message for MemoryStats {
                 6 => {
                     ::protobuf::rt::read_map_into::<::protobuf::types::ProtobufTypeString, ::protobuf::types::ProtobufTypeUint64>(wire_type, is, &mut self.stats)?;
                 },
+                7 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.psi)?;
+                },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
                 },
@@ -4516,6 +5111,10 @@ impl ::protobuf::Message for MemoryStats {
             my_size += 2;
         }
         my_size += ::protobuf::rt::compute_map_size::<::protobuf::types::ProtobufTypeString, ::protobuf::types::ProtobufTypeUint64>(6, &self.stats);
+        if let Some(ref v) = self.psi.as_ref() {
+            let len = v.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -4544,6 +5143,11 @@ impl ::protobuf::Message for MemoryStats {
             os.write_bool(5, self.use_hierarchy)?;
         }
         ::protobuf::rt::write_map_with_cached_sizes::<::protobuf::types::ProtobufTypeString, ::protobuf::types::ProtobufTypeUint64>(6, &self.stats, os)?;
+        if let Some(ref v) = self.psi.as_ref() {
+            os.write_tag(7, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -4612,6 +5216,11 @@ impl ::protobuf::Message for MemoryStats {
                 |m: &MemoryStats| { &m.stats },
                 |m: &mut MemoryStats| { &mut m.stats },
             ));
+            fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<PSIStats>>(
+                "psi",
+                |m: &MemoryStats| { &m.psi },
+                |m: &mut MemoryStats| { &mut m.psi },
+            ));
             ::protobuf::reflect::MessageDescriptor::new_pb_name::<MemoryStats>(
                 "MemoryStats",
                 fields,
@@ -4634,6 +5243,7 @@ impl ::protobuf::Clear for MemoryStats {
         self.kernel_usage.clear();
         self.use_hierarchy = false;
         self.stats.clear();
+        self.psi.clear();
         self.unknown_fields.clear();
     }
 }
@@ -4931,6 +5541,7 @@ pub struct BlkioStats {
     pub io_merged_recursive: ::protobuf::RepeatedField<BlkioStatsEntry>,
     pub io_time_recursive: ::protobuf::RepeatedField<BlkioStatsEntry>,
     pub sectors_recursive: ::protobuf::RepeatedField<BlkioStatsEntry>,
+    pub psi: ::protobuf::SingularPtrField<PSIStats>,
     // special fields
     #[cfg_attr(feature = "with-serde", serde(skip))]
     pub unknown_fields: ::protobuf::UnknownFields,
@@ -5148,6 +5759,39 @@ impl BlkioStats {
     pub fn take_sectors_recursive(&mut self) -> ::protobuf::RepeatedField<BlkioStatsEntry> {
         ::std::mem::replace(&mut self.sectors_recursive, ::protobuf::RepeatedField::new())
     }
+
+    // .grpc.PSIStats psi = 9;
+
+
+    pub fn get_psi(&self) -> &PSIStats {
+        self.psi.as_ref().unwrap_or_else(|| <PSIStats as ::protobuf::Message>::default_instance())
+    }
+    pub fn clear_psi(&mut self) {
+        self.psi.clear();
+    }
+
+    pub fn has_psi(&self) -> bool {
+        self.psi.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_psi(&mut self, v: PSIStats) {
+        self.psi = ::protobuf::SingularPtrField::some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_psi(&mut self) -> &mut PSIStats {
+        if self.psi.is_none() {
+            self.psi.set_default();
+        }
+        self.psi.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_psi(&mut self) -> PSIStats {
+        self.psi.take().unwrap_or_else(|| PSIStats::new())
+    }
 }
 
 impl ::protobuf::Message for BlkioStats {
@@ -5192,6 +5836,11 @@ impl ::protobuf::Message for BlkioStats {
                 return false;
             }
         };
+        for v in &self.psi {
+            if !v.is_initialized() {
+                return false;
+            }
+        };
         true
     }
 
@@ -5222,6 +5871,9 @@ impl ::protobuf::Message for BlkioStats {
                 },
                 8 => {
                     ::protobuf::rt::read_repeated_message_into(wire_type, is, &mut self.sectors_recursive)?;
+                },
+                9 => {
+                    ::protobuf::rt::read_singular_message_into(wire_type, is, &mut self.psi)?;
                 },
                 _ => {
                     ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
@@ -5267,6 +5919,10 @@ impl ::protobuf::Message for BlkioStats {
             let len = value.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
         };
+        if let Some(ref v) = self.psi.as_ref() {
+            let len = v.compute_size();
+            my_size += 1 + ::protobuf::rt::compute_raw_varint32_size(len) + len;
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
         self.cached_size.set(my_size);
         my_size
@@ -5313,6 +5969,11 @@ impl ::protobuf::Message for BlkioStats {
             os.write_raw_varint32(v.get_cached_size())?;
             v.write_to_with_cached_sizes(os)?;
         };
+        if let Some(ref v) = self.psi.as_ref() {
+            os.write_tag(9, ::protobuf::wire_format::WireTypeLengthDelimited)?;
+            os.write_raw_varint32(v.get_cached_size())?;
+            v.write_to_with_cached_sizes(os)?;
+        }
         os.write_unknown_fields(self.get_unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -5391,6 +6052,11 @@ impl ::protobuf::Message for BlkioStats {
                 |m: &BlkioStats| { &m.sectors_recursive },
                 |m: &mut BlkioStats| { &mut m.sectors_recursive },
             ));
+            fields.push(::protobuf::reflect::accessor::make_singular_ptr_field_accessor::<_, ::protobuf::types::ProtobufTypeMessage<PSIStats>>(
+                "psi",
+                |m: &BlkioStats| { &m.psi },
+                |m: &mut BlkioStats| { &mut m.psi },
+            ));
             ::protobuf::reflect::MessageDescriptor::new_pb_name::<BlkioStats>(
                 "BlkioStats",
                 fields,
@@ -5415,6 +6081,7 @@ impl ::protobuf::Clear for BlkioStats {
         self.io_merged_recursive.clear();
         self.io_time_recursive.clear();
         self.sectors_recursive.clear();
+        self.psi.clear();
         self.unknown_fields.clear();
     }
 }
@@ -15598,159 +16265,167 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x01(\x04R\x0fusageInUsermodeB\0:\0\"\x86\x01\n\x0eThrottlingData\x12\
     \x1a\n\x07periods\x18\x01\x20\x01(\x04R\x07periodsB\0\x12-\n\x11throttle\
     d_periods\x18\x02\x20\x01(\x04R\x10throttledPeriodsB\0\x12'\n\x0ethrottl\
-    ed_time\x18\x03\x20\x01(\x04R\rthrottledTimeB\0:\0\"|\n\x08CpuStats\x12-\
-    \n\tcpu_usage\x18\x01\x20\x01(\x0b2\x0e.grpc.CpuUsageR\x08cpuUsageB\0\
-    \x12?\n\x0fthrottling_data\x18\x02\x20\x01(\x0b2\x14.grpc.ThrottlingData\
-    R\x0ethrottlingDataB\0:\0\"A\n\tPidsStats\x12\x1a\n\x07current\x18\x01\
-    \x20\x01(\x04R\x07currentB\0\x12\x16\n\x05limit\x18\x02\x20\x01(\x04R\
-    \x05limitB\0:\0\"y\n\nMemoryData\x12\x16\n\x05usage\x18\x01\x20\x01(\x04\
-    R\x05usageB\0\x12\x1d\n\tmax_usage\x18\x02\x20\x01(\x04R\x08maxUsageB\0\
-    \x12\x1a\n\x07failcnt\x18\x03\x20\x01(\x04R\x07failcntB\0\x12\x16\n\x05l\
-    imit\x18\x04\x20\x01(\x04R\x05limitB\0:\0\"\xd6\x02\n\x0bMemoryStats\x12\
-    \x16\n\x05cache\x18\x01\x20\x01(\x04R\x05cacheB\0\x12(\n\x05usage\x18\
-    \x02\x20\x01(\x0b2\x10.grpc.MemoryDataR\x05usageB\0\x121\n\nswap_usage\
-    \x18\x03\x20\x01(\x0b2\x10.grpc.MemoryDataR\tswapUsageB\0\x125\n\x0ckern\
-    el_usage\x18\x04\x20\x01(\x0b2\x10.grpc.MemoryDataR\x0bkernelUsageB\0\
-    \x12%\n\ruse_hierarchy\x18\x05\x20\x01(\x08R\x0cuseHierarchyB\0\x128\n\
-    \x05stats\x18\x06\x20\x03(\x0b2\x20.grpc.MemoryStats.stats_MapEntryR\x05\
-    statsB\0\x1a8\n\x0estats_MapEntry\x12\x0e\n\x03key\x18\x01(\tR\x03key\
-    \x12\x12\n\x05value\x18\x02(\x04R\x05value:\x028\x01:\0\"m\n\x0fBlkioSta\
-    tsEntry\x12\x16\n\x05major\x18\x01\x20\x01(\x04R\x05majorB\0\x12\x16\n\
-    \x05minor\x18\x02\x20\x01(\x04R\x05minorB\0\x12\x10\n\x02op\x18\x03\x20\
-    \x01(\tR\x02opB\0\x12\x16\n\x05value\x18\x04\x20\x01(\x04R\x05valueB\0:\
-    \0\"\xf0\x04\n\nBlkioStats\x12T\n\x1aio_service_bytes_recursive\x18\x01\
-    \x20\x03(\x0b2\x15.grpc.BlkioStatsEntryR\x17ioServiceBytesRecursiveB\0\
-    \x12K\n\x15io_serviced_recursive\x18\x02\x20\x03(\x0b2\x15.grpc.BlkioSta\
-    tsEntryR\x13ioServicedRecursiveB\0\x12G\n\x13io_queued_recursive\x18\x03\
-    \x20\x03(\x0b2\x15.grpc.BlkioStatsEntryR\x11ioQueuedRecursiveB\0\x12R\n\
-    \x19io_service_time_recursive\x18\x04\x20\x03(\x0b2\x15.grpc.BlkioStatsE\
-    ntryR\x16ioServiceTimeRecursiveB\0\x12L\n\x16io_wait_time_recursive\x18\
-    \x05\x20\x03(\x0b2\x15.grpc.BlkioStatsEntryR\x13ioWaitTimeRecursiveB\0\
-    \x12G\n\x13io_merged_recursive\x18\x06\x20\x03(\x0b2\x15.grpc.BlkioStats\
-    EntryR\x11ioMergedRecursiveB\0\x12C\n\x11io_time_recursive\x18\x07\x20\
-    \x03(\x0b2\x15.grpc.BlkioStatsEntryR\x0fioTimeRecursiveB\0\x12D\n\x11sec\
-    tors_recursive\x18\x08\x20\x03(\x0b2\x15.grpc.BlkioStatsEntryR\x10sector\
-    sRecursiveB\0:\0\"c\n\x0cHugetlbStats\x12\x16\n\x05usage\x18\x01\x20\x01\
-    (\x04R\x05usageB\0\x12\x1d\n\tmax_usage\x18\x02\x20\x01(\x04R\x08maxUsag\
-    eB\0\x12\x1a\n\x07failcnt\x18\x03\x20\x01(\x04R\x07failcntB\0:\0\"\x84\
-    \x03\n\x0bCgroupStats\x12-\n\tcpu_stats\x18\x01\x20\x01(\x0b2\x0e.grpc.C\
-    puStatsR\x08cpuStatsB\0\x126\n\x0cmemory_stats\x18\x02\x20\x01(\x0b2\x11\
-    .grpc.MemoryStatsR\x0bmemoryStatsB\0\x120\n\npids_stats\x18\x03\x20\x01(\
-    \x0b2\x0f.grpc.PidsStatsR\tpidsStatsB\0\x123\n\x0bblkio_stats\x18\x04\
-    \x20\x01(\x0b2\x10.grpc.BlkioStatsR\nblkioStatsB\0\x12O\n\rhugetlb_stats\
-    \x18\x05\x20\x03(\x0b2(.grpc.CgroupStats.hugetlb_stats_MapEntryR\x0chuge\
-    tlbStatsB\0\x1aT\n\x16hugetlb_stats_MapEntry\x12\x0e\n\x03key\x18\x01(\t\
-    R\x03key\x12&\n\x05value\x18\x02(\x0b2\x12.grpc.HugetlbStatsR\x05value:\
-    \x028\x01:\0\"\xa2\x02\n\x0cNetworkStats\x12\x14\n\x04name\x18\x01\x20\
-    \x01(\tR\x04nameB\0\x12\x1b\n\x08rx_bytes\x18\x02\x20\x01(\x04R\x07rxByt\
-    esB\0\x12\x1f\n\nrx_packets\x18\x03\x20\x01(\x04R\trxPacketsB\0\x12\x1d\
-    \n\trx_errors\x18\x04\x20\x01(\x04R\x08rxErrorsB\0\x12\x1f\n\nrx_dropped\
-    \x18\x05\x20\x01(\x04R\trxDroppedB\0\x12\x1b\n\x08tx_bytes\x18\x06\x20\
-    \x01(\x04R\x07txBytesB\0\x12\x1f\n\ntx_packets\x18\x07\x20\x01(\x04R\ttx\
-    PacketsB\0\x12\x1d\n\ttx_errors\x18\x08\x20\x01(\x04R\x08txErrorsB\0\x12\
-    \x1f\n\ntx_dropped\x18\t\x20\x01(\x04R\ttxDroppedB\0:\0\"\xc9\x01\n\x16S\
-    tatsContainerResponse\x126\n\x0ccgroup_stats\x18\x01\x20\x01(\x0b2\x11.g\
-    rpc.CgroupStatsR\x0bcgroupStatsB\0\x129\n\rnetwork_stats\x18\x02\x20\x03\
-    (\x0b2\x12.grpc.NetworkStatsR\x0cnetworkStatsB\0\x12:\n\x18resource_metr\
-    ics_version\x18\x03\x20\x01(\rR\x16resourceMetricsVersionB\0:\0\"l\n\x12\
-    WriteStreamRequest\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontain\
-    erIdB\0\x12\x19\n\x07exec_id\x18\x02\x20\x01(\tR\x06execIdB\0\x12\x14\n\
-    \x04data\x18\x03\x20\x01(\x0cR\x04dataB\0:\0\"+\n\x13WriteStreamResponse\
-    \x12\x12\n\x03len\x18\x01\x20\x01(\rR\x03lenB\0:\0\"i\n\x11ReadStreamReq\
-    uest\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerIdB\0\x12\
-    \x19\n\x07exec_id\x18\x02\x20\x01(\tR\x06execIdB\0\x12\x12\n\x03len\x18\
-    \x03\x20\x01(\rR\x03lenB\0:\0\",\n\x12ReadStreamResponse\x12\x14\n\x04da\
-    ta\x18\x01\x20\x01(\x0cR\x04dataB\0:\0\"U\n\x11CloseStdinRequest\x12#\n\
-    \x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerIdB\0\x12\x19\n\x07exec\
-    _id\x18\x02\x20\x01(\tR\x06execIdB\0:\0\"\x85\x01\n\x13TtyWinResizeReque\
-    st\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerIdB\0\x12\x19\
-    \n\x07exec_id\x18\x02\x20\x01(\tR\x06execIdB\0\x12\x12\n\x03row\x18\x03\
-    \x20\x01(\rR\x03rowB\0\x12\x18\n\x06column\x18\x04\x20\x01(\rR\x06column\
-    B\0:\0\"H\n\x0cKernelModule\x12\x14\n\x04name\x18\x01\x20\x01(\tR\x04nam\
-    eB\0\x12\x20\n\nparameters\x18\x02\x20\x03(\tR\nparametersB\0:\0\"\xe8\
-    \x04\n\x14CreateSandboxRequest\x12\x1c\n\x08hostname\x18\x01\x20\x01(\tR\
-    \x08hostnameB\0\x12\x12\n\x03dns\x18\x02\x20\x03(\tR\x03dnsB\0\x12+\n\
-    \x08storages\x18\x03\x20\x03(\x0b2\r.grpc.StorageR\x08storagesB\0\x12%\n\
-    \rsandbox_pidns\x18\x04\x20\x01(\x08R\x0csandboxPidnsB\0\x12\x1f\n\nsand\
-    box_id\x18\x05\x20\x01(\tR\tsandboxIdB\0\x12(\n\x0fguest_hook_path\x18\
-    \x06\x20\x01(\tR\rguestHookPathB\0\x12;\n\x0ekernel_modules\x18\x07\x20\
-    \x03(\x0b2\x12.grpc.KernelModuleR\rkernelModulesB\0\x122\n\ninterfaces\
-    \x18\x08\x20\x03(\x0b2\x10.types.InterfaceR\ninterfacesB\0\x12&\n\x06rou\
-    tes\x18\t\x20\x03(\x0b2\x0c.types.RouteR\x06routesB\0\x128\n\x0cARPNeigh\
-    bors\x18\n\x20\x03(\x0b2\x12.types.ARPNeighborR\x0cARPNeighborsB\0\x12\
-    \x1b\n\x08cube_vip\x18\x0b\x20\x01(\tR\x07cubeVipB\0\x12/\n\x13cube_pres\
-    erve_mem_m\x18\x0c\x20\x01(\rR\x10cubePreserveMemMB\0\x12*\n\x10cube_mvm\
-    _monitor\x18\r\x20\x01(\x08R\x0ecubeMvmMonitorB\0\x120\n\nstart_mode\x18\
-    \x0e\x20\x01(\x0e2\x0f.grpc.StartModeR\tstartModeB\0:\0\"\x19\n\x15Destr\
-    oySandboxRequest:\0\"B\n\nInterfaces\x122\n\nInterfaces\x18\x01\x20\x03(\
-    \x0b2\x10.types.InterfaceR\nInterfacesB\0:\0\"2\n\x06Routes\x12&\n\x06Ro\
-    utes\x18\x01\x20\x03(\x0b2\x0c.types.RouteR\x06RoutesB\0:\0\"L\n\x16Upda\
-    teInterfaceRequest\x120\n\tinterface\x18\x01\x20\x01(\x0b2\x10.types.Int\
-    erfaceR\tinterfaceB\0:\0\"?\n\x13UpdateRoutesRequest\x12&\n\x06routes\
-    \x18\x01\x20\x01(\x0b2\x0c.grpc.RoutesR\x06routesB\0:\0\"\x19\n\x15ListI\
-    nterfacesRequest:\0\"\x15\n\x11ListRoutesRequest:\0\"J\n\x0cARPNeighbors\
-    \x128\n\x0cARPNeighbors\x18\x01\x20\x03(\x0b2\x12.types.ARPNeighborR\x0c\
-    ARPNeighborsB\0:\0\"N\n\x16AddARPNeighborsRequest\x122\n\tneighbors\x18\
-    \x01\x20\x01(\x0b2\x12.grpc.ARPNeighborsR\tneighborsB\0:\0\"1\n\x12GetIP\
-    TablesRequest\x12\x19\n\x07is_ipv6\x18\x01\x20\x01(\x08R\x06isIpv6B\0:\0\
-    \"-\n\x13GetIPTablesResponse\x12\x14\n\x04data\x18\x01\x20\x01(\x0cR\x04\
-    dataB\0:\0\"G\n\x12SetIPTablesRequest\x12\x19\n\x07is_ipv6\x18\x01\x20\
-    \x01(\x08R\x06isIpv6B\0\x12\x14\n\x04data\x18\x02\x20\x01(\x0cR\x04dataB\
-    \0:\0\"-\n\x13SetIPTablesResponse\x12\x14\n\x04data\x18\x01\x20\x01(\x0c\
-    R\x04dataB\0:\0\"e\n\x13OnlineCPUMemRequest\x12\x14\n\x04wait\x18\x01\
-    \x20\x01(\x08R\x04waitB\0\x12\x19\n\x07nb_cpus\x18\x02\x20\x01(\rR\x06nb\
-    CpusB\0\x12\x1b\n\x08cpu_only\x18\x03\x20\x01(\x08R\x07cpuOnlyB\0:\0\"0\
-    \n\x16ReseedRandomDevRequest\x12\x14\n\x04data\x18\x02\x20\x01(\x0cR\x04\
-    dataB\0:\0\"\xd4\x01\n\x0cAgentDetails\x12\x1a\n\x07version\x18\x01\x20\
-    \x01(\tR\x07versionB\0\x12!\n\x0binit_daemon\x18\x02\x20\x01(\x08R\ninit\
-    DaemonB\0\x12)\n\x0fdevice_handlers\x18\x03\x20\x03(\tR\x0edeviceHandler\
-    sB\0\x12+\n\x10storage_handlers\x18\x04\x20\x03(\tR\x0fstorageHandlersB\
-    \0\x12+\n\x10supports_seccomp\x18\x05\x20\x01(\x08R\x0fsupportsSeccompB\
-    \0:\0\"m\n\x13GuestDetailsRequest\x12&\n\x0emem_block_size\x18\x01\x20\
-    \x01(\x08R\x0cmemBlockSizeB\0\x12,\n\x11mem_hotplug_probe\x18\x02\x20\
-    \x01(\x08R\x0fmemHotplugProbeB\0:\0\"\xc3\x01\n\x14GuestDetailsResponse\
-    \x121\n\x14mem_block_size_bytes\x18\x01\x20\x01(\x04R\x11memBlockSizeByt\
-    esB\0\x129\n\ragent_details\x18\x02\x20\x01(\x0b2\x12.grpc.AgentDetailsR\
-    \x0cagentDetailsB\0\x12;\n\x19support_mem_hotplug_probe\x18\x03\x20\x01(\
-    \x08R\x16supportMemHotplugProbeB\0:\0\"P\n\x18MemHotplugByProbeRequest\
-    \x122\n\x13memHotplugProbeAddr\x18\x01\x20\x03(\x04R\x13memHotplugProbeA\
-    ddrB\0:\0\"E\n\x17SetGuestDateTimeRequest\x12\x12\n\x03Sec\x18\x01\x20\
-    \x01(\x03R\x03SecB\0\x12\x14\n\x04Usec\x18\x02\x20\x01(\x03R\x04UsecB\0:\
-    \0\"v\n\x07FSGroup\x12\x1b\n\x08group_id\x18\x02\x20\x01(\rR\x07groupIdB\
-    \0\x12L\n\x13group_change_policy\x18\x03\x20\x01(\x0e2\x1a.types.FSGroup\
-    ChangePolicyR\x11groupChangePolicyB\0:\0\"\xb3\x02\n\x07Storage\x12\x18\
-    \n\x06driver\x18\x01\x20\x01(\tR\x06driverB\0\x12'\n\x0edriver_options\
-    \x18\x02\x20\x03(\tR\rdriverOptionsB\0\x12\x18\n\x06source\x18\x03\x20\
-    \x01(\tR\x06sourceB\0\x12\x18\n\x06fstype\x18\x04\x20\x01(\tR\x06fstypeB\
-    \0\x12\x1a\n\x07options\x18\x05\x20\x03(\tR\x07optionsB\0\x12!\n\x0bmoun\
-    t_point\x18\x06\x20\x01(\tR\nmountPointB\0\x12*\n\x08fs_group\x18\x07\
-    \x20\x01(\x0b2\r.grpc.FSGroupR\x07fsGroupB\0\x12!\n\x0bneed_format\x18\
-    \x08\x20\x01(\x08R\nneedFormatB\0\x12!\n\x0bneed_resize\x18\t\x20\x01(\
-    \x08R\nneedResizeB\0:\0\"\x92\x01\n\x06Device\x12\x10\n\x02id\x18\x01\
-    \x20\x01(\tR\x02idB\0\x12\x14\n\x04type\x18\x02\x20\x01(\tR\x04typeB\0\
-    \x12\x19\n\x07vm_path\x18\x03\x20\x01(\tR\x06vmPathB\0\x12'\n\x0econtain\
-    er_path\x18\x04\x20\x01(\tR\rcontainerPathB\0\x12\x1a\n\x07options\x18\
-    \x05\x20\x03(\tR\x07optionsB\0:\0\"`\n\nStringUser\x12\x12\n\x03uid\x18\
-    \x01\x20\x01(\tR\x03uidB\0\x12\x12\n\x03gid\x18\x02\x20\x01(\tR\x03gidB\
-    \0\x12(\n\x0eadditionalGids\x18\x03\x20\x03(\tR\x0eadditionalGidsB\0:\0\
-    \"\xdc\x01\n\x0fCopyFileRequest\x12\x14\n\x04path\x18\x01\x20\x01(\tR\
-    \x04pathB\0\x12\x1d\n\tfile_size\x18\x02\x20\x01(\x03R\x08fileSizeB\0\
-    \x12\x1d\n\tfile_mode\x18\x03\x20\x01(\rR\x08fileModeB\0\x12\x1b\n\x08di\
-    r_mode\x18\x04\x20\x01(\rR\x07dirModeB\0\x12\x12\n\x03uid\x18\x05\x20\
-    \x01(\x05R\x03uidB\0\x12\x12\n\x03gid\x18\x06\x20\x01(\x05R\x03gidB\0\
-    \x12\x18\n\x06offset\x18\x07\x20\x01(\x03R\x06offsetB\0\x12\x14\n\x04dat\
-    a\x18\x08\x20\x01(\x0cR\x04dataB\0:\0\"\x16\n\x12GetOOMEventRequest:\0\"\
-    1\n\x08OOMEvent\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerI\
-    dB\0:\0\".\n\x0eAddSwapRequest\x12\x1a\n\x07PCIPath\x18\x01\x20\x03(\rR\
-    \x07PCIPathB\0:\0\"\x15\n\x11GetMetricsRequest:\0\"'\n\x07Metrics\x12\
-    \x1a\n\x07metrics\x18\x01\x20\x01(\tR\x07metricsB\0:\0\"D\n\x12VolumeSta\
-    tsRequest\x12,\n\x11volume_guest_path\x18\x01\x20\x01(\tR\x0fvolumeGuest\
-    PathB\0:\0\"[\n\x13ResizeVolumeRequest\x12,\n\x11volume_guest_path\x18\
-    \x01\x20\x01(\tR\x0fvolumeGuestPathB\0\x12\x14\n\x04size\x18\x02\x20\x01\
-    (\x04R\x04sizeB\0:\0\"@\n\nCustomFile\x12\x14\n\x04path\x18\x01\x20\x01(\
-    \tR\x04pathB\0\x12\x1a\n\x07content\x18\x02\x20\x01(\tR\x07contentB\0:\0\
-    *3\n\tStartMode\x12\t\n\x05START\x10\0\x12\x0c\n\x08SNAPSHOT\x10\x01\x12\
-    \x0b\n\x07RESTORE\x10\x02\x1a\0B\0b\x06proto3\
+    ed_time\x18\x03\x20\x01(\x04R\rthrottledTimeB\0:\0\"m\n\x07PSIData\x12\
+    \x16\n\x05avg10\x18\x01\x20\x01(\x01R\x05avg10B\0\x12\x16\n\x05avg60\x18\
+    \x02\x20\x01(\x01R\x05avg60B\0\x12\x18\n\x06avg300\x18\x03\x20\x01(\x01R\
+    \x06avg300B\0\x12\x16\n\x05total\x18\x04\x20\x01(\x04R\x05totalB\0:\0\"V\
+    \n\x08PSIStats\x12#\n\x04some\x18\x01\x20\x01(\x0b2\r.grpc.PSIDataR\x04s\
+    omeB\0\x12#\n\x04full\x18\x02\x20\x01(\x0b2\r.grpc.PSIDataR\x04fullB\0:\
+    \0\"\xa0\x01\n\x08CpuStats\x12-\n\tcpu_usage\x18\x01\x20\x01(\x0b2\x0e.g\
+    rpc.CpuUsageR\x08cpuUsageB\0\x12?\n\x0fthrottling_data\x18\x02\x20\x01(\
+    \x0b2\x14.grpc.ThrottlingDataR\x0ethrottlingDataB\0\x12\"\n\x03psi\x18\
+    \x03\x20\x01(\x0b2\x0e.grpc.PSIStatsR\x03psiB\0:\0\"A\n\tPidsStats\x12\
+    \x1a\n\x07current\x18\x01\x20\x01(\x04R\x07currentB\0\x12\x16\n\x05limit\
+    \x18\x02\x20\x01(\x04R\x05limitB\0:\0\"y\n\nMemoryData\x12\x16\n\x05usag\
+    e\x18\x01\x20\x01(\x04R\x05usageB\0\x12\x1d\n\tmax_usage\x18\x02\x20\x01\
+    (\x04R\x08maxUsageB\0\x12\x1a\n\x07failcnt\x18\x03\x20\x01(\x04R\x07fail\
+    cntB\0\x12\x16\n\x05limit\x18\x04\x20\x01(\x04R\x05limitB\0:\0\"\xfa\x02\
+    \n\x0bMemoryStats\x12\x16\n\x05cache\x18\x01\x20\x01(\x04R\x05cacheB\0\
+    \x12(\n\x05usage\x18\x02\x20\x01(\x0b2\x10.grpc.MemoryDataR\x05usageB\0\
+    \x121\n\nswap_usage\x18\x03\x20\x01(\x0b2\x10.grpc.MemoryDataR\tswapUsag\
+    eB\0\x125\n\x0ckernel_usage\x18\x04\x20\x01(\x0b2\x10.grpc.MemoryDataR\
+    \x0bkernelUsageB\0\x12%\n\ruse_hierarchy\x18\x05\x20\x01(\x08R\x0cuseHie\
+    rarchyB\0\x128\n\x05stats\x18\x06\x20\x03(\x0b2\x20.grpc.MemoryStats.sta\
+    ts_MapEntryR\x05statsB\0\x12\"\n\x03psi\x18\x07\x20\x01(\x0b2\x0e.grpc.P\
+    SIStatsR\x03psiB\0\x1a8\n\x0estats_MapEntry\x12\x0e\n\x03key\x18\x01(\tR\
+    \x03key\x12\x12\n\x05value\x18\x02(\x04R\x05value:\x028\x01:\0\"m\n\x0fB\
+    lkioStatsEntry\x12\x16\n\x05major\x18\x01\x20\x01(\x04R\x05majorB\0\x12\
+    \x16\n\x05minor\x18\x02\x20\x01(\x04R\x05minorB\0\x12\x10\n\x02op\x18\
+    \x03\x20\x01(\tR\x02opB\0\x12\x16\n\x05value\x18\x04\x20\x01(\x04R\x05va\
+    lueB\0:\0\"\x94\x05\n\nBlkioStats\x12T\n\x1aio_service_bytes_recursive\
+    \x18\x01\x20\x03(\x0b2\x15.grpc.BlkioStatsEntryR\x17ioServiceBytesRecurs\
+    iveB\0\x12K\n\x15io_serviced_recursive\x18\x02\x20\x03(\x0b2\x15.grpc.Bl\
+    kioStatsEntryR\x13ioServicedRecursiveB\0\x12G\n\x13io_queued_recursive\
+    \x18\x03\x20\x03(\x0b2\x15.grpc.BlkioStatsEntryR\x11ioQueuedRecursiveB\0\
+    \x12R\n\x19io_service_time_recursive\x18\x04\x20\x03(\x0b2\x15.grpc.Blki\
+    oStatsEntryR\x16ioServiceTimeRecursiveB\0\x12L\n\x16io_wait_time_recursi\
+    ve\x18\x05\x20\x03(\x0b2\x15.grpc.BlkioStatsEntryR\x13ioWaitTimeRecursiv\
+    eB\0\x12G\n\x13io_merged_recursive\x18\x06\x20\x03(\x0b2\x15.grpc.BlkioS\
+    tatsEntryR\x11ioMergedRecursiveB\0\x12C\n\x11io_time_recursive\x18\x07\
+    \x20\x03(\x0b2\x15.grpc.BlkioStatsEntryR\x0fioTimeRecursiveB\0\x12D\n\
+    \x11sectors_recursive\x18\x08\x20\x03(\x0b2\x15.grpc.BlkioStatsEntryR\
+    \x10sectorsRecursiveB\0\x12\"\n\x03psi\x18\t\x20\x01(\x0b2\x0e.grpc.PSIS\
+    tatsR\x03psiB\0:\0\"c\n\x0cHugetlbStats\x12\x16\n\x05usage\x18\x01\x20\
+    \x01(\x04R\x05usageB\0\x12\x1d\n\tmax_usage\x18\x02\x20\x01(\x04R\x08max\
+    UsageB\0\x12\x1a\n\x07failcnt\x18\x03\x20\x01(\x04R\x07failcntB\0:\0\"\
+    \x84\x03\n\x0bCgroupStats\x12-\n\tcpu_stats\x18\x01\x20\x01(\x0b2\x0e.gr\
+    pc.CpuStatsR\x08cpuStatsB\0\x126\n\x0cmemory_stats\x18\x02\x20\x01(\x0b2\
+    \x11.grpc.MemoryStatsR\x0bmemoryStatsB\0\x120\n\npids_stats\x18\x03\x20\
+    \x01(\x0b2\x0f.grpc.PidsStatsR\tpidsStatsB\0\x123\n\x0bblkio_stats\x18\
+    \x04\x20\x01(\x0b2\x10.grpc.BlkioStatsR\nblkioStatsB\0\x12O\n\rhugetlb_s\
+    tats\x18\x05\x20\x03(\x0b2(.grpc.CgroupStats.hugetlb_stats_MapEntryR\x0c\
+    hugetlbStatsB\0\x1aT\n\x16hugetlb_stats_MapEntry\x12\x0e\n\x03key\x18\
+    \x01(\tR\x03key\x12&\n\x05value\x18\x02(\x0b2\x12.grpc.HugetlbStatsR\x05\
+    value:\x028\x01:\0\"\xa2\x02\n\x0cNetworkStats\x12\x14\n\x04name\x18\x01\
+    \x20\x01(\tR\x04nameB\0\x12\x1b\n\x08rx_bytes\x18\x02\x20\x01(\x04R\x07r\
+    xBytesB\0\x12\x1f\n\nrx_packets\x18\x03\x20\x01(\x04R\trxPacketsB\0\x12\
+    \x1d\n\trx_errors\x18\x04\x20\x01(\x04R\x08rxErrorsB\0\x12\x1f\n\nrx_dro\
+    pped\x18\x05\x20\x01(\x04R\trxDroppedB\0\x12\x1b\n\x08tx_bytes\x18\x06\
+    \x20\x01(\x04R\x07txBytesB\0\x12\x1f\n\ntx_packets\x18\x07\x20\x01(\x04R\
+    \ttxPacketsB\0\x12\x1d\n\ttx_errors\x18\x08\x20\x01(\x04R\x08txErrorsB\0\
+    \x12\x1f\n\ntx_dropped\x18\t\x20\x01(\x04R\ttxDroppedB\0:\0\"\xc9\x01\n\
+    \x16StatsContainerResponse\x126\n\x0ccgroup_stats\x18\x01\x20\x01(\x0b2\
+    \x11.grpc.CgroupStatsR\x0bcgroupStatsB\0\x129\n\rnetwork_stats\x18\x02\
+    \x20\x03(\x0b2\x12.grpc.NetworkStatsR\x0cnetworkStatsB\0\x12:\n\x18resou\
+    rce_metrics_version\x18\x03\x20\x01(\rR\x16resourceMetricsVersionB\0:\0\
+    \"l\n\x12WriteStreamRequest\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\
+    \x0bcontainerIdB\0\x12\x19\n\x07exec_id\x18\x02\x20\x01(\tR\x06execIdB\0\
+    \x12\x14\n\x04data\x18\x03\x20\x01(\x0cR\x04dataB\0:\0\"+\n\x13WriteStre\
+    amResponse\x12\x12\n\x03len\x18\x01\x20\x01(\rR\x03lenB\0:\0\"i\n\x11Rea\
+    dStreamRequest\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerId\
+    B\0\x12\x19\n\x07exec_id\x18\x02\x20\x01(\tR\x06execIdB\0\x12\x12\n\x03l\
+    en\x18\x03\x20\x01(\rR\x03lenB\0:\0\",\n\x12ReadStreamResponse\x12\x14\n\
+    \x04data\x18\x01\x20\x01(\x0cR\x04dataB\0:\0\"U\n\x11CloseStdinRequest\
+    \x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerIdB\0\x12\x19\n\
+    \x07exec_id\x18\x02\x20\x01(\tR\x06execIdB\0:\0\"\x85\x01\n\x13TtyWinRes\
+    izeRequest\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerIdB\0\
+    \x12\x19\n\x07exec_id\x18\x02\x20\x01(\tR\x06execIdB\0\x12\x12\n\x03row\
+    \x18\x03\x20\x01(\rR\x03rowB\0\x12\x18\n\x06column\x18\x04\x20\x01(\rR\
+    \x06columnB\0:\0\"H\n\x0cKernelModule\x12\x14\n\x04name\x18\x01\x20\x01(\
+    \tR\x04nameB\0\x12\x20\n\nparameters\x18\x02\x20\x03(\tR\nparametersB\0:\
+    \0\"\xe8\x04\n\x14CreateSandboxRequest\x12\x1c\n\x08hostname\x18\x01\x20\
+    \x01(\tR\x08hostnameB\0\x12\x12\n\x03dns\x18\x02\x20\x03(\tR\x03dnsB\0\
+    \x12+\n\x08storages\x18\x03\x20\x03(\x0b2\r.grpc.StorageR\x08storagesB\0\
+    \x12%\n\rsandbox_pidns\x18\x04\x20\x01(\x08R\x0csandboxPidnsB\0\x12\x1f\
+    \n\nsandbox_id\x18\x05\x20\x01(\tR\tsandboxIdB\0\x12(\n\x0fguest_hook_pa\
+    th\x18\x06\x20\x01(\tR\rguestHookPathB\0\x12;\n\x0ekernel_modules\x18\
+    \x07\x20\x03(\x0b2\x12.grpc.KernelModuleR\rkernelModulesB\0\x122\n\ninte\
+    rfaces\x18\x08\x20\x03(\x0b2\x10.types.InterfaceR\ninterfacesB\0\x12&\n\
+    \x06routes\x18\t\x20\x03(\x0b2\x0c.types.RouteR\x06routesB\0\x128\n\x0cA\
+    RPNeighbors\x18\n\x20\x03(\x0b2\x12.types.ARPNeighborR\x0cARPNeighborsB\
+    \0\x12\x1b\n\x08cube_vip\x18\x0b\x20\x01(\tR\x07cubeVipB\0\x12/\n\x13cub\
+    e_preserve_mem_m\x18\x0c\x20\x01(\rR\x10cubePreserveMemMB\0\x12*\n\x10cu\
+    be_mvm_monitor\x18\r\x20\x01(\x08R\x0ecubeMvmMonitorB\0\x120\n\nstart_mo\
+    de\x18\x0e\x20\x01(\x0e2\x0f.grpc.StartModeR\tstartModeB\0:\0\"\x19\n\
+    \x15DestroySandboxRequest:\0\"B\n\nInterfaces\x122\n\nInterfaces\x18\x01\
+    \x20\x03(\x0b2\x10.types.InterfaceR\nInterfacesB\0:\0\"2\n\x06Routes\x12\
+    &\n\x06Routes\x18\x01\x20\x03(\x0b2\x0c.types.RouteR\x06RoutesB\0:\0\"L\
+    \n\x16UpdateInterfaceRequest\x120\n\tinterface\x18\x01\x20\x01(\x0b2\x10\
+    .types.InterfaceR\tinterfaceB\0:\0\"?\n\x13UpdateRoutesRequest\x12&\n\
+    \x06routes\x18\x01\x20\x01(\x0b2\x0c.grpc.RoutesR\x06routesB\0:\0\"\x19\
+    \n\x15ListInterfacesRequest:\0\"\x15\n\x11ListRoutesRequest:\0\"J\n\x0cA\
+    RPNeighbors\x128\n\x0cARPNeighbors\x18\x01\x20\x03(\x0b2\x12.types.ARPNe\
+    ighborR\x0cARPNeighborsB\0:\0\"N\n\x16AddARPNeighborsRequest\x122\n\tnei\
+    ghbors\x18\x01\x20\x01(\x0b2\x12.grpc.ARPNeighborsR\tneighborsB\0:\0\"1\
+    \n\x12GetIPTablesRequest\x12\x19\n\x07is_ipv6\x18\x01\x20\x01(\x08R\x06i\
+    sIpv6B\0:\0\"-\n\x13GetIPTablesResponse\x12\x14\n\x04data\x18\x01\x20\
+    \x01(\x0cR\x04dataB\0:\0\"G\n\x12SetIPTablesRequest\x12\x19\n\x07is_ipv6\
+    \x18\x01\x20\x01(\x08R\x06isIpv6B\0\x12\x14\n\x04data\x18\x02\x20\x01(\
+    \x0cR\x04dataB\0:\0\"-\n\x13SetIPTablesResponse\x12\x14\n\x04data\x18\
+    \x01\x20\x01(\x0cR\x04dataB\0:\0\"e\n\x13OnlineCPUMemRequest\x12\x14\n\
+    \x04wait\x18\x01\x20\x01(\x08R\x04waitB\0\x12\x19\n\x07nb_cpus\x18\x02\
+    \x20\x01(\rR\x06nbCpusB\0\x12\x1b\n\x08cpu_only\x18\x03\x20\x01(\x08R\
+    \x07cpuOnlyB\0:\0\"0\n\x16ReseedRandomDevRequest\x12\x14\n\x04data\x18\
+    \x02\x20\x01(\x0cR\x04dataB\0:\0\"\xd4\x01\n\x0cAgentDetails\x12\x1a\n\
+    \x07version\x18\x01\x20\x01(\tR\x07versionB\0\x12!\n\x0binit_daemon\x18\
+    \x02\x20\x01(\x08R\ninitDaemonB\0\x12)\n\x0fdevice_handlers\x18\x03\x20\
+    \x03(\tR\x0edeviceHandlersB\0\x12+\n\x10storage_handlers\x18\x04\x20\x03\
+    (\tR\x0fstorageHandlersB\0\x12+\n\x10supports_seccomp\x18\x05\x20\x01(\
+    \x08R\x0fsupportsSeccompB\0:\0\"m\n\x13GuestDetailsRequest\x12&\n\x0emem\
+    _block_size\x18\x01\x20\x01(\x08R\x0cmemBlockSizeB\0\x12,\n\x11mem_hotpl\
+    ug_probe\x18\x02\x20\x01(\x08R\x0fmemHotplugProbeB\0:\0\"\xc3\x01\n\x14G\
+    uestDetailsResponse\x121\n\x14mem_block_size_bytes\x18\x01\x20\x01(\x04R\
+    \x11memBlockSizeBytesB\0\x129\n\ragent_details\x18\x02\x20\x01(\x0b2\x12\
+    .grpc.AgentDetailsR\x0cagentDetailsB\0\x12;\n\x19support_mem_hotplug_pro\
+    be\x18\x03\x20\x01(\x08R\x16supportMemHotplugProbeB\0:\0\"P\n\x18MemHotp\
+    lugByProbeRequest\x122\n\x13memHotplugProbeAddr\x18\x01\x20\x03(\x04R\
+    \x13memHotplugProbeAddrB\0:\0\"E\n\x17SetGuestDateTimeRequest\x12\x12\n\
+    \x03Sec\x18\x01\x20\x01(\x03R\x03SecB\0\x12\x14\n\x04Usec\x18\x02\x20\
+    \x01(\x03R\x04UsecB\0:\0\"v\n\x07FSGroup\x12\x1b\n\x08group_id\x18\x02\
+    \x20\x01(\rR\x07groupIdB\0\x12L\n\x13group_change_policy\x18\x03\x20\x01\
+    (\x0e2\x1a.types.FSGroupChangePolicyR\x11groupChangePolicyB\0:\0\"\xb3\
+    \x02\n\x07Storage\x12\x18\n\x06driver\x18\x01\x20\x01(\tR\x06driverB\0\
+    \x12'\n\x0edriver_options\x18\x02\x20\x03(\tR\rdriverOptionsB\0\x12\x18\
+    \n\x06source\x18\x03\x20\x01(\tR\x06sourceB\0\x12\x18\n\x06fstype\x18\
+    \x04\x20\x01(\tR\x06fstypeB\0\x12\x1a\n\x07options\x18\x05\x20\x03(\tR\
+    \x07optionsB\0\x12!\n\x0bmount_point\x18\x06\x20\x01(\tR\nmountPointB\0\
+    \x12*\n\x08fs_group\x18\x07\x20\x01(\x0b2\r.grpc.FSGroupR\x07fsGroupB\0\
+    \x12!\n\x0bneed_format\x18\x08\x20\x01(\x08R\nneedFormatB\0\x12!\n\x0bne\
+    ed_resize\x18\t\x20\x01(\x08R\nneedResizeB\0:\0\"\x92\x01\n\x06Device\
+    \x12\x10\n\x02id\x18\x01\x20\x01(\tR\x02idB\0\x12\x14\n\x04type\x18\x02\
+    \x20\x01(\tR\x04typeB\0\x12\x19\n\x07vm_path\x18\x03\x20\x01(\tR\x06vmPa\
+    thB\0\x12'\n\x0econtainer_path\x18\x04\x20\x01(\tR\rcontainerPathB\0\x12\
+    \x1a\n\x07options\x18\x05\x20\x03(\tR\x07optionsB\0:\0\"`\n\nStringUser\
+    \x12\x12\n\x03uid\x18\x01\x20\x01(\tR\x03uidB\0\x12\x12\n\x03gid\x18\x02\
+    \x20\x01(\tR\x03gidB\0\x12(\n\x0eadditionalGids\x18\x03\x20\x03(\tR\x0ea\
+    dditionalGidsB\0:\0\"\xdc\x01\n\x0fCopyFileRequest\x12\x14\n\x04path\x18\
+    \x01\x20\x01(\tR\x04pathB\0\x12\x1d\n\tfile_size\x18\x02\x20\x01(\x03R\
+    \x08fileSizeB\0\x12\x1d\n\tfile_mode\x18\x03\x20\x01(\rR\x08fileModeB\0\
+    \x12\x1b\n\x08dir_mode\x18\x04\x20\x01(\rR\x07dirModeB\0\x12\x12\n\x03ui\
+    d\x18\x05\x20\x01(\x05R\x03uidB\0\x12\x12\n\x03gid\x18\x06\x20\x01(\x05R\
+    \x03gidB\0\x12\x18\n\x06offset\x18\x07\x20\x01(\x03R\x06offsetB\0\x12\
+    \x14\n\x04data\x18\x08\x20\x01(\x0cR\x04dataB\0:\0\"\x16\n\x12GetOOMEven\
+    tRequest:\0\"1\n\x08OOMEvent\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\
+    \x0bcontainerIdB\0:\0\".\n\x0eAddSwapRequest\x12\x1a\n\x07PCIPath\x18\
+    \x01\x20\x03(\rR\x07PCIPathB\0:\0\"\x15\n\x11GetMetricsRequest:\0\"'\n\
+    \x07Metrics\x12\x1a\n\x07metrics\x18\x01\x20\x01(\tR\x07metricsB\0:\0\"D\
+    \n\x12VolumeStatsRequest\x12,\n\x11volume_guest_path\x18\x01\x20\x01(\tR\
+    \x0fvolumeGuestPathB\0:\0\"[\n\x13ResizeVolumeRequest\x12,\n\x11volume_g\
+    uest_path\x18\x01\x20\x01(\tR\x0fvolumeGuestPathB\0\x12\x14\n\x04size\
+    \x18\x02\x20\x01(\x04R\x04sizeB\0:\0\"@\n\nCustomFile\x12\x14\n\x04path\
+    \x18\x01\x20\x01(\tR\x04pathB\0\x12\x1a\n\x07content\x18\x02\x20\x01(\tR\
+    \x07contentB\0:\0*3\n\tStartMode\x12\t\n\x05START\x10\0\x12\x0c\n\x08SNA\
+    PSHOT\x10\x01\x12\x0b\n\x07RESTORE\x10\x02\x1a\0B\0b\x06proto3\
 ";
 
 static file_descriptor_proto_lazy: ::protobuf::rt::LazyV2<::protobuf::descriptor::FileDescriptorProto> = ::protobuf::rt::LazyV2::INIT;
