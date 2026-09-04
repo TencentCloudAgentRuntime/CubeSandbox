@@ -8,6 +8,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -30,6 +33,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/rootfs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/runc"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/taskio"
@@ -188,10 +192,52 @@ func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) (err
 	if er := runc.Clean(ctx, opts.SandboxID); er != nil {
 		result = multierror.Append(result, fmt.Errorf("destroy runc files [%s] fail: %w", sandBoxID, er))
 	}
+	if preparedRoot := os.Getenv("EROX_PREPARED_MOUNT_ROOT"); preparedRoot != "" {
+		if er := releaseEROXPreparedRootFS(ctx, sandBoxID, preparedRoot); er != nil {
+			result = multierror.Append(result, fmt.Errorf("release EROX prepared rootfs [%s]: %w", sandBoxID, er))
+		}
+	}
 	if er := result.ErrorOrNil(); er != nil {
 		return ret.Errorf(errorcode.ErrorCode_RemoveContainerFailed, "%s", er.Error())
 	}
 	return nil
+}
+
+var runEROXPreparedRelease = func(ctx context.Context, instanceRoot string) error {
+	const script = `set -eu
+root=$1
+[ -e "$root" ] || exit 0
+erox=/usr/local/bin/erox-snapshotter
+for target in "$root/image" "$root/rootfs" "$root/image/image" "$root/rootfs/rootfs" "$root/memory/mount" "$root/runtime/mount"; do
+  if [ -f "$target.erox-lazy.json" ] || mountpoint -q "$target"; then
+    "$erox" runtime-unmount --target "$target"
+  fi
+done
+rm -rf -- "$root"`
+	cmd := exec.CommandContext(ctx, "nsenter", "-t", "1", "-m", "-u", "-i", "-n", "-p", "sh", "-ec", script, "release-erox-rootfs", instanceRoot)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("erox release: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func releaseEROXPreparedRootFS(ctx context.Context, sandboxID, trustedRoot string) error {
+	if trustedRoot == "" {
+		return fmt.Errorf("EROX prepared mount root is not configured")
+	}
+	if err := pathutil.ValidateSafeID(sandboxID); err != nil {
+		return fmt.Errorf("invalid sandbox ID")
+	}
+	root, err := filepath.Abs(filepath.Clean(trustedRoot))
+	if err != nil {
+		return fmt.Errorf("resolve EROX prepared mount root: %w", err)
+	}
+	instanceRoot := filepath.Join(root, sandboxID)
+	relative, err := filepath.Rel(root, instanceRoot)
+	if err != nil || relative != sandboxID {
+		return fmt.Errorf("sandbox ID is outside EROX prepared mount root")
+	}
+	return runEROXPreparedRelease(ctx, instanceRoot)
 }
 
 // shouldKeepPausedTombstone is true for Pause post-cleanup Destroy: wipe leftover

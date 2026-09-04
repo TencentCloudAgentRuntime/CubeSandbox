@@ -371,6 +371,9 @@ message ContainerConfig {
   Hooks hooks = 20;
   // CDI
   OCIConfig oci_config = 21;
+  // prepared_rootfs contains node-local read-only EROFS mounts prepared and
+  // integrity-checked by EROX. It bypasses image pull and unpack completely.
+  PreparedRootFS prepared_rootfs = 22;
 }
 
 message OCIConfig {
@@ -1206,4 +1209,11 @@ message SnapshotRuntimeResponse {
   cubelet.services.errorcode.v1.Ret ret = 2;
   string sandboxID = 3;
   string staging_dir = 4;
+}
+
+message PreparedRootFS {
+  // Read-only mount of the base EROFS Image Manifest.
+  string image_mount = 1;
+  // Optional read-only mount of a RootFS Snapshot Manifest.
+  string rootfs_mount = 2;
 }

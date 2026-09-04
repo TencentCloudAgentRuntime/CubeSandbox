@@ -87,15 +87,19 @@ func CheckVmRelativePath(path string) bool {
 	if path == "/" {
 		return true
 	}
+	if preparedRoot := strings.TrimSpace(os.Getenv("EROX_PREPARED_MOUNT_ROOT")); preparedRoot != "" && pathWithinRoot(preparedRoot, path) {
+		return true
+	}
+	return pathWithinRoot(virtioFsSharePath, path)
+}
+
+func pathWithinRoot(root, path string) bool {
 	up := ".." + string(os.PathSeparator)
-	rel, err := filepath.Rel(virtioFsSharePath, path)
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
 	if err != nil {
 		return false
 	}
-	if !strings.HasPrefix(rel, up) && rel != ".." {
-		return true
-	}
-	return false
+	return !strings.HasPrefix(rel, up) && rel != ".."
 }
 
 func GenVirtiofsConfig(shared []string) (*VirtiofsConfig, error) {

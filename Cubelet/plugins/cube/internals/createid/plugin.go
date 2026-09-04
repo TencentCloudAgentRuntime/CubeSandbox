@@ -51,6 +51,9 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 	// Resume-from-pause (and other same-ID recreate paths) pass an explicit
 	// sandbox ID via annotation so the new shim/task reuses the caller's ID.
 	if desired := desiredSandboxID(opts); desired != "" {
+		if err := pathutil.ValidateSafeID(desired); err != nil {
+			return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "invalid desired sandbox id")
+		}
 		opts.SandboxID = desired
 		return nil
 	}

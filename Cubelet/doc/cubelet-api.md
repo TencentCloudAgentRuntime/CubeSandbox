@@ -73,6 +73,7 @@
     - [PortMapping](#cubelet-services-cubebox-v1-PortMapping)
     - [PostStop](#cubelet-services-cubebox-v1-PostStop)
     - [PreStop](#cubelet-services-cubebox-v1-PreStop)
+    - [PreparedRootFS](#cubelet-services-cubebox-v1-PreparedRootFS)
     - [Probe](#cubelet-services-cubebox-v1-Probe)
     - [ProbeHandler](#cubelet-services-cubebox-v1-ProbeHandler)
     - [RLimit](#cubelet-services-cubebox-v1-RLimit)
@@ -491,6 +492,7 @@ Capability contains the container capabilities to add or drop
 | id | [string](#string) |  | container name use by cubebox |
 | hooks | [Hooks](#cubelet-services-cubebox-v1-Hooks) |  | Hooks for the container. |
 | oci_config | [OCIConfig](#cubelet-services-cubebox-v1-OCIConfig) |  | CDI |
+| prepared_rootfs | [PreparedRootFS](#cubelet-services-cubebox-v1-PreparedRootFS) |  | prepared_rootfs contains node-local read-only EROFS mounts prepared and integrity-checked by EROX. It bypasses image pull and unpack completely. |
 
 
 
@@ -1463,6 +1465,22 @@ resource contention and others.
 
 
 
+<a name="cubelet-services-cubebox-v1-PreparedRootFS"></a>
+
+### PreparedRootFS
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| image_mount | [string](#string) |  | Read-only mount of the base EROFS Image Manifest. |
+| rootfs_mount | [string](#string) |  | Optional read-only mount of a RootFS Snapshot Manifest. |
+
+
+
+
+
+
 <a name="cubelet-services-cubebox-v1-Probe"></a>
 
 ### Probe
@@ -1741,6 +1759,7 @@ for a single sandbox.
 | requestID | [string](#string) |  |  |
 | sandboxID | [string](#string) |  |  |
 | staging_dir | [string](#string) |  | Absolute destination for the immutable Runtime staging directory. |
+| stop_after_snapshot | [bool](#bool) |  | Stop the VM task after the Runtime checkpoint is complete while keeping Cube and volume metadata available for storage snapshotting. |
 
 
 

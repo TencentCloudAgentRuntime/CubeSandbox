@@ -150,7 +150,7 @@ spec:
       restartPolicy: OnFailure
       serviceAccountName: {{ include "cube.fullname" . }}-cluster-dns
       {{- include "cube.controlPlanePlacement" . | nindent 6 }}
-      {{- with .Values.imagePullSecrets }}
+{{- with (default .Values.imagePullSecrets .Values.global.imagePullSecrets) }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -201,7 +201,7 @@ spec:
       restartPolicy: OnFailure
       serviceAccountName: {{ include "cube.fullname" . }}-cluster-dns
       {{- include "cube.controlPlanePlacement" . | nindent 6 }}
-      {{- with .Values.imagePullSecrets }}
+{{- with (default .Values.imagePullSecrets .Values.global.imagePullSecrets) }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}

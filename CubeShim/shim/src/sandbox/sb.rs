@@ -832,6 +832,14 @@ impl SandBox {
     }
 
     fn by_snapshot(&self) -> bool {
+        // An explicit restore already carries an exact snapshot path and memory
+        // volume.  The node-local flag only gates opportunistic base snapshots
+        // for normal creates; a fresh node must not turn a requested restore
+        // into a cold boot merely because that optimization was never primed.
+        if self.conf.app_snapshot_restore {
+            return true;
+        }
+
         let anno = self.spec.annotations().as_ref().unwrap();
         if anno.contains_key(config::ANNO_SNAPSHOT_DISABLE) {
             return false;
@@ -1609,6 +1617,16 @@ mod tests {
     use super::normalize_dns_for_agent;
     use super::Log;
     use super::SandBox;
+
+    #[test]
+    fn explicit_app_snapshot_restore_does_not_require_node_snapshot_flag() {
+        let log = Log::default();
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(1);
+        let mut sandbox = SandBox::new("restore-ut".to_string(), log, false, tx);
+        sandbox.conf.app_snapshot_restore = true;
+
+        assert!(sandbox.by_snapshot());
+    }
 
     #[tokio::test]
     async fn test_sandbox_prepare_resource() {

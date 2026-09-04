@@ -170,6 +170,13 @@ func TestCheckVmRelativePath(t *testing.T) {
 	})
 }
 
+func TestCheckVmRelativePathAllowsConfiguredEROXRoot(t *testing.T) {
+	t.Setenv("EROX_PREPARED_MOUNT_ROOT", "/data/awv/snapshots/mounts")
+	require.True(t, CheckVmRelativePath("/data/awv/snapshots/mounts/sandbox-a/image"))
+	require.False(t, CheckVmRelativePath("/data/awv/snapshots/other/sandbox-a/image"))
+	require.False(t, CheckVmRelativePath("/data/awv/snapshots/mounts/../outside"))
+}
+
 func TestPropagationDir(t *testing.T) {
 
 	got := GenPropagationVirtioDirs()

@@ -34,7 +34,7 @@ spec:
       automountServiceAccountToken: false
       dnsPolicy: ClusterFirst
       terminationGracePeriodSeconds: 30
-      {{- with $root.Values.imagePullSecrets }}
+{{- with (default $root.Values.imagePullSecrets $root.Values.global.imagePullSecrets) }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}

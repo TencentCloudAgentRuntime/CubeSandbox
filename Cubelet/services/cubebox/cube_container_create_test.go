@@ -115,6 +115,188 @@ func TestCubeStorageMountsScopesDirectShare(t *testing.T) {
 	require.Equal(t, "/workspace", mounts[1].Destination)
 }
 
+func TestPreparedRootFSLowerDirsUsesLocalReadOnlyMounts(t *testing.T) {
+	trustedRoot := t.TempDir()
+	const sandboxID = "sandbox-a"
+	instanceRoot := filepath.Join(trustedRoot, sandboxID)
+	require.NoError(t, os.Mkdir(instanceRoot, 0o755))
+	imageMount := filepath.Join(instanceRoot, "image")
+	rootfsMount := filepath.Join(instanceRoot, "rootfs")
+	require.NoError(t, os.Mkdir(imageMount, 0o755))
+	require.NoError(t, os.Mkdir(rootfsMount, 0o755))
+	tests := []struct {
+		name     string
+		prepared *cubebox.PreparedRootFS
+		want     []virtiofs.ShareDirMapping
+	}{
+		{
+			name:     "image mount",
+			prepared: &cubebox.PreparedRootFS{ImageMount: imageMount},
+			want: []virtiofs.ShareDirMapping{
+				{SharePath: imageMount, MountPath: "."},
+			},
+		},
+		{
+			name: "rootfs overlays image",
+			prepared: &cubebox.PreparedRootFS{
+				ImageMount:  imageMount,
+				RootfsMount: rootfsMount,
+			},
+			want: []virtiofs.ShareDirMapping{
+				{SharePath: rootfsMount, MountPath: "rootfs"},
+				{SharePath: imageMount, MountPath: "image"},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			config := &cubebox.ContainerConfig{PreparedRootfs: test.prepared}
+			var checked []string
+			got, err := preparedRootFSLowerDirs(config.GetPreparedRootfs(), sandboxID, trustedRoot, func(path string) bool {
+				checked = append(checked, path)
+				return true
+			})
+			require.NoError(t, err)
+			assert.Equal(t, test.want, got)
+			assert.ElementsMatch(t, preparedRootFSMounts(test.prepared), checked)
+		})
+	}
+}
+
+func TestPreparedRootFSLowerDirsRejectsInvalidMounts(t *testing.T) {
+	trustedRoot := t.TempDir()
+	const sandboxID = "sandbox-a"
+	instanceRoot := filepath.Join(trustedRoot, sandboxID)
+	require.NoError(t, os.Mkdir(instanceRoot, 0o755))
+	imageMount := filepath.Join(instanceRoot, "image")
+	rootfsMount := filepath.Join(instanceRoot, "rootfs")
+	require.NoError(t, os.Mkdir(imageMount, 0o755))
+	require.NoError(t, os.Mkdir(rootfsMount, 0o755))
+	tests := []struct {
+		name     string
+		prepared *cubebox.PreparedRootFS
+		writable string
+	}{
+		{
+			name:     "missing image mount",
+			prepared: &cubebox.PreparedRootFS{},
+		},
+		{
+			name:     "relative image mount",
+			prepared: &cubebox.PreparedRootFS{ImageMount: "prepared/image"},
+		},
+		{
+			name: "relative rootfs mount",
+			prepared: &cubebox.PreparedRootFS{
+				ImageMount: imageMount, RootfsMount: "prepared/rootfs",
+			},
+		},
+		{
+			name:     "writable image mount",
+			prepared: &cubebox.PreparedRootFS{ImageMount: imageMount},
+			writable: imageMount,
+		},
+		{
+			name: "writable rootfs mount",
+			prepared: &cubebox.PreparedRootFS{
+				ImageMount: imageMount, RootfsMount: rootfsMount,
+			},
+			writable: rootfsMount,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			_, err := preparedRootFSLowerDirs(test.prepared, sandboxID, trustedRoot, func(path string) bool {
+				return path != test.writable
+			})
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestPreparedRootFSLowerDirsRejectsMountOutsideTrustedRoot(t *testing.T) {
+	trustedRoot := t.TempDir()
+	outside := t.TempDir()
+	_, err := preparedRootFSLowerDirs(&cubebox.PreparedRootFS{ImageMount: outside}, "sandbox-a", trustedRoot, func(string) bool {
+		return true
+	})
+	require.ErrorContains(t, err, "outside EROX sandbox root")
+}
+
+func TestPreparedRootFSImageConfigPreservesOCIConfig(t *testing.T) {
+	stateRoot := t.TempDir()
+	configJSON := `{
+		"architecture":"amd64",
+		"os":"linux",
+		"config":{
+			"Entrypoint":["/usr/bin/agent"],
+			"Cmd":["serve","--foreground"],
+			"Env":["A=1","B=2"],
+			"WorkingDir":"/workspace",
+			"User":"1000:1000",
+			"Labels":{"app":"agent","version":"v1"}
+		}
+	}`
+	require.NoError(t, os.WriteFile(filepath.Join(stateRoot, "image-config.json"), []byte(configJSON), 0o600))
+	prepared := &cubebox.PreparedRootFS{ImageMount: filepath.Join(stateRoot, "image")}
+
+	got, err := preparedRootFSImageConfig(prepared)
+
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, []string{"/usr/bin/agent"}, got.Entrypoint)
+	assert.Equal(t, []string{"serve", "--foreground"}, got.Cmd)
+	assert.Equal(t, []string{"A=1", "B=2"}, got.Env)
+	assert.Equal(t, "/workspace", got.WorkingDir)
+	assert.Equal(t, "1000:1000", got.User)
+	assert.Equal(t, map[string]string{"app": "agent", "version": "v1"}, got.Labels)
+}
+
+func TestPreparedRootFSImageConfigRejectsMissingOrInvalidJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "missing image config", body: ""},
+		{name: "invalid image config", body: `{"config":`},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			stateRoot := t.TempDir()
+			if test.body != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(stateRoot, "image-config.json"), []byte(test.body), 0o600))
+			}
+			_, err := preparedRootFSImageConfig(&cubebox.PreparedRootFS{ImageMount: filepath.Join(stateRoot, "image")})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "prepared rootfs image config")
+		})
+	}
+}
+
+func TestRequestHasPreparedRootFS(t *testing.T) {
+	assert.False(t, requestHasPreparedRootFS(nil))
+	assert.False(t, requestHasPreparedRootFS(&cubebox.RunCubeSandboxRequest{
+		Containers: []*cubebox.ContainerConfig{{}},
+	}))
+	assert.True(t, requestHasPreparedRootFS(&cubebox.RunCubeSandboxRequest{
+		Containers: []*cubebox.ContainerConfig{{PreparedRootfs: &cubebox.PreparedRootFS{ImageMount: "/image"}}},
+	}))
+}
+
+func preparedRootFSMounts(prepared *cubebox.PreparedRootFS) []string {
+	mounts := []string{prepared.GetImageMount()}
+	if prepared.GetRootfsMount() != "" {
+		mounts = append(mounts, prepared.GetRootfsMount())
+	}
+	return mounts
+}
+
 func TestGetMountOptions(t *testing.T) {
 	tests := []struct {
 		name  string

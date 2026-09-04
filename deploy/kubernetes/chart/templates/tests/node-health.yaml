@@ -16,7 +16,7 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
-  {{- with .Values.imagePullSecrets }}
+{{- with (default .Values.imagePullSecrets .Values.global.imagePullSecrets) }}
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -150,7 +150,7 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
-  {{- with .Values.imagePullSecrets }}
+{{- with (default .Values.imagePullSecrets .Values.global.imagePullSecrets) }}
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -189,7 +189,7 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
-  {{- with .Values.imagePullSecrets }}
+{{- with (default .Values.imagePullSecrets .Values.global.imagePullSecrets) }}
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -225,7 +225,7 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
-  {{- with .Values.imagePullSecrets }}
+{{- with (default .Values.imagePullSecrets .Values.global.imagePullSecrets) }}
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -261,7 +261,7 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
-  {{- with .Values.imagePullSecrets }}
+{{- with (default .Values.imagePullSecrets .Values.global.imagePullSecrets) }}
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -303,7 +303,7 @@ metadata:
 spec:
   restartPolicy: Never
   dnsPolicy: ClusterFirst
-  {{- with .Values.imagePullSecrets }}
+{{- with (default .Values.imagePullSecrets .Values.global.imagePullSecrets) }}
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -355,7 +355,7 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
-  {{- with .Values.imagePullSecrets }}
+{{- with (default .Values.imagePullSecrets .Values.global.imagePullSecrets) }}
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -403,7 +403,7 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   restartPolicy: Never
-  {{- with .Values.imagePullSecrets }}
+{{- with (default .Values.imagePullSecrets .Values.global.imagePullSecrets) }}
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}

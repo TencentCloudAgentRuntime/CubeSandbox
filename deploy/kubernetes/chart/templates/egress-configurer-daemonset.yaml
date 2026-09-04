@@ -24,7 +24,7 @@ spec:
       hostNetwork: true
       automountServiceAccountToken: false
       dnsPolicy: ClusterFirstWithHostNet
-      {{- with .Values.imagePullSecrets }}
+{{- with (default .Values.imagePullSecrets .Values.global.imagePullSecrets) }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}

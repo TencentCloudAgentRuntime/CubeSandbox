@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
@@ -167,6 +169,28 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 		annotations[constants.AnnotationsVMOSImagePath] = filepath.Join(e.config.BasePath, "cube-image", "cube-guest-image-cpu.img")
 		annotations[constants.AnnotationsVMAgentPath] = filepath.Join(e.config.BasePath, "cube-agent", "cube-agent.ext4")
 	}
+	var preparedRootFSContainerID string
+	var preparedRootFSMounts []string
+	preparedRootFSContainerCount := 0
+	for _, container := range realReq.GetContainers() {
+		if prepared := container.GetPreparedRootfs(); prepared != nil {
+			preparedRootFSContainerCount++
+			if preparedRootFSContainerID == "" {
+				preparedRootFSContainerID = container.GetId()
+			}
+			preparedRootFSMounts = append(preparedRootFSMounts, prepared.GetImageMount())
+			if prepared.GetRootfsMount() != "" {
+				preparedRootFSMounts = append(preparedRootFSMounts, prepared.GetRootfsMount())
+			}
+		}
+	}
+	if preparedRootFSContainerCount != 1 {
+		preparedRootFSContainerID = ""
+	}
+	preparedRestore, hasPreparedRestore, err := preparedSnapshotRestoreAnnotations(realReq.GetAnnotations(), preparedRootFSContainerID, preparedRootFSMounts)
+	if err != nil {
+		return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+	}
 
 	if flowOpts.IsCreateSnapshot() {
 		annotations[constants.AnnotationAppSnapshotCreate] = "true"
@@ -177,6 +201,10 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 		}
 		specOpts = append(specOpts, oci.WithAnnotations(virtiofsAnnotations))
 
+	} else if hasPreparedRestore {
+		for key, value := range preparedRestore {
+			annotations[key] = value
+		}
 	} else if templateID, ok := flowOpts.GetSnapshotTemplateID(); ok {
 
 		var snapBasePath, snapSpecPath string
@@ -286,6 +314,61 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 	}
 	specOpts = append(specOpts, videoOpts...)
 	return specOpts, nil
+}
+
+func preparedSnapshotRestoreAnnotations(input map[string]string, preparedRootFSContainerID string, preparedRootFSMounts []string) (map[string]string, bool, error) {
+	return preparedSnapshotRestoreAnnotationsUnder(input, preparedRootFSContainerID, preparedRootFSMounts, "/data/awv/snapshots/mounts")
+}
+
+func preparedSnapshotRestoreAnnotationsUnder(input map[string]string, preparedRootFSContainerID string, preparedRootFSMounts []string, mountRoot string) (map[string]string, bool, error) {
+	base := strings.TrimSpace(input[constants.AnnotationVMSnapshotPath])
+	memory := strings.TrimSpace(input[constants.AnnotationVMSnapshotMemoryVolURL])
+	if base == "" {
+		return nil, false, nil
+	}
+	containerID := strings.TrimSpace(input[constants.AnnotationAppSnapshotContainerID])
+	sandboxID := strings.TrimSpace(input[constants.MasterAnnotationRuntimeRestoreSandboxID])
+	if input[constants.AnnotationAppSnapshotRestore] != "true" || memory == "" || containerID == "" || sandboxID == "" || len(preparedRootFSMounts) == 0 {
+		return nil, false, fmt.Errorf("prepared snapshot restore requires restore flag, snapshot base, memory URL and container ID")
+	}
+	if err := pathutil.ValidateSafeID(sandboxID); err != nil {
+		return nil, false, fmt.Errorf("invalid prepared snapshot sandbox ID: %w", err)
+	}
+	if containerID != sandboxID || preparedRootFSContainerID != containerID {
+		return nil, false, fmt.Errorf("prepared snapshot restore container ID must match sandbox and prepared rootfs container")
+	}
+	memoryURL, err := url.Parse(memory)
+	if err != nil || memoryURL.Scheme != "file" || memoryURL.Host != "" || memoryURL.Path == "" {
+		return nil, false, fmt.Errorf("prepared snapshot restore memory URL must be a local file URL")
+	}
+	trustedRoot := filepath.Join(mountRoot, sandboxID)
+	for _, path := range append([]string{base, memoryURL.Path}, preparedRootFSMounts...) {
+		if !pathWithinRoot(path, trustedRoot) {
+			return nil, false, fmt.Errorf("prepared snapshot restore path %q is outside %s", path, trustedRoot)
+		}
+	}
+	return map[string]string{
+		constants.AnnotationAppSnapshotRestore:     "true",
+		constants.AnnotationVMSnapshotPath:         base,
+		constants.AnnotationVMSnapshotMemoryVolURL: memory,
+		constants.AnnotationAppSnapshotContainerID: containerID,
+	}, true, nil
+}
+
+func pathWithinRoot(path, root string) bool {
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(filepath.Clean(root))
+	if err != nil {
+		return false
+	}
+	resolvedPath, err := filepath.EvalSymlinks(filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(resolvedRoot, resolvedPath)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (e *cubeboxInstancePlugin) CreateContainer(ctx context.Context, cubeBox *cubeboxstore.CubeBox, c *cubeboxstore.Container) ([]oci.SpecOpts, error) {

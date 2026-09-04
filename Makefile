@@ -272,7 +272,7 @@ cubelet: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
 	# Cubelet embeds the network runtime and links CubeNet/cubevs; bpf2go outputs
 	# are gitignored, so generate them before compiling cubelet.
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make proto && make build && cp build/cubelet build/cubecli /workspace/_output/bin/'
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace && IN_CUBE_SANDBOX_BUILDER=1 make cubecow-sdk && cd /workspace/CubeNet/cubevs && make gen && cd /workspace/Cubelet && go mod download && make proto && make build && go build -o /workspace/_output/bin/cube-volume-erox-workspace ./cmd/cube-volume-erox-workspace && cp build/cubelet build/cubecli /workspace/_output/bin/'
 
 .PHONY: cubevsmapdump
 cubevsmapdump: builder-image

@@ -60,6 +60,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/virtiofs"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -352,9 +353,11 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		}
 
 		cOpts, err := l.containerSpec(ctxTmp, sandBox, cntrReq, flowOpts, ci, additionalOpt)
-		cOpts = append(cOpts,
-			containerd.WithImageName(ci.Config.Image.Image),
-		)
+		imageName := ci.Config.GetImage().GetImage()
+		if prepared := ci.Config.GetPreparedRootfs(); prepared != nil {
+			imageName = prepared.GetImageMount()
+		}
+		cOpts = append(cOpts, containerd.WithImageName(imageName))
 		if !ci.IsPod {
 			cOpts = append(cOpts, containerd.WithSandbox(ci.SandboxID))
 		}
@@ -515,7 +518,7 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 		err                  error
 	)
 
-	if !flowOpts.IsRetoreSnapshot() {
+	if !flowOpts.IsRetoreSnapshot() || requestHasPreparedRootFS(realReq) {
 		additionalSandboxOpt, err = WithCubeFsAnnotation(ctx, realReq, sandBox)
 		if err != nil {
 			return nil, fmt.Errorf("failed to set cube fs annotation opt: %w", err)
@@ -547,6 +550,18 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 		return nil, fmt.Errorf("failed to generate image reference for cubebox: %w", err)
 	}
 	return additionalSandboxOpt, nil
+}
+
+func requestHasPreparedRootFS(req *cubebox.RunCubeSandboxRequest) bool {
+	if req == nil {
+		return false
+	}
+	for _, container := range req.GetContainers() {
+		if container.GetPreparedRootfs() != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func sandboxDNSLinesFromContainers(realReq *cubebox.RunCubeSandboxRequest) ([]string, error) {
@@ -665,7 +680,15 @@ func (l *local) prepareContainerFiles(ctx context.Context, sandBox *cubeboxstore
 		ctxTmp = context.WithValue(ctxTmp, CubeLog.KeyFunctionType, constants.ContainerTypeContainer)
 	}
 
-	if isImageStorageMediaType(containerReq, cubeimages.ImageStorageMediaType_ext4) {
+	preparedLowerDirs, err := preparedRootFSLowerDirs(
+		containerReq.GetPreparedRootfs(), sandBox.ID, os.Getenv("EROX_PREPARED_MOUNT_ROOT"), virtiofs.IsReadOnlyMount,
+	)
+	if err != nil {
+		return err
+	}
+	if len(preparedLowerDirs) > 0 {
+		mountsConfig.Overlay = virtiofs.GenOverlayMountConfig(preparedLowerDirs)
+	} else if isImageStorageMediaType(containerReq, cubeimages.ImageStorageMediaType_ext4) {
 
 		mountsConfig.PmemFile = pmem.GetRawImageFilePath(flowOpts.ReqInfo.GetInstanceType(), containerReq.GetImage().GetImage())
 		appendExt4NetfileMounts(mountsConfig, flowOpts, containerReq.Name)
@@ -831,7 +854,16 @@ func (l *local) containerOciSpec(ctx context.Context, containerReq *cubebox.Cont
 	}
 
 	imageSpecConfig := &imagespec.ImageConfig{}
-	if !isImageStorageMediaType(containerReq, cubeimages.ImageStorageMediaType_ext4) {
+	if prepared := containerReq.GetPreparedRootfs(); prepared != nil {
+		imageSpecConfig, err = preparedRootFSImageConfig(prepared)
+		if err != nil {
+			return nil, err
+		}
+		specOpts = append(specOpts, oci.WithRootFSPath(prepared.GetImageMount()))
+		if containerReq.GetSecurityContext().GetReadonlyRootfs() {
+			specOpts = append(specOpts, oci.WithRootFSReadonly())
+		}
+	} else if !isImageStorageMediaType(containerReq, cubeimages.ImageStorageMediaType_ext4) {
 		var image cristore.Image
 		image, err = l.criImage.LocalResolve(ctx, containerReq.GetImage().GetImage())
 		if err != nil {
@@ -885,6 +917,25 @@ func (l *local) containerOciSpec(ctx context.Context, containerReq *cubebox.Cont
 	return specOpts, nil
 }
 
+func preparedRootFSImageConfig(prepared *cubebox.PreparedRootFS) (*imagespec.ImageConfig, error) {
+	if prepared == nil || strings.TrimSpace(prepared.GetImageMount()) == "" {
+		return nil, fmt.Errorf("prepared rootfs image config is required")
+	}
+	configPath := filepath.Join(filepath.Dir(filepath.Clean(prepared.GetImageMount())), "image-config.json")
+	body, err := os.ReadFile(configPath) //nolint:gosec // path is derived from the EROX prepared mount handle.
+	if err != nil {
+		return nil, fmt.Errorf("read prepared rootfs image config: %w", err)
+	}
+	if len(body) == 0 || len(body) > 1<<20 {
+		return nil, fmt.Errorf("prepared rootfs image config has invalid size")
+	}
+	var image imagespec.Image
+	if err := json.Unmarshal(body, &image); err != nil {
+		return nil, fmt.Errorf("decode prepared rootfs image config: %w", err)
+	}
+	return &image.Config, nil
+}
+
 func (l *local) containerSpec(ctx context.Context, sandBox *cubeboxstore.CubeBox, containerReq *cubebox.ContainerConfig,
 	flowOpts *workflow.CreateContext, ci *cubeboxstore.Container, additionalOpts []oci.SpecOpts,
 ) ([]containerd.NewContainerOpts, error) {
@@ -892,7 +943,7 @@ func (l *local) containerSpec(ctx context.Context, sandBox *cubeboxstore.CubeBox
 		cOpts []containerd.NewContainerOpts
 	)
 
-	if !constants.IsCubeRuntime(ctx) {
+	if !constants.IsCubeRuntime(ctx) && containerReq.GetPreparedRootfs() == nil {
 		containerdImage, err := l.criImage.EnsureImage(ctx, containerReq.GetImage().GetImage(),
 			containerReq.GetImage().GetUsername(),
 			containerReq.GetImage().GetToken(),
@@ -915,7 +966,9 @@ func (l *local) containerSpec(ctx context.Context, sandBox *cubeboxstore.CubeBox
 	var extendsLabels = map[string]string{
 		constants.LabelContainerImageMedia: containerReq.GetImage().GetStorageMedia(),
 	}
-	if isImageStorageMediaType(containerReq, cubeimages.ImageStorageMediaType_ext4) {
+	if containerReq.GetPreparedRootfs() != nil {
+		extendsLabels[constants.LabelContainerImageMedia] = "erofs"
+	} else if isImageStorageMediaType(containerReq, cubeimages.ImageStorageMediaType_ext4) {
 		extendsLabels[constants.LabelContainerImagePem] = ci.Metadata.Config.GetImage().Image
 		sandBox.AddImageReference(cubeboxstore.ImageReference{
 			ID:     ci.Metadata.Config.GetImage().Image,
@@ -981,7 +1034,7 @@ func genGeneralContainerSpecOpt(ctx context.Context,
 		specOpts = append(specOpts, oci.WithProcessCwd(wkDir))
 	}
 
-	if containerReq.GetEnvs() != nil {
+	if containerReq.GetEnvs() != nil || (containerReq.GetPreparedRootfs() != nil && len(imageSpecConfig.Env) > 0) {
 		specOpts = append(specOpts, env.GenOpt(ctx, containerReq, imageSpecConfig)...)
 	}
 
@@ -1658,6 +1711,71 @@ func isImageStorageMediaType(containerReq *cubebox.ContainerConfig, mediaType cu
 	}
 
 	return toCheck == mediaType.String()
+}
+
+func preparedRootFSLowerDirs(prepared *cubebox.PreparedRootFS, sandboxID, trustedRoot string, isReadOnly func(string) bool) ([]virtiofs.ShareDirMapping, error) {
+	if prepared == nil {
+		return nil, nil
+	}
+	if trustedRoot == "" {
+		return nil, fmt.Errorf("EROX prepared mount root is not configured")
+	}
+	if err := pathutil.ValidateSafeID(sandboxID); err != nil {
+		return nil, fmt.Errorf("sandbox ID is invalid for EROX prepared rootfs")
+	}
+	root, err := filepath.EvalSymlinks(filepath.Clean(trustedRoot))
+	if err != nil {
+		return nil, fmt.Errorf("resolve EROX prepared mount root: %w", err)
+	}
+	if prepared.GetImageMount() == "" {
+		return nil, fmt.Errorf("prepared rootfs image mount is required")
+	}
+
+	instanceRoot := filepath.Join(root, sandboxID)
+	relativeRoot, err := filepath.Rel(root, instanceRoot)
+	if err != nil || relativeRoot != sandboxID {
+		return nil, fmt.Errorf("sandbox ID is outside EROX prepared mount root")
+	}
+
+	paths := []struct {
+		name string
+		path string
+	}{
+		{name: "rootfs", path: prepared.GetRootfsMount()},
+		{name: "image", path: prepared.GetImageMount()},
+	}
+	lowerDirs := make([]virtiofs.ShareDirMapping, 0, len(paths))
+	for _, item := range paths {
+		if item.path == "" {
+			continue
+		}
+		cleaned := filepath.Clean(item.path)
+		if !filepath.IsAbs(item.path) || cleaned != item.path {
+			return nil, fmt.Errorf("prepared rootfs %s mount is not a valid local share path: %s", item.name, item.path)
+		}
+		resolved, resolveErr := filepath.EvalSymlinks(cleaned)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("resolve prepared rootfs %s mount: %w", item.name, resolveErr)
+		}
+		relative, relativeErr := filepath.Rel(instanceRoot, resolved)
+		if relativeErr != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("prepared rootfs %s mount is outside EROX sandbox root: %s", item.name, item.path)
+		}
+		if !isReadOnly(resolved) {
+			return nil, fmt.Errorf("prepared rootfs %s mount is not read-only: %s", item.name, item.path)
+		}
+		lowerDirs = append(lowerDirs, virtiofs.ShareDirMapping{
+			SharePath: resolved,
+			MountPath: item.name,
+		})
+	}
+	// GenVirtiofsConfig shares a single read-only mount as the virtiofs root.
+	// In that case the lower directory is the guest mount root, not its host
+	// basename. Multiple components still use their image/rootfs basenames.
+	if len(lowerDirs) == 1 {
+		lowerDirs[0].MountPath = "."
+	}
+	return lowerDirs, nil
 }
 
 func (l *local) storeNumaQueues(ctx context.Context, cubebox *cubeboxstore.CubeBox, opts *workflow.CreateContext) {

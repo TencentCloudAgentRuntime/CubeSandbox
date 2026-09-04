@@ -17,11 +17,15 @@
 {{- end -}}
 
 {{- define "cube.labels" -}}
-helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | quote }}
+helm.sh/chart: {{ printf "%s-%s" (include "cube.name" .) .Chart.Version | quote }}
 app.kubernetes.io/name: {{ include "cube.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
+
+{{- define "cube.dataRoot" -}}
+{{- default .Values.hostPaths.dataCubeShared .Values.global.dataRoot | clean -}}
 {{- end -}}
 
 {{- define "cube.selectorLabels" -}}
@@ -90,7 +94,8 @@ tolerations:
 {{- end -}}
 
 {{- define "cube.computePlacement" -}}
-{{- with .Values.placement.compute.nodeSelector }}
+{{- $computeNodeSelector := mergeOverwrite (deepCopy .Values.placement.compute.nodeSelector) (default dict .Values.global.nodeSelector) -}}
+{{- with $computeNodeSelector }}
 nodeSelector:
   {{- toYaml . | nindent 2 }}
 {{- end }}
@@ -107,7 +112,8 @@ tolerations:
 {{- define "cube.pvmPlacement" -}}
 {{- $root := . -}}
 {{- $gateEnabled := eq (include "cube.startupGateEnabled" .) "true" -}}
-{{- with .Values.placement.pvm.nodeSelector }}
+{{- $pvmNodeSelector := mergeOverwrite (deepCopy .Values.placement.pvm.nodeSelector) (default dict .Values.global.nodeSelector) -}}
+{{- with $pvmNodeSelector }}
 nodeSelector:
   {{- toYaml . | nindent 2 }}
 {{- end }}
@@ -455,7 +461,8 @@ Call as:
 Precedence:
   1. component.storageClassName if non-empty (always wins)
   2. else persistence.storageClassName (top-level convenience key)
-  3. else empty → omit the field so the cluster default StorageClass applies
+  3. else global.storageClass from an umbrella chart
+  4. else empty → omit the field so the cluster default StorageClass applies
 
 Do not confuse with storageClass.create / storageClass.name (those create a
 chart-owned StorageClass). This helper only picks which SC name a PVC binds to.
@@ -469,6 +476,8 @@ chart-owned StorageClass). This helper only picks which SC name a PVC binds to.
 {{- $component -}}
 {{- else if and .root.Values.persistence .root.Values.persistence.storageClassName -}}
 {{- .root.Values.persistence.storageClassName | toString -}}
+{{- else if and .root.Values.global .root.Values.global.storageClass -}}
+{{- .root.Values.global.storageClass | toString -}}
 {{- end -}}
 {{- end -}}
 
@@ -773,7 +782,7 @@ Toolbox is mounted whole at the fixed path.
 - name: data-snapshot-pack
   mountPath: {{ .Values.hostPaths.dataSnapshotPack }}
 - name: data-cube-shared
-  mountPath: {{ .Values.hostPaths.dataCubeShared }}
+  mountPath: {{ include "cube.dataRoot" . }}
   mountPropagation: Bidirectional
 - name: data-shared
   mountPath: {{ .Values.hostPaths.dataShared }}
@@ -873,7 +882,7 @@ Bootstrap: host mutation mounts for pvm / node-init.
 - name: data-snapshot-pack
   mountPath: {{ .Values.hostPaths.dataSnapshotPack }}
 - name: data-cube-shared
-  mountPath: {{ .Values.hostPaths.dataCubeShared }}
+  mountPath: {{ include "cube.dataRoot" . }}
   mountPropagation: Bidirectional
 - name: data-shared
   mountPath: {{ .Values.hostPaths.dataShared }}
@@ -918,7 +927,7 @@ Bootstrap: host mutation mounts for pvm / node-init.
     type: DirectoryOrCreate
 - name: data-cube-shared
   hostPath:
-    path: {{ .Values.hostPaths.dataCubeShared }}
+    path: {{ include "cube.dataRoot" . }}
     type: DirectoryOrCreate
 - name: data-shared
   hostPath:

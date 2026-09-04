@@ -17,7 +17,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const defaultEROXBinary = "/usr/local/services/cubetoolbox/Cubelet/plugin/erox-snapshotter"
+const defaultEROXBinary = "/proc/1/root/usr/local/bin/erox-snapshotter"
+const legacyEROXBinary = "/usr/local/services/cubetoolbox/Cubelet/plugin/erox-snapshotter"
 const defaultAWVStateDir = "/data/cubelet/awv-state"
 
 type privateData struct {
@@ -76,7 +77,7 @@ func (r execRunner) run(env []string, args ...string) ([]byte, error) {
 func main() {
 	binary := strings.TrimSpace(os.Getenv("EROX_SNAPSHOTTER_BIN"))
 	if binary == "" {
-		binary = defaultEROXBinary
+		binary = resolveEROXBinary(os.Stat)
 	}
 	ops := mountOps{mount: unix.Mount, unmount: unix.Unmount, inspect: inspectMount}
 	resolve := func(volumeID string) (string, error) { return resolveAWVDevice(defaultAWVStateDir, volumeID) }
@@ -84,6 +85,13 @@ func main() {
 		_, _ = fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func resolveEROXBinary(stat func(string) (os.FileInfo, error)) string {
+	if _, err := stat(defaultEROXBinary); err == nil {
+		return defaultEROXBinary
+	}
+	return legacyEROXBinary
 }
 
 func run(args []string, output io.Writer, resolve func(string) (string, error), validate func(string) error, ops mountOps, runner commandRunner) error {
@@ -354,8 +362,15 @@ func detach(output io.Writer, raw string, refs int64, ops mountOps, runner comma
 }
 
 func isWorkspaceNotFound(err error, workspaceID string) bool {
-	want := "workspace " + strings.ToLower(strings.TrimSpace(workspaceID)) + " not found"
-	return err != nil && workspaceID != "" && strings.Contains(strings.ToLower(err.Error()), want)
+	id := strings.ToLower(strings.TrimSpace(workspaceID))
+	if err == nil || id == "" {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	legacy := "workspace " + id + " not found"
+	current := `workspace "` + id + `"`
+	return strings.Contains(message, legacy) ||
+		(strings.Contains(message, "not found") && strings.Contains(message, current))
 }
 
 func resolveAWVDevice(stateDir, volumeID string) (string, error) {

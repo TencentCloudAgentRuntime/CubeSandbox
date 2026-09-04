@@ -207,6 +207,21 @@ func TestDetachUnmountsAWVWhenEROXWorkspaceIsAlreadyRemoved(t *testing.T) {
 	}
 }
 
+func TestDetachAcceptsCurrentWorkspaceNotFoundError(t *testing.T) {
+	runner := &recordingRunner{errors: map[string]error{
+		"workspace-status": errors.New(`workspace-status: not found: workspace "workspace-1"`),
+	}}
+	var unmounted string
+	err := detach(&bytes.Buffer{}, `{"mount_path":"/volume/workspace-1","workspace_root":"/volume/workspace-1/.erox","workspace_id":"workspace-1"}`, 0,
+		mountOps{unmount: func(path string, _ int) error { unmounted = path; return nil }}, runner)
+	if err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+	if unmounted != "/volume/workspace-1" || len(runner.calls) != 1 {
+		t.Fatalf("unmounted = %q, calls = %#v", unmounted, runner.calls)
+	}
+}
+
 func TestAttachRejectsMissingCheckpoint(t *testing.T) {
 	err := run([]string{
 		"--op", "attach",
@@ -252,8 +267,25 @@ func TestSnapshotDetachesAndCommitsWorkspace(t *testing.T) {
 	}
 }
 
-func TestDefaultEROXBinaryIsVisibleInCubeletToolbox(t *testing.T) {
-	if defaultEROXBinary != "/usr/local/services/cubetoolbox/Cubelet/plugin/erox-snapshotter" {
-		t.Fatalf("defaultEROXBinary = %q", defaultEROXBinary)
+func TestResolveEROXBinary(t *testing.T) {
+	temp := filepath.Join(t.TempDir(), "erox-snapshotter")
+	if err := os.WriteFile(temp, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(temp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostStat := func(path string) (os.FileInfo, error) {
+		if path == defaultEROXBinary {
+			return info, nil
+		}
+		return nil, os.ErrNotExist
+	}
+	if got := resolveEROXBinary(hostStat); got != defaultEROXBinary {
+		t.Fatalf("resolveEROXBinary(host) = %q", got)
+	}
+	if got := resolveEROXBinary(func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }); got != legacyEROXBinary {
+		t.Fatalf("resolveEROXBinary(legacy) = %q", got)
 	}
 }

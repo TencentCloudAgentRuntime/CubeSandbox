@@ -25,7 +25,7 @@ spec:
       {{- end }}
     spec:
       terminationGracePeriodSeconds: 5
-      {{- with .Values.imagePullSecrets }}
+{{- with (default .Values.imagePullSecrets .Values.global.imagePullSecrets) }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}

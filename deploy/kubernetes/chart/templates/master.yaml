@@ -19,7 +19,7 @@ spec:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: master
     spec:
-      {{- with .Values.imagePullSecrets }}
+{{- with (default .Values.imagePullSecrets .Values.global.imagePullSecrets) }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
