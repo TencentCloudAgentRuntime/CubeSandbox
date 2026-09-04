@@ -64,6 +64,11 @@ const DEFAULT_RUNTIMECLASS_OVERHEAD_CONFIG: &str = "/etc/cubesandbox/runtimeclas
 // operator contract and therefore fail closed instead of being silently
 // increased.
 const MINIMUM_VM_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
+// The sandbox CRI request is created before its containers, so the aggregate
+// memory field commonly contains RuntimeClass overhead only. Keep the
+// supported 256 MiB explicit floor, but default unannotated sandboxes to a
+// guest large enough for a 200 MB container workload and its rootfs page cache.
+const DEFAULT_VM_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
 // Linux 6.6 on the supported x86_64 PoC nodes defines PIDS_MAX as
 // PID_MAX_LIMIT + 1 and rejects numeric pids.max values >= PIDS_MAX.
 pub(crate) const LINUX_PIDS_MAX_LIMIT: u64 = 4_194_304;
@@ -2084,8 +2089,8 @@ fn resources_from_config(
         .map(|resources| resources.memory_limit_in_bytes)
         .filter(|memory| *memory > 0)
         .map(|memory| memory as u64)
-        .unwrap_or(MINIMUM_VM_MEMORY_BYTES)
-        .max(MINIMUM_VM_MEMORY_BYTES);
+        .unwrap_or(DEFAULT_VM_MEMORY_BYTES)
+        .max(DEFAULT_VM_MEMORY_BYTES);
     let memory_bytes = match configured.as_ref().and_then(|value| value.memory) {
         Some(memory_mib) => {
             let memory_bytes = memory_mib
@@ -3132,14 +3137,14 @@ mod tests {
     }
 
     #[test]
-    fn vm_resources_default_to_poc_floor() {
+    fn vm_resources_use_default_when_cri_has_no_aggregate() {
         let config = CriPodSandboxConfig {
             metadata: sample_cri().metadata,
             ..Default::default()
         };
         let resources = resources_from_config(&HashMap::new(), &config).unwrap();
         assert_eq!(resources.vcpu_count, 1);
-        assert_eq!(resources.memory_bytes, MINIMUM_VM_MEMORY_BYTES);
+        assert_eq!(resources.memory_bytes, DEFAULT_VM_MEMORY_BYTES);
     }
 
     #[test]
@@ -3155,7 +3160,7 @@ mod tests {
             .memory_limit_in_bytes = 64 * 1024 * 1024;
 
         let inferred = resources_from_config(&HashMap::new(), &config).unwrap();
-        assert_eq!(inferred.memory_bytes, MINIMUM_VM_MEMORY_BYTES);
+        assert_eq!(inferred.memory_bytes, DEFAULT_VM_MEMORY_BYTES);
 
         let annotations = HashMap::from([(
             ANNO_VM_RES.to_string(),
