@@ -745,7 +745,13 @@ fn run_worker(
         );
         if result.is_ok() && !hello_complete {
             hello_complete = true;
-            set_socket_timeout(control.as_raw_fd(), COMMAND_TIMEOUT_SECS)?;
+            // The worker is a long-lived server and an idle control channel is
+            // healthy.  Keep writes bounded in case the still-live parent
+            // stops reading, but never treat the absence of a new request as
+            // a protocol failure.  The client endpoint retains its bounded
+            // request/response timeout.
+            set_socket_receive_timeout(control.as_raw_fd(), 0)?;
+            set_socket_send_timeout(control.as_raw_fd(), COMMAND_TIMEOUT_SECS)?;
         }
         let poisoned = poison_on_error && result.is_err();
         let response = WorkerResponse {
@@ -1109,26 +1115,37 @@ fn set_cloexec(fd: RawFd) -> CResult<()> {
 }
 
 fn set_socket_timeout(fd: RawFd, seconds: i64) -> CResult<()> {
+    set_socket_receive_timeout(fd, seconds)?;
+    set_socket_send_timeout(fd, seconds)
+}
+
+fn set_socket_receive_timeout(fd: RawFd, seconds: i64) -> CResult<()> {
+    set_socket_option_timeout(fd, libc::SO_RCVTIMEO, seconds)
+}
+
+fn set_socket_send_timeout(fd: RawFd, seconds: i64) -> CResult<()> {
+    set_socket_option_timeout(fd, libc::SO_SNDTIMEO, seconds)
+}
+
+fn set_socket_option_timeout(fd: RawFd, option: libc::c_int, seconds: i64) -> CResult<()> {
     let timeout = libc::timeval {
         tv_sec: seconds,
         tv_usec: 0,
     };
-    for option in [libc::SO_RCVTIMEO, libc::SO_SNDTIMEO] {
-        let result = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                option,
-                (&timeout as *const libc::timeval).cast(),
-                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
-            )
-        };
-        if result < 0 {
-            return Err(format!(
-                "set cube-vmm-worker socket timeout: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            option,
+            (&timeout as *const libc::timeval).cast(),
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        )
+    };
+    if result < 0 {
+        return Err(format!(
+            "set cube-vmm-worker socket timeout: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     Ok(())
 }
@@ -1782,6 +1799,67 @@ mod tests {
             .unwrap()
             .unwrap_err()
             .contains("receive worker packet"));
+    }
+
+    #[test]
+    fn worker_clears_receive_timeout_after_hello() {
+        let (control_parent, control_child) = seqpacket_pair().unwrap();
+        let control_probe = control_child.try_clone().unwrap();
+        let (_event_parent, event_child) = seqpacket_pair().unwrap();
+        set_socket_receive_timeout(control_child.as_raw_fd(), HELLO_TIMEOUT_SECS).unwrap();
+        let parent_pid = std::process::id();
+        let worker = std::thread::spawn(move || {
+            run_worker(
+                control_child,
+                event_child,
+                "expected-nonce".to_string(),
+                parent_pid,
+            )
+        });
+
+        let request = WorkerRequest {
+            magic: PROTOCOL_MAGIC.to_string(),
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+            command: WorkerCommand::Hello(HelloConfig {
+                nonce: "expected-nonce".to_string(),
+                parent_pid,
+            }),
+        };
+        send_packet(
+            control_parent.as_raw_fd(),
+            &serde_json::to_vec(&request).unwrap(),
+            &[],
+        )
+        .unwrap();
+        let (payload, descriptors) = recv_packet(control_parent.as_raw_fd()).unwrap().unwrap();
+        assert!(descriptors.is_empty());
+        let response: WorkerResponse = serde_json::from_slice(&payload).unwrap();
+        assert!(matches!(response.result, Ok(WorkerReply::Empty)));
+
+        let mut timeout = libc::timeval {
+            tv_sec: -1,
+            tv_usec: -1,
+        };
+        let mut length = std::mem::size_of::<libc::timeval>() as libc::socklen_t;
+        assert_eq!(
+            unsafe {
+                libc::getsockopt(
+                    control_probe.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVTIMEO,
+                    (&mut timeout as *mut libc::timeval).cast(),
+                    &mut length,
+                )
+            },
+            0
+        );
+        assert_eq!(timeout.tv_sec, 0);
+        assert_eq!(timeout.tv_usec, 0);
+
+        drop(control_probe);
+        drop(control_parent);
+        worker.join().unwrap().unwrap();
     }
 
     #[test]
