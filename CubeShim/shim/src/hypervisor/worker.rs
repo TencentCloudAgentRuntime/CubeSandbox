@@ -658,6 +658,7 @@ fn run_worker(
     expected_parent_pid: u32,
 ) -> CResult<()> {
     let mut vmm: Option<cube_hypervisor::VmmInstance> = None;
+    let mut pending_vm_fds = PendingVmFds::default();
     let mut hello_complete = false;
     let mut next_request_id = 1_u64;
 
@@ -735,7 +736,13 @@ fn run_worker(
             request.command,
             WorkerCommand::Hello(_) | WorkerCommand::Ping
         );
-        let result = execute_command(&mut vmm, request.command, descriptors, &event);
+        let result = execute_command(
+            &mut vmm,
+            &mut pending_vm_fds,
+            request.command,
+            descriptors,
+            &event,
+        );
         if result.is_ok() && !hello_complete {
             hello_complete = true;
             set_socket_timeout(control.as_raw_fd(), COMMAND_TIMEOUT_SECS)?;
@@ -766,6 +773,7 @@ fn run_worker(
 
 fn execute_command(
     vmm: &mut Option<cube_hypervisor::VmmInstance>,
+    pending_vm_fds: &mut PendingVmFds,
     command: WorkerCommand,
     descriptors: Vec<OwnedFd>,
     event_fd: &OwnedFd,
@@ -826,12 +834,19 @@ fn execute_command(
             Ok(WorkerReply::Empty)
         }
         WorkerCommand::CreateVm(mut config) => {
-            install_vm_fds(&mut config, &descriptors)?;
-            send_vmm(vmm, ApiRequest::VmCreate(Box::new(config)), "create VM")?;
+            pending_vm_fds.install(&mut config, descriptors)?;
+            if let Err(error) = send_vmm(vmm, ApiRequest::VmCreate(Box::new(config)), "create VM") {
+                pending_vm_fds.abort();
+                return Err(error);
+            }
             Ok(WorkerReply::Empty)
         }
         WorkerCommand::BootVm => {
             send_vmm(vmm, ApiRequest::VmBoot, "boot VM")?;
+            // Net::from_tap_fds() duplicates each donated descriptor while
+            // handling VmBoot. Keep the SCM_RIGHTS-owned originals alive
+            // until that synchronous response proves the duplication is done.
+            pending_vm_fds.complete_boot();
             Ok(WorkerReply::Empty)
         }
         WorkerCommand::JoinVmm => {
@@ -895,6 +910,7 @@ fn execute_command(
         }
         WorkerCommand::DeleteVm => {
             send_vmm(vmm, ApiRequest::VmDelete, "delete VM")?;
+            pending_vm_fds.abort();
             Ok(WorkerReply::Empty)
         }
         WorkerCommand::PauseToSnapshot(config) => {
@@ -996,6 +1012,30 @@ fn install_vm_fds(config: &mut VmConfig, descriptors: &[OwnedFd]) -> CResult<()>
         return Err("CreateVm FD slots do not cover every received descriptor".to_string());
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct PendingVmFds {
+    descriptors: Option<Vec<OwnedFd>>,
+}
+
+impl PendingVmFds {
+    fn install(&mut self, config: &mut VmConfig, descriptors: Vec<OwnedFd>) -> CResult<()> {
+        if self.descriptors.is_some() {
+            return Err("CreateVm descriptors are already pending VmBoot".to_string());
+        }
+        install_vm_fds(config, &descriptors)?;
+        self.descriptors = Some(descriptors);
+        Ok(())
+    }
+
+    fn abort(&mut self) {
+        self.descriptors = None;
+    }
+
+    fn complete_boot(&mut self) {
+        self.descriptors = None;
+    }
 }
 
 fn seqpacket_pair() -> CResult<(OwnedFd, OwnedFd)> {
@@ -1423,6 +1463,71 @@ mod tests {
         assert_eq!(actual, payload);
         assert_eq!(descriptors.len(), 1);
         assert!(unsafe { libc::fcntl(descriptors[0].as_raw_fd(), libc::F_GETFD) } >= 0);
+    }
+
+    #[test]
+    fn vm_fd_stays_open_until_boot_completes() {
+        let (sender, receiver) = seqpacket_pair().unwrap();
+        let file = File::open("/dev/null").unwrap();
+        send_packet(sender.as_raw_fd(), b"tap", &[file.as_raw_fd()]).unwrap();
+        let (_, descriptors) = recv_packet(receiver.as_raw_fd()).unwrap().unwrap();
+        let received_fd = descriptors[0].as_raw_fd();
+
+        let mut config = VmConfig::default();
+        config.net = Some(vec![cube_hypervisor::vm_config::NetConfig {
+            fds: Some(vec![0]),
+            ..Default::default()
+        }]);
+        let mut pending = PendingVmFds::default();
+        pending.install(&mut config, descriptors).unwrap();
+
+        assert_eq!(config.net.unwrap()[0].fds.as_ref().unwrap(), &[received_fd]);
+        assert!(unsafe { libc::fcntl(received_fd, libc::F_GETFD) } >= 0);
+        assert!(pending
+            .install(&mut VmConfig::default(), Vec::new())
+            .unwrap_err()
+            .contains("already pending"));
+
+        pending.complete_boot();
+        assert_eq!(unsafe { libc::fcntl(received_fd, libc::F_GETFD) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EBADF)
+        );
+    }
+
+    #[test]
+    fn vm_fd_delete_releases_pending_and_allows_create_again() {
+        let first: OwnedFd = File::open("/dev/null").unwrap().into();
+        let first_fd = first.as_raw_fd();
+        let mut first_config = VmConfig::default();
+        first_config.net = Some(vec![cube_hypervisor::vm_config::NetConfig {
+            fds: Some(vec![0]),
+            ..Default::default()
+        }]);
+        let mut pending = PendingVmFds::default();
+        pending.install(&mut first_config, vec![first]).unwrap();
+
+        pending.abort();
+        assert_eq!(unsafe { libc::fcntl(first_fd, libc::F_GETFD) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EBADF)
+        );
+
+        let second: OwnedFd = File::open("/dev/null").unwrap().into();
+        let second_fd = second.as_raw_fd();
+        let mut second_config = VmConfig::default();
+        second_config.net = Some(vec![cube_hypervisor::vm_config::NetConfig {
+            fds: Some(vec![0]),
+            ..Default::default()
+        }]);
+        pending.install(&mut second_config, vec![second]).unwrap();
+        assert_eq!(
+            second_config.net.unwrap()[0].fds.as_ref().unwrap(),
+            &[second_fd]
+        );
+        assert!(unsafe { libc::fcntl(second_fd, libc::F_GETFD) } >= 0);
     }
 
     #[test]
