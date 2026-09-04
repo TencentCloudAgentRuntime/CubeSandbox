@@ -2,130 +2,76 @@
 
 ## 当前 Stage
 
-S5.4a `IN_PROGRESS`，S5.3a `VALIDATING`。`K8S-OQ-031` 已关闭：CubeShim 是唯一编排者和
-sandbox leaf/scope owner，Cubelet 只持 RuntimeResource，`cube-vmm-worker` 不直接调用 Cubelet。
-最新计划先短回归已有 SIGKILL、sysctl、cpuset 和 sidecar 修复，随后冻结普通启动 IPC 与一秒
-SLO，立即完成 worker 拆分和普通启动优化，再在新 worker 路径收口 Node E2E。RuntimeTemplate、
-PodSnapshot 和 Pause/Resume 全部放在该轮 E2E 之后讨论，不再作为 worker 实现的前置门槛。
-首轮 477 项 full-4 的 357/41/79 仍只是旧嵌入式 VMM 基线，不是最终验收轮。
+S5.3b `IN_PROGRESS`；S5.4a、S5.4b、S5.4c 均为 `DONE`。普通启动的 worker 架构与 E2E
+入口性能门禁已经关闭，当前只在该 worker 快路径上收口 Kubernetes v1.36.4 官方
+NodeConformance。RuntimeTemplate、PodSnapshot 和 Pause/Resume 保持延期到 S5.3c 完成后的
+S6.1，不阻塞本轮 E2E。
 
 ## 基线
 
-最后一项已完成云端构建验证的实现 commit 为 `8dc39f77`；最新计划/架构决定 commit 为
-`7ea87708`；S3.4c 最终证据 commit 为 `24d2d188`。W1 尚未部署本轮候选，当前 CubeShim/Agent ext4 SHA-256 为
-`e0052c7e…`/`c768706b…`；`cube-runtime`
-保持既有制品；运行时根为
-`/opt/cubesandbox-s0-multinode-runtime-2269a3b3`。W1 PVM Guest kernel SHA-256 为
-`633bb982…`，旧 `f9ecd86a…` 已保留为可回滚副本。
+最后验证实现为 `fa278467d5bf7100eadd3a3004b19446f87d6dcb`，tree 为
+`d118d11a2a0ff4074458a7c3ecb795e03f2eb85a`。W2 已部署该版本；Shim/worker/runtime SHA-256
+分别为 `dbb52f29…`、`693ecffd…`、`9aac8c8d…`，回滚目录为
+`/opt/cubesandbox-s0-multinode-runtime-2269a3b3/backups/s54-fastpath-20260904T211438Z`。
+W1 仍是上一版 `94c01e21` 三个 runtime 二进制，PVM Guest kernel SHA-256 为 `633bb982…`；
+部署 S5.3b 候选时必须保留 W1 的 Agent、kernel 和既有回滚副本，只替换三个 runtime 二进制。
 
 ## 已完成
 
-S0、S1、S2、S3.1～S3.4d 均为 `DONE`。S3.4d 已关闭
-`K8S-OQ-015/016/017/021`，完成生命周期 fence、受控 restart/resize/long-exec、
-ephemeral-storage、QoS/多容器双层数值和最终清理；
-两个 Worker 均为 0 sandbox/VM/CNI/shim/mount/active lease，集群 3/3 Ready。
+S0、S1、S2、S3.1～S3.4d、S5.4a～S5.4c 已完成。S5.4b 把 VMM、vCPU、virtiofs 和 Guest
+memory 拆入每 Pod 一个 `cube-vmm-worker`，并通过双节点、多容器、restart、kill、cancel、
+embedded rollback 与 exact-zero。S5.4c 把正常 Pod 启动的 `systemctl show` 从 264 次降到 0；
+串行 50/50 的 PodScheduled→Ready P95 为 1935.438ms、RunPodSandbox P95 为 1575.632ms，
+5×10 并发为 50/50，全部 PullImage=0。restart、worker/Shim SIGKILL 和 5 Pod 创建取消后均
+exact-zero。同一 reviewer `PASS`，P0/P1/P2=0/0/1；完整证据见
+[S5.4b](./evidence/s5.4/s5.4b-worker-split.md) 与
+[S5.4c](./evidence/s5.4/s5.4c-startup-fastpath.md)。
 
 ## 未完成
 
-S5.3a 尚需部署 `8dc39f77`/`a2626846` 并完成拆分前定向回归；S5.4a 尚未冻结 worker IPC、
-启动 gate、普通 boot 详细 crash/reconnect 表和一秒 SLO；进程、cgroup 和组件所有权已经冻结。
-S5.4b/c 的 worker 拆分与普通启动优化、S5.3b/c 的支持面/最终 Node E2E、S6.1～S6.4 的
-模板/快照/暂停恢复讨论与实现、
-S5.4d 一秒终验均未开始。完整顺序和逐项验收标准以开发计划的“S5.3/S5.4 剩余实现单元与
-执行顺序”为准。
+S5.3b 需要在 W1 部署 `fa278467` 后，把官方 NodeConformance 拆成有界 shard 全部执行，并将
+支持面缺陷、明确不支持项、runner/环境问题分开。上一轮 full-4 在 6 小时 timeout 前执行
+398/477：357 Passed、41 Failed、79 未执行；这只是旧路径基线，不能作为最终结果。已知首个
+缺口是 Guest 缺少 `/etc/hostname`（`K8S-OQ-033`）；另有 tmpfs mount identity、host namespace、
+私有镜像、stats/metrics、网络、sidecar、CPU Manager 等旧失败需要逐项定向重跑。
 
-当前 S5.3 尚未形成最终支持面通过率、环境清理证据和 reviewer 结论。full-4 中有 10 项为
-memory EmptyDir 在 Guest 中呈现 FUSE mount identity 的已知兼容性缺口，按
-`K8S-OQ-025` 记录；不影响内容、权限和清理，但会失败于标准 `tmpfs` 类型断言。其余失败
-仍需完成定向回归与逐项归因；79 项因 suite timeout 未执行。
+S5.3c 需要汇总所有 shard、保证支持面失败为 0、逐条解释排除项，恢复临时 e2e 配置并证明双
+Worker exact-zero。S6.1～S6.4 与最终一秒门禁 S5.4d 均未开始；普通启动当前约 1.94 秒 P95，
+一秒目标仍需后续 template/restore 快路径。
 
 ## 验证
 
-S3.4d 最终验证：`inv-v86nregacb` 在 `10b7af56` 完成 identity replacement、service
-163/163 与 all-targets；`inv-686nvg0va4`/`inv-886nvfg6v6` 将同一 Shim 部署到双 Worker；
-`inv-686k7g02nv` 默认规格启动即 OOM 8/8 为 `OOMKilled/137`；
-`inv-v86ksj0ndb` 完成 restart/两次 resize/受控长 exec；`inv-686ktxgext`、
-`inv-886ku00590`、`inv-a86kufg720` 完成 Guest/Host 组合矩阵；
-`inv-086ncr074p` 完成最终 lifecycle regression；`inv-a86ndt0pkt`/`inv-a86nds0c3q` 双
-Worker exact zero；`inv-v86nea09kv` 为 3/3 Ready。完整证据见
-[S3.4d 摘要](./evidence/s3.4/s3.4d-execution-summary.md)。
-
-S5.3 已完成的关键验证：`1df1da09` 在 W1 的定向与全量回归通过；错误模式基线
-`inv-686q27g8sp` 在 39 项中得到 33 通过、6 失败后主动终止，证明 containerd 缺省
-handler 不会让 kubelet 计入 RuntimeClass overhead；`inv-b86t69gf00` 验证 Kubernetes
-v1.36 原生 MutatingAdmissionPolicy 会在 `e2e-framework` namespace 注入 `cube` 且得到
-256Mi overhead/节点选择器；`inv-386td0gr45` 的 7 项门禁为 6 通过、1 失败，标准
-NodeConformance OOM、Downward API、privileged HostPath/subPath 均通过，唯一失败是不属于
-NodeConformance 的 NodeAllocatable Host OOM 差异。`inv-b86w410u0n` 已证明官方测试能把
-`/root/kubelet-config` 改为 30s、重启临时 unit，并恢复为 20s，结果 1/1 通过。
-`inv-686tgvghci` 主动停止时为 32 通过、4 个实际失败和 1 个中断：两项已执行的 tmpfs
-identity 差异、旧 kubelet 配置路径问题及 `PrivilegedPod` dummy netdev 缺口。新一轮前
-`inv-b86w4kgh72` 的 Cube Sandbox/VM/shim/TAP/mount/active lease 全为 0。
-`f9120d79` 将 x86 BM/PVM Guest 的 `CONFIG_DUMMY` 改为内建；`inv-b86w9i084p` 的 PVM
-构建产物 SHA-256 为 `633bb982…`，`inv-v86wfwg2wn` 保留旧 kernel 后部署；官方
-`PrivilegedPod` `inv-v86wga0nm0` 为 1/1 通过，`inv-986wi0gicj` 最终 exact-zero。
-
-full-4 `inv-a86wisgb60` 运行满 21600 秒，最终 `Ran 398 of 1197 Specs`，结果为
-357 Passed、41 Failed、799 Skipped，并生成 ginkgo.json SHA-256 `f641f3bb…` 与 junit.xml
-SHA-256 `c0c48906…`。其中 SIGKILL、Pod sysctl 与多项 sidecar 退出码由 `6d9c021a` 修复；
-CPU Manager 暴露 host cpuset `2` 超出双 vCPU Guest `0-1`，`8dc39f77` 增加 Pod 级稳定
-host→Guest CPU/NUMA 映射。云构建 `inv-6876060ap8` 已通过 cpuset 4/4、service 164/164、
-all-targets 和 release build，Shim SHA-256 为 `550d5f35…`；尚未部署到 W1。
-
-热启动诊断 `inv-9887r90bir` 使用已缓存 busybox、单容器、无 probe 的 5 个串行 Cube Pod，
-client create→Ready 为 6459～6491ms，平均 6474ms；kubelet 增量中 `RunPodSandbox` 平均
-6024ms，`CreateContainer`/`StartContainer` 平均 12/36ms，镜像拉取为 0。CubeShim 内部
-Guest 到 vsock ready 平均 1130ms，Cloud Hypervisor BootVm API 平均 18ms，Agent
-CreateSandbox 平均 7ms。`inv-8887w0ggbr`/`inv-98880agrwj` 的进程追踪发现单 Pod 启动
-触发 264 次同步 `systemctl show`，反复执行 Host cgroup/lifecycle 稳定性校验，是约 4.5 秒
-未优化开销的主因；Cilium CNI 约 104ms，RuntimeResource 网络准备约 64ms。测量 namespace
-已由 `inv-v88827gg63` 删除，`inv-b8882igpkh` 确认 CRI Pod/container 均为 0。
-
-S5.4a 所有权决定由 `7ea87708` 记录：CubeShim 独占编排与 sandbox leaf/scope，Cubelet 只持
-RuntimeResource，worker 不直接调用 Cubelet；`npm run docs:build` 已通过。该提交只冻结架构
-边界，普通启动 IPC、SLO 和 worker 实现尚未验收。
+- 代码：Host cgroup 78/78、完整 Shim lib 288/288、worker process 1/1、fmt/diff check 通过。
+- build/deploy：`inv-9896bxggdx`、`inv-0896gx0uqt`。
+- 热路径 trace：`inv-b896kd0dc3`，`SYSTEMCTL_TOTAL=0`、`SYSTEMCTL_SHOW_TOTAL=0`。
+- 串行/并发：`inv-8896px02qi`、`inv-a896ubgp5c`。
+- 故障与清理：containerd/RuntimeResource restart `inv-8896vq0h35`/`inv-b896vt0di3`；
+  worker kill `inv-0896we0txv`；Shim kill `inv-v896wugbga`；cancel `inv-6896x80ii2`；最终
+  exact-zero `inv-0896xd0qnv`。
+- 当前集群 control 不注册为 Node，W1/W2 均 Ready；W1 的 `kubelet-e2e.service` active、
+  `kubelet.service` inactive，W2 使用普通 kubelet。W1 当前 Cube Shim/worker 为 0；CRI 列表中的
+  10 Pod/17 container 是 runc 系统负载，不是 Cube 残留。
 
 ## 阻塞
 
-无当前外部阻塞。`K8S-OQ-031` 已冻结 worker 的创建、放置、控制和回收边界；S5.4a 进入
-worker 实现前仍需细化版本化普通 boot IPC/启动 gate，并由 `K8S-OQ-032` 冻结默认一秒口径。
-S5.4 仅保留
-版本化 IPC、稳定设备槽位和显式 FD handoff 扩展缝；`K8S-OQ-008` 的快照切点、设备重绑定、
-artifact owner 和应用一致性已延期到完成 Node E2E 后的 S6.1，不阻塞 worker。`K8S-OQ-028`
-已关闭。首轮完整 NodeConformance 已因 6 小时
-suite timeout 结束；后续通过先跑已修复项与 runner 门禁、再跑支持面回归来避免重复耗时。
-P1 已知限制为持续长 exec + 同容器 resize 仍可能使首次
-Update/探针超时；kubelet 重试后 resize 收敛，资源可精确清理。该组合不属于首版支持面，
-在 `K8S-OQ-022` 转 S5.4 整改。另有 12 Sandbox 创建即取消的瞬时 `FailedKillPod`，重试
-后 exact-zero，按 `K8S-OQ-023` 转 S5.4。二者均不阻断基础 E2E。
-当前缓存镜像 Pod 热启动约 6.5 秒，其中 Host cgroup/lifecycle 重复稳定性校验为主要开销，
-按 `K8S-OQ-030` 转 S5.4 优化；它不阻断 S5.3 功能兼容性验收。
-
-当前 W1 的临时测试状态必须成组恢复：默认 runtime 已是 runc；
-`96-cubesandbox-e2e-nodeconformance.toml` 临时启用 Cube privileged 并把官方
-`test-handler` 映射到 runc；kubelet 由等价的 `kubelet-e2e.service` 运行；集群中只对带
-`e2e-framework` 标签 namespace 生效的 `cubesandbox-e2e-runtimeclass` mutation
-policy/binding 正在启用；临时 auth carrier 和两项 ClusterRoleBinding 正在启用。control
-和 W2 kubelet 仍停止、对应 Node 对象仍从 API 暂时移除，CVM 没有删除。
+无外部阻塞。`K8S-OQ-033` 是当前第一个产品缺口，不需要用户决策；先用官方 Hostname、
+KubeletManagedEtcHosts 定向 shard 复现并实现。tmpfs identity、hostNetwork/hostPID/hostIPC 等按
+既有支持范围分类，无法支持的测试必须保留上游名称、技术原因和问题 ID，不能从报告静默删除。
 
 ## 受保护路径
 
 `CubeShim/`、`Cubelet/`、`agent/`、`deploy/kubernetes/runtimeclass/`、
-`deploy/kubernetes/smoke/`、`tests/e2e/kubernetes-runtime/` 和本 handoff bundle。
-云端仅操作本 PoC 创建的资源；名称带“勿删”的 CVM/TKE 不得删除。现有证据、构建产物和
-回滚副本不得覆盖，handoff 不记录凭证。
+`deploy/kubernetes/smoke/`、`tests/e2e/kubernetes-runtime/` 和本 handoff bundle。云端只操作本
+PoC 创建的资源；名称带“勿删”的 CVM/TKE 不得删除。不得覆盖已有证据、构建产物、Guest assets
+和回滚副本；handoff 不记录凭证、token 或 kubeconfig 内容。
 
 ## 下一步
 
-1. 等 W1 exact-zero 后部署 `8dc39f77` Shim 与 `a2626846` Agent，只做 SIGKILL、两类
-   sysctl、CPU Manager/PodResources 和 restartable sidecar 定向回归，冻结拆分前基线。
-2. 完成 S5.4a 普通启动 worker 设计：CubeShim fork/exec gated worker 并独占 sandbox
-   leaf/scope，Cubelet 只持 RuntimeResource lease，worker 承载 VMM/vCPU/virtiofs/Guest memory
-   且不直接调用 Cubelet；继续冻结 Boot、FD handoff、状态查询、crash/reconnect、feature-flag
-   rollback 和逐段时间戳，关闭 `K8S-OQ-032`；未完成前不进入 S5.4b，不等待 `K8S-OQ-008`。
-3. 实现 S5.4b/c，先证明普通启动功能等价、worker 正确归入 Pod leaf、故障 exact-zero，再删除
-   正常路径 `systemctl show`，完成普通 boot 50 次串行/10 并发分段测量并通过 E2E 入口性能门禁。
-4. 在 worker 路径执行 S5.3b/c 分片 NodeConformance，关闭支持面缺口并逐项登记不可通过原因；
-   不把 host namespace、runner 或超时问题混为产品失败，最后恢复环境、exact-zero 并完成审计。
-5. Node E2E 完成后再与用户进行 S6.1 产品/API 讨论，决定 RuntimeTemplate、显式 PodSnapshot 和
-   Pause/Resume 的实现顺序；若模板成为默认路径，补跑受影响的 Node E2E 和 S5.4d 一秒终验。
+1. W1 exact-zero 后部署 `fa278467` 三个 runtime 二进制，保留 W1 Agent/kernel，校验版本与
+   RuntimeClass admission 环境。
+2. 先跑 Hostname/`/etc/hosts`、SIGKILL/sysctl、CPU Manager/PodResources、restartable sidecar
+   等旧失败定向 shard；真实缺陷立即修复并复跑，环境问题修 runner。
+3. 按固定、互斥 focus/skip 表执行剩余 NodeConformance shard，每 shard 单独 timeout、JSON、
+   JUnit、日志、资源清理和 exact-zero；不得再使用单个 6 小时 suite 作为唯一验收。
+4. 汇总 477 项的执行覆盖和支持面结论，完成 S5.3c；恢复普通 kubelet/containerd 临时片段、
+   admission policy 与 auth carrier，双 Worker exact-zero 后交同一 reviewer 终验。
