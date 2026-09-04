@@ -2,8 +2,9 @@
 
 ## 当前 Stage
 
-S5.4a `IN_PROGRESS`，S5.3a `VALIDATING`。最新计划先短回归已有 SIGKILL、sysctl、cpuset
-和 sidecar 修复，再冻结一秒 SLO 与 `CubeShim → cube-vmm-worker` 进程/所有权边界；完成
+S5.4a/S6.1a `IN_PROGRESS`，S5.3a `VALIDATING`。最新计划先短回归已有 SIGKILL、sysctl、cpuset
+和 sidecar 修复，再联合冻结一秒 SLO、`CubeShim → cube-vmm-worker` 进程/所有权边界以及
+snapshot 切点、设备重绑定和 artifact owner；完成
 worker 拆分和普通启动优化后收口 Node E2E，随后进入需要用户确认的 Snapshot 设计与实现，
 最终在快照快路径同时关闭一秒门禁和 Node E2E。首轮 477 项 full-4 的 357/41/79 仍只是旧
 嵌入式 VMM 基线，不是最终验收轮。
@@ -11,7 +12,7 @@ worker 拆分和普通启动优化后收口 Node E2E，随后进入需要用户�
 ## 基线
 
 最后一项已完成云端构建验证的实现 commit 为 `8dc39f77`；最新任务重排 commit 为
-`2681b641`；S3.4c 最终证据 commit 为 `24d2d188`。W1 尚未部署本轮候选，当前 CubeShim/Agent ext4 SHA-256 为
+`5e66624f`；S3.4c 最终证据 commit 为 `24d2d188`。W1 尚未部署本轮候选，当前 CubeShim/Agent ext4 SHA-256 为
 `e0052c7e…`/`c768706b…`；`cube-runtime`
 保持既有制品；运行时根为
 `/opt/cubesandbox-s0-multinode-runtime-2269a3b3`。W1 PVM Guest kernel SHA-256 为
@@ -26,9 +27,10 @@ ephemeral-storage、QoS/多容器双层数值和最终清理；
 
 ## 未完成
 
-S5.3a 尚需部署 `8dc39f77`/`a2626846` 并完成拆分前定向回归；S5.4a 尚未冻结 worker IPC、
-启动 gate、Host scope owner、crash/reconnect 表和一秒 SLO。S5.4b/c 的 worker 拆分与普通启动
-优化、S5.3b/c 的支持面/最终 Node E2E、S6.1～S6.3 的快照讨论与实现、S5.4d 一秒终验均未
+S5.3a 尚需部署 `8dc39f77`/`a2626846` 并完成拆分前定向回归；S5.4a/S6.1a 尚未冻结 worker IPC、
+启动 gate、Host scope owner、snapshot 切点/设备重绑定、crash/reconnect 表和一秒 SLO。S5.4b/c
+的 worker 拆分与普通启动优化、S5.3b/c 的支持面/最终 Node E2E、S6.1b～S6.3 的快照产品讨论
+与实现、S5.4d 一秒终验均未
 开始。完整顺序和逐项验收标准以开发计划的“S5.3/S5.4 剩余实现单元与执行顺序”为准。
 
 当前 S5.3 尚未形成最终支持面通过率、环境清理证据和 reviewer 结论。full-4 中有 10 项为
@@ -80,9 +82,10 @@ CreateSandbox 平均 7ms。`inv-8887w0ggbr`/`inv-98880agrwj` 的进程追踪发�
 
 ## 阻塞
 
-无当前外部阻塞。S5.4a 有两个进入实现前的决定门：`K8S-OQ-031` 需要冻结 worker 的创建、
-放置、控制、回收和 IPC；`K8S-OQ-032` 需要用户确认默认一秒口径。S6.1 的 `K8S-OQ-008`
-必须与用户讨论 runtime template 与 PodSnapshot 的状态语义、卷和分发边界，未确认前不冻结
+无当前外部阻塞。S5.4a/S6.1a 是同一个进入 worker 实现前的决定门：`K8S-OQ-031` 需要冻结
+worker 的创建、放置、控制、回收和含 Restore/Snapshot 的 IPC；`K8S-OQ-008` 先冻结切点、
+设备重绑定、artifact owner 和 compatibility key；`K8S-OQ-032` 需要用户确认默认一秒口径。
+S6.1b 再与用户讨论 PodSnapshot 的应用一致性、卷、CRD 和分发边界，未确认前不冻结不可逆
 artifact 格式。`K8S-OQ-028` 已关闭。首轮完整 NodeConformance 已因 6 小时
 suite timeout 结束；后续通过先跑已修复项与 runner 门禁、再跑支持面回归来避免重复耗时。
 P1 已知限制为持续长 exec + 同容器 resize 仍可能使首次
@@ -110,12 +113,14 @@ policy/binding 正在启用；临时 auth carrier 和两项 ClusterRoleBinding �
 
 1. 等 W1 exact-zero 后部署 `8dc39f77` Shim 与 `a2626846` Agent，只做 SIGKILL、两类
    sysctl、CPU Manager/PodResources 和 restartable sidecar 定向回归，冻结拆分前基线。
-2. 输出 S5.4a 设计：CubeShim fork/exec gated worker，Cubelet 持 RuntimeResource/Host scope
-   lease，worker 承载 VMM/vCPU/virtiofs/Guest memory；补齐 IPC、FD handoff、crash/reconnect、
-   feature-flag rollback 和逐段时间戳，并关闭 `K8S-OQ-031/032`。
+2. 联合输出 S5.4a/S6.1a 设计：CubeShim fork/exec gated worker，Cubelet 持
+   RuntimeResource/Host scope lease，worker 承载 VMM/vCPU/virtiofs/Guest memory；从首版 IPC
+   纳入 Boot/Restore/Snapshot、FD/device replacement 和状态查询，冻结两类快照切点、artifact
+   owner、crash/reconnect、feature-flag rollback 和逐段时间戳，并关闭 `K8S-OQ-008/031/032`
+   的架构决定；未完成前不进入 S5.4b。
 3. 实现 S5.4b/c，先证明普通启动功能等价、worker 正确归入 Pod leaf、故障 exact-zero，再删除
    正常路径 `systemctl show` 并完成普通 boot 50 次串行/10 并发分段测量。
 4. 在 worker 路径执行 S5.3b 分片 NodeConformance，关闭支持面缺口并逐项登记不可通过原因；
    不把 host namespace、runner 或超时问题混为产品失败。
-5. 与用户完成 S6.1 讨论后实现 RuntimeTemplate 和显式 PodSnapshot 启动；最后执行 S5.4d
+5. 与用户完成 S6.1b 产品/API 讨论后实现 RuntimeTemplate 和显式 PodSnapshot 启动；最后执行 S5.4d
    一秒门禁与 S5.3c 最终 Node E2E、清理和审计。
