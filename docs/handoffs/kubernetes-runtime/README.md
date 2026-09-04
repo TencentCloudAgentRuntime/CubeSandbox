@@ -2,16 +2,17 @@
 
 ## 当前 Stage
 
-S5.4a `IN_PROGRESS`，S5.3a `VALIDATING`。最新计划先短回归已有 SIGKILL、sysctl、cpuset
-和 sidecar 修复，随后冻结一秒 SLO 与 `CubeShim → cube-vmm-worker` 进程/所有权边界，立即
-完成 worker 拆分和普通启动优化，再在新 worker 路径收口 Node E2E。RuntimeTemplate、
+S5.4a `IN_PROGRESS`，S5.3a `VALIDATING`。`K8S-OQ-031` 已关闭：CubeShim 是唯一编排者和
+sandbox leaf/scope owner，Cubelet 只持 RuntimeResource，`cube-vmm-worker` 不直接调用 Cubelet。
+最新计划先短回归已有 SIGKILL、sysctl、cpuset 和 sidecar 修复，随后冻结普通启动 IPC 与一秒
+SLO，立即完成 worker 拆分和普通启动优化，再在新 worker 路径收口 Node E2E。RuntimeTemplate、
 PodSnapshot 和 Pause/Resume 全部放在该轮 E2E 之后讨论，不再作为 worker 实现的前置门槛。
 首轮 477 项 full-4 的 357/41/79 仍只是旧嵌入式 VMM 基线，不是最终验收轮。
 
 ## 基线
 
-最后一项已完成云端构建验证的实现 commit 为 `8dc39f77`；最新任务重排 commit 为
-`48ab70f1`；S3.4c 最终证据 commit 为 `24d2d188`。W1 尚未部署本轮候选，当前 CubeShim/Agent ext4 SHA-256 为
+最后一项已完成云端构建验证的实现 commit 为 `8dc39f77`；最新计划/架构决定 commit 为
+`7ea87708`；S3.4c 最终证据 commit 为 `24d2d188`。W1 尚未部署本轮候选，当前 CubeShim/Agent ext4 SHA-256 为
 `e0052c7e…`/`c768706b…`；`cube-runtime`
 保持既有制品；运行时根为
 `/opt/cubesandbox-s0-multinode-runtime-2269a3b3`。W1 PVM Guest kernel SHA-256 为
@@ -27,8 +28,9 @@ ephemeral-storage、QoS/多容器双层数值和最终清理；
 ## 未完成
 
 S5.3a 尚需部署 `8dc39f77`/`a2626846` 并完成拆分前定向回归；S5.4a 尚未冻结 worker IPC、
-启动 gate、Host scope owner、普通 boot crash/reconnect 表和一秒 SLO。S5.4b/c 的 worker 拆分
-与普通启动优化、S5.3b/c 的支持面/最终 Node E2E、S6.1～S6.4 的模板/快照/暂停恢复讨论与实现、
+启动 gate、普通 boot 详细 crash/reconnect 表和一秒 SLO；进程、cgroup 和组件所有权已经冻结。
+S5.4b/c 的 worker 拆分与普通启动优化、S5.3b/c 的支持面/最终 Node E2E、S6.1～S6.4 的
+模板/快照/暂停恢复讨论与实现、
 S5.4d 一秒终验均未开始。完整顺序和逐项验收标准以开发计划的“S5.3/S5.4 剩余实现单元与
 执行顺序”为准。
 
@@ -79,10 +81,15 @@ CreateSandbox 平均 7ms。`inv-8887w0ggbr`/`inv-98880agrwj` 的进程追踪发�
 未优化开销的主因；Cilium CNI 约 104ms，RuntimeResource 网络准备约 64ms。测量 namespace
 已由 `inv-v88827gg63` 删除，`inv-b8882igpkh` 确认 CRI Pod/container 均为 0。
 
+S5.4a 所有权决定由 `7ea87708` 记录：CubeShim 独占编排与 sandbox leaf/scope，Cubelet 只持
+RuntimeResource，worker 不直接调用 Cubelet；`npm run docs:build` 已通过。该提交只冻结架构
+边界，普通启动 IPC、SLO 和 worker 实现尚未验收。
+
 ## 阻塞
 
-无当前外部阻塞。S5.4a 是进入 worker 实现前的决定门：`K8S-OQ-031` 需要冻结 worker 的
-创建、放置、控制、回收和普通 boot IPC；`K8S-OQ-032` 需要冻结默认一秒口径。S5.4 仅保留
+无当前外部阻塞。`K8S-OQ-031` 已冻结 worker 的创建、放置、控制和回收边界；S5.4a 进入
+worker 实现前仍需细化版本化普通 boot IPC/启动 gate，并由 `K8S-OQ-032` 冻结默认一秒口径。
+S5.4 仅保留
 版本化 IPC、稳定设备槽位和显式 FD handoff 扩展缝；`K8S-OQ-008` 的快照切点、设备重绑定、
 artifact owner 和应用一致性已延期到完成 Node E2E 后的 S6.1，不阻塞 worker。`K8S-OQ-028`
 已关闭。首轮完整 NodeConformance 已因 6 小时
@@ -112,10 +119,10 @@ policy/binding 正在启用；临时 auth carrier 和两项 ClusterRoleBinding �
 
 1. 等 W1 exact-zero 后部署 `8dc39f77` Shim 与 `a2626846` Agent，只做 SIGKILL、两类
    sysctl、CPU Manager/PodResources 和 restartable sidecar 定向回归，冻结拆分前基线。
-2. 输出 S5.4a 普通启动 worker 设计：CubeShim fork/exec gated worker，Cubelet 持
-   RuntimeResource/Host scope lease，worker 承载 VMM/vCPU/virtiofs/Guest memory；冻结 Boot、
-   FD handoff、状态查询、crash/reconnect、feature-flag rollback 和逐段时间戳，并关闭
-   `K8S-OQ-031/032`；未完成前不进入 S5.4b，不等待 `K8S-OQ-008`。
+2. 完成 S5.4a 普通启动 worker 设计：CubeShim fork/exec gated worker 并独占 sandbox
+   leaf/scope，Cubelet 只持 RuntimeResource lease，worker 承载 VMM/vCPU/virtiofs/Guest memory
+   且不直接调用 Cubelet；继续冻结 Boot、FD handoff、状态查询、crash/reconnect、feature-flag
+   rollback 和逐段时间戳，关闭 `K8S-OQ-032`；未完成前不进入 S5.4b，不等待 `K8S-OQ-008`。
 3. 实现 S5.4b/c，先证明普通启动功能等价、worker 正确归入 Pod leaf、故障 exact-zero，再删除
    正常路径 `systemctl show`，完成普通 boot 50 次串行/10 并发分段测量并通过 E2E 入口性能门禁。
 4. 在 worker 路径执行 S5.3b/c 分片 NodeConformance，关闭支持面缺口并逐项登记不可通过原因；
