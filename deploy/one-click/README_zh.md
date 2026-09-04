@@ -5,7 +5,7 @@
 ## 目录说明
 
 - `build-release-bundle-builder.sh`：推荐入口；先在 builder 镜像中编译 one-click 需要的组件，再在宿主机继续执行发布包打包。
-- `build-vm-assets.sh`：构建 `containerd-shim-cube-rs`、`cube-runtime`、含 `cube-init` 的 guest image，以及独立的 `cube-agent.ext4`；并收集 guest kernel。
+- `build-vm-assets.sh`：构建 `containerd-shim-cube-rs`、`cube-vmm-worker`、`cube-runtime`、含 `cube-init` 的 guest image，以及独立的 `cube-agent.ext4`；并收集 guest kernel。
 - `build-guest-image.sh`：构建仅含轻量 `cube-init`（作为 `/sbin/init`）的 guest OS 镜像。
 - `build-agent-ext4.sh`：构建独立 `cube-agent/cube-agent.ext4`（+ `version`），供 virtio-pmem1 注入。
 - `build-release-bundle.sh`：底层打包入口；消费源码树或 `ONE_CLICK_*_BIN` 预编译产物，组装 `sandbox-package` 并生成最终发布包。
@@ -107,7 +107,7 @@ ENVD_LOCAL_PATH=/abs/path/to/envd \
 
 这个入口会先：
 
-- 通过根目录 builder 镜像在容器内编译 `cubemaster`、`cubemastercli`、`cubelet`、`cubecli`、`cube-api`、`cube-agent`、`containerd-shim-cube-rs`、`cube-runtime`；network runtime 已内置到 `cubelet`，不再构建独立网络运行时二进制
+- 通过根目录 builder 镜像在容器内编译 `cubemaster`、`cubemastercli`、`cubelet`、`cubecli`、`cube-api`、`cube-agent`、`containerd-shim-cube-rs`、`cube-vmm-worker`、`cube-runtime`；network runtime 已内置到 `cubelet`，不再构建独立网络运行时二进制
 - 在 builder 内对 `CubeMaster`、`Cubelet` 执行 `go mod download`，首次构建会在线拉取 Go modules，后续复用 builder HOME 下的模块缓存
 - 将预编译产物落到 `deploy/one-click/.work/prebuilt/`
 - 回到宿主机调用 `build-release-bundle.sh`，构建 WebUI 静态资源，继续 guest image 和最终打包
@@ -143,7 +143,7 @@ deploy/one-click/dist/cube-sandbox-one-click-<version>.tar.gz
 
 - `sandbox-package.tar.gz`
 - `CubeAPI/bin/cube-api`
-- `containerd-shim-cube-rs`、`cube-runtime`
+- `containerd-shim-cube-rs`、`cube-vmm-worker`、`cube-runtime`
 - 本地构建得到的 `cube-image/cube-guest-image-cpu.img`（含 `cube-init` 作为 `/sbin/init`）
 - 独立的 `cube-agent/cube-agent.ext4`（+ `cube-agent/version`）
 - `cubeproxy/` 目录（运行时拉取预构建镜像；`build-context` 仅供私有 TCR 重建）

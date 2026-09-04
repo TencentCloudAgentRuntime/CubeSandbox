@@ -512,7 +512,7 @@ impl SandboxService {
             operation
                 .verify()
                 .map_err(|error| format!("VM allocation owner was revoked: {error}"))?;
-            sandbox.create_sandbox().await?;
+            sandbox.create_sandbox(Some(&operation)).await?;
             operation
                 .mark_vm_allocated()
                 .map_err(|error| format!("commit VM allocation identity: {error}"))?;

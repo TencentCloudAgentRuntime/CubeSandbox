@@ -79,6 +79,7 @@ rm -f \
   "${PREBUILT_DIR}/cube-pidns-holder" \
   "${PREBUILT_DIR}/cube-init" \
   "${PREBUILT_DIR}/containerd-shim-cube-rs" \
+  "${PREBUILT_DIR}/cube-vmm-worker" \
   "${PREBUILT_DIR}/cube-runtime"
 
 # Component builds are split into independent tracks that run concurrently.
@@ -385,6 +386,7 @@ track_shim() {
   cd /workspace/CubeShim
   cargo build --release --locked
   install -m 0755 /workspace/CubeShim/target/release/containerd-shim-cube-rs "${PREBUILT_DIR}/containerd-shim-cube-rs"
+  install -m 0755 /workspace/CubeShim/target/release/cube-vmm-worker "${PREBUILT_DIR}/cube-vmm-worker"
   install -m 0755 /workspace/CubeShim/target/release/cube-runtime "${PREBUILT_DIR}/cube-runtime"
 }
 
@@ -477,6 +479,7 @@ for artifact in \
   cube-pidns-holder \
   cube-init \
   containerd-shim-cube-rs \
+  cube-vmm-worker \
   cube-runtime
 do
   ensure_file "${PREBUILT_DIR}/${artifact}"
@@ -500,6 +503,7 @@ ONE_CLICK_CUBE_AGENT_BIN="${PREBUILT_DIR}/cube-agent" \
 ONE_CLICK_CUBE_PIDNS_HOLDER_BIN="${PREBUILT_DIR}/cube-pidns-holder" \
 ONE_CLICK_CUBE_INIT_BIN="${PREBUILT_DIR}/cube-init" \
 ONE_CLICK_CUBESHIM_BIN="${PREBUILT_DIR}/containerd-shim-cube-rs" \
+ONE_CLICK_CUBE_VMM_WORKER_BIN="${PREBUILT_DIR}/cube-vmm-worker" \
 ONE_CLICK_CUBE_RUNTIME_BIN="${PREBUILT_DIR}/cube-runtime" \
 ONE_CLICK_VOLUME_S3_BIN="${PREBUILT_DIR}/cube-volume-s3" \
 ONE_CLICK_S3LVOL_DIR="${PREBUILT_DIR}/s3lvol" \

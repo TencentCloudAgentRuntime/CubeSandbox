@@ -155,7 +155,7 @@ help:
 	@printf "  cube-api      Alias of cubeapi\n"
 	@printf "  cubeops       Build CubeOps in Docker\n"
 	@printf "  cubeops-test  Run CubeOps unit tests in Docker\n"
-	@printf "  shim          Build containerd-shim-cube-rs and cube-runtime in Docker\n"
+	@printf "  shim          Build containerd-shim-cube-rs, cube-vmm-worker and cube-runtime in Docker\n"
 	@printf "  cubemaster-test Run CubeMaster unit tests in Docker\n"
 	@printf "  cubelet-test  Run Cubelet unit tests in Docker\n"
 	@printf "  cube-proxy-test Run CubeProxy unit tests locally\n"
@@ -524,7 +524,7 @@ hypervisor-test: builder-image
 .PHONY: shim
 shim: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeShim && cargo build --release --locked && install -m 0755 /workspace/CubeShim/target/release/containerd-shim-cube-rs /workspace/_output/bin/containerd-shim-cube-rs && install -m 0755 /workspace/CubeShim/target/release/cube-runtime /workspace/_output/bin/cube-runtime'
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeShim && cargo build --release --locked && install -m 0755 /workspace/CubeShim/target/release/containerd-shim-cube-rs /workspace/_output/bin/containerd-shim-cube-rs && install -m 0755 /workspace/CubeShim/target/release/cube-vmm-worker /workspace/_output/bin/cube-vmm-worker && install -m 0755 /workspace/CubeShim/target/release/cube-runtime /workspace/_output/bin/cube-runtime'
 
 # Build a guest kernel image (vmlinux for x86_64, Image for aarch64) from an external kernel source tree.
 #   make guest-kernel KERNEL_SRC=/path/to/linux                            # native build for the host arch

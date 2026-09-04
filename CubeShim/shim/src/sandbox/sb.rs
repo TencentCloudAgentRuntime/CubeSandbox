@@ -609,8 +609,11 @@ impl SandBox {
         Ok(())
     }
 
-    pub async fn create_sandbox(&mut self) -> CResult<()> {
-        let snapshot = self.start_vm().await?;
+    pub async fn create_sandbox(
+        &mut self,
+        worker_placement: Option<&dyn crate::hypervisor::worker::WorkerPlacement>,
+    ) -> CResult<()> {
+        let snapshot = self.start_vm(worker_placement).await?;
 
         //todo: app snapshot
         if self.conf.notify_snapshot_ret {
@@ -1022,7 +1025,10 @@ impl SandBox {
 
         !self.conf.app_snapshot_create
     }
-    async fn start_vm(&mut self) -> CResult<bool> {
+    async fn start_vm(
+        &mut self,
+        worker_placement: Option<&dyn crate::hypervisor::worker::WorkerPlacement>,
+    ) -> CResult<bool> {
         infof!(self.log, "start vm start");
         let by_snapshot = self.by_snapshot();
         let runtime_prepared_boot = if self.runtime_tap.is_some() {
@@ -1063,7 +1069,7 @@ impl SandBox {
         };
         {
             let mut ch = self.ch.as_mut().unwrap().lock().await;
-            ch.launch_vmm().await?;
+            ch.launch_vmm(worker_placement).await?;
         }
         let mut snapshot = false;
 

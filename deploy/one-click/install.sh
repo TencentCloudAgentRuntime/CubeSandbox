@@ -1174,7 +1174,7 @@ _one_click_resolve_component_version() {
   if [[ -f "${json}" ]]; then
     case "${name}" in
       cube-shim)
-        for key in containerd-shim-cube-rs cube-runtime; do
+        for key in containerd-shim-cube-rs cube-vmm-worker cube-runtime; do
           ver="$(_one_click_json_object_version "${json}" "${key}")"
           [[ -n "${ver}" ]] && break
         done
@@ -1195,7 +1195,7 @@ _one_click_resolve_component_version() {
   if [[ -z "${ver}" && -f "${manifest}" ]]; then
     case "${name}" in
       cube-shim)
-        for key in containerd-shim-cube-rs cube-runtime; do
+        for key in containerd-shim-cube-rs cube-vmm-worker cube-runtime; do
           ver="$(_one_click_json_object_version "${manifest}" "${key}")"
           [[ -n "${ver}" ]] && break
         done
@@ -1895,7 +1895,7 @@ upsert_env_kv "${RUNTIME_ENV_FILE}" "RCOW_LISTEN_PORT" "${RCOW_LISTEN_PORT}"
 
 chmod +x "${INSTALL_PREFIX}/Cubelet/bin/"*
 chmod +x "${INSTALL_PREFIX}/cube-vs/network/bin/"* 2>/dev/null || true
-chmod +x "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" "${INSTALL_PREFIX}/cube-shim/bin/cube-runtime"
+chmod +x "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" "${INSTALL_PREFIX}/cube-shim/bin/cube-vmm-worker" "${INSTALL_PREFIX}/cube-shim/bin/cube-runtime"
 chmod +x "${INSTALL_PREFIX}/scripts/one-click/"*.sh
 chmod +x "${INSTALL_PREFIX}/scripts/systemd/"*.sh
 chmod +x "${INSTALL_PREFIX}/scripts/cube-egress/"*.sh 2>/dev/null || true
@@ -1915,6 +1915,7 @@ if [[ "${DEPLOY_ROLE}" != "compute" ]]; then
 fi
 
 ln -sf "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" /usr/local/bin/containerd-shim-cube-rs
+ln -sf "${INSTALL_PREFIX}/cube-shim/bin/cube-vmm-worker" /usr/local/bin/cube-vmm-worker
 ln -sf "${INSTALL_PREFIX}/cube-shim/bin/cube-runtime" /usr/local/bin/cube-runtime
 ln -sf "${INSTALL_PREFIX}/Cubelet/bin/cubecli" /usr/local/bin/cubecli
 ln -sf "${INSTALL_PREFIX}/cube-vs/network/bin/cubevsmapdump" /usr/local/bin/cubevsmapdump

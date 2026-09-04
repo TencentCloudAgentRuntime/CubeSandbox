@@ -3,7 +3,7 @@
 # Copyright (C) 2026 Tencent. All rights reserved.
 #
 # Stage the cube-node image toolbox onto a hostPath directory so that
-# containerd-shim-cube-rs / cube-runtime binaries live on a filesystem that is
+# containerd-shim-cube-rs / cube-vmm-worker / cube-runtime binaries live on a filesystem that is
 # never unmounted when the cube-node Pod is deleted or upgraded.
 #
 # This mirrors one-click install.sh upgrade semantics:
@@ -78,12 +78,14 @@ chmod +x \
   "${HOST_TOOLBOX_ROOT}/Cubelet/bin/cubelet" \
   "${HOST_TOOLBOX_ROOT}/Cubelet/bin/cubecli" \
   "${HOST_TOOLBOX_ROOT}/cube-shim/bin/cube-runtime" \
+  "${HOST_TOOLBOX_ROOT}/cube-shim/bin/cube-vmm-worker" \
   "${HOST_TOOLBOX_ROOT}/cube-shim/bin/containerd-shim-cube-rs" \
   2>/dev/null || true
 
 for required in \
   Cubelet/bin/cubelet \
   cube-shim/bin/containerd-shim-cube-rs \
+  cube-shim/bin/cube-vmm-worker \
   cube-shim/bin/cube-runtime
 do
   [[ -x "${HOST_TOOLBOX_ROOT}/${required}" ]] || fail "missing executable after stage: ${required}"

@@ -234,13 +234,15 @@ COMPONENT_VERSIONS_ROOT="${TMP}/component_versions"
 src="${TMP}/inv-shim"
 mkdir -p "${src}/bin"
 : >"${src}/bin/containerd-shim-cube-rs"
-printf '{"schema_version":1,"components":{"containerd-shim-cube-rs":{"version":"shim-v9"},"cube-runtime":{"version":"shim-v9"}}}\n' \
+: >"${src}/bin/cube-vmm-worker"
+printf '{"schema_version":1,"components":{"containerd-shim-cube-rs":{"version":"shim-v9"},"cube-vmm-worker":{"version":"shim-v9"},"cube-runtime":{"version":"shim-v9"}}}\n' \
   >"${src}/version.json"
 CUBE_COMPONENT=cube-shim
 assert_eq "$(resolve_component_version "${src}" cube-shim)" "shim-v9" "resolve version.json for cube-shim"
 inventory_component_version "${src}" "cube-shim"
 [[ -d "${COMPONENT_VERSIONS_ROOT}/cube-shim/shim-v9" ]] || { echo "FAIL: inventory dir missing"; exit 1; }
 [[ -f "${COMPONENT_VERSIONS_ROOT}/cube-shim/shim-v9/bin/containerd-shim-cube-rs" ]] || { echo "FAIL: inventory leaf missing"; exit 1; }
+[[ -f "${COMPONENT_VERSIONS_ROOT}/cube-shim/shim-v9/bin/cube-vmm-worker" ]] || { echo "FAIL: worker inventory leaf missing"; exit 1; }
 printf 'ok: inventory writes COMPONENT_VERSIONS_ROOT/cube-shim/<ver>\n'
 
 inventory_component_version "${src}" "cube-shim"

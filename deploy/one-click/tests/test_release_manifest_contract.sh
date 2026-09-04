@@ -27,7 +27,11 @@ manifest=release-manifest.json
 EOF
   cat > "${bundle}/release-manifest.json" <<'EOF'
 {
-  "components": {},
+  "components": {
+    "containerd-shim-cube-rs": {"digest_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "cube-vmm-worker": {"digest_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    "cube-runtime": {"digest_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+  },
   "guest_image": {},
   "kernel": {
     "version": "6.6.119-49.6",
@@ -97,6 +101,29 @@ EOF
   fi
 }
 
+test_rejects_manifest_without_vmm_worker() {
+  local bundle="${TMP_DIR}/missing-worker"
+  mkdir -p "${bundle}"
+  cat > "${bundle}/VERSION.txt" <<'EOF'
+release_version=v0.5.0
+manifest=release-manifest.json
+EOF
+  cat > "${bundle}/release-manifest.json" <<'EOF'
+{
+  "components": {
+    "containerd-shim-cube-rs": {"digest_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    "cube-runtime": {"digest_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+  },
+  "guest_image": {},
+  "kernel": {}
+}
+EOF
+
+  if (validate_declared_release_manifest "${bundle}") >/dev/null 2>&1; then
+    fail "expected a declared manifest without cube-vmm-worker to be rejected"
+  fi
+}
+
 test_accepts_bundle_without_declared_manifest() {
   local bundle="${TMP_DIR}/legacy"
   mkdir -p "${bundle}"
@@ -110,6 +137,7 @@ EOF
 test_accepts_declared_valid_manifest
 test_rejects_missing_declared_manifest
 test_rejects_invalid_declared_manifest_json
+test_rejects_manifest_without_vmm_worker
 test_accepts_bundle_without_declared_manifest
 
 echo "release manifest contract tests OK"

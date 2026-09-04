@@ -91,6 +91,7 @@ jobs:
             make_target: shim
             expected_bins: |
               _output/bin/containerd-shim-cube-rs
+              _output/bin/cube-vmm-worker
               _output/bin/cube-runtime
           # S3 Volume plugin (examples/volume/s3): its own Go module, so it is
           # not covered by any component build above.

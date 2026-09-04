@@ -192,7 +192,8 @@ behavior.
   `deploy/kubernetes/images/`.
 - `cube-shim` is built exactly like CI: context = repository root, file =
   `CubeShim/Dockerfile` (multi-stage `cargo build --release --locked` via
-  `CUBE_BUILDER_IMAGE`, packages `containerd-shim-cube-rs` + `cube-runtime` +
+  `CUBE_BUILDER_IMAGE`, packages `containerd-shim-cube-rs` +
+  `cube-vmm-worker` + `cube-runtime` +
   `conf/config-cube.toml`), with `CUBE_VERSION` / `CUBE_COMMIT` /
   `CUBE_BUILD_TIME`. Requires BuildKit for the adjacent
   `Dockerfile.dockerignore`. No duplicate Dockerfile is kept under

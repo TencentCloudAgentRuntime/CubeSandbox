@@ -64,7 +64,7 @@ detect_primary_interface() {
 }
 
 validate_runtime_commands() {
-  for cmd in mkfs.ext4 mount umount losetup cube-runtime containerd-shim-cube-rs cubecli cubevsmapdump; do
+  for cmd in mkfs.ext4 mount umount losetup cube-runtime cube-vmm-worker containerd-shim-cube-rs cubecli cubevsmapdump; do
     require_cmd "${cmd}"
   done
 }

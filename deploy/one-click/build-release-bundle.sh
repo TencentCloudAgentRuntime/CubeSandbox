@@ -290,6 +290,7 @@ PY
 
   # Shim + runtime binaries: already copied to RUNTIME_LAYOUT_DIR by build-vm-assets.sh.
   local shim_bin="${RUNTIME_LAYOUT_DIR}/cube-shim/bin/containerd-shim-cube-rs"
+  local vmm_worker_bin="${RUNTIME_LAYOUT_DIR}/cube-shim/bin/cube-vmm-worker"
   local runtime_bin="${RUNTIME_LAYOUT_DIR}/cube-shim/bin/cube-runtime"
   local s3lvol_bin=""
   if [[ -n "${S3LVOL_DIR}" ]]; then
@@ -299,7 +300,7 @@ PY
   python3 - "${output}" "${release_version}" "${cube_version}" "${cube_commit}" "${cube_build_time}" \
       "${guest_image_version}" "${guest_agent_version}" "${kernel_version}" "${kernel_pvm_version}" \
       "${CORE_BIN_DIR}" \
-      "${agent_artifact}" "${shim_bin}" "${runtime_bin}" \
+      "${agent_artifact}" "${shim_bin}" "${vmm_worker_bin}" "${runtime_bin}" \
       "${guest_image_path}" "${kernel_vmlinux}" "${kernel_pvm_vmlinux}" \
       "${s3lvol_bin}" <<'PY'
 import json, os, sys, hashlib
@@ -316,11 +317,12 @@ kernel_pvm_version = sys.argv[9]
 core_bin_dir      = sys.argv[10]
 agent_bin         = sys.argv[11]
 shim_bin          = sys.argv[12]
-runtime_bin       = sys.argv[13]
-guest_image_path  = sys.argv[14]
-kernel_vmlinux    = sys.argv[15]
-kernel_pvm_vmlinux = sys.argv[16] if len(sys.argv) > 16 else ""
-s3lvol_bin        = sys.argv[17] if len(sys.argv) > 17 else ""
+vmm_worker_bin    = sys.argv[13]
+runtime_bin       = sys.argv[14]
+guest_image_path  = sys.argv[15]
+kernel_vmlinux    = sys.argv[16]
+kernel_pvm_vmlinux = sys.argv[17] if len(sys.argv) > 17 else ""
+s3lvol_bin        = sys.argv[18] if len(sys.argv) > 18 else ""
 
 def sha256_hex(path):
     """Return sha256:hexdigest for an existing file."""
@@ -383,6 +385,12 @@ components["containerd-shim-cube-rs"] = {
     "commit": cube_commit,
     "build_time": cube_build_time,
     "digest_sha256": required_sha256(shim_bin),
+}
+components["cube-vmm-worker"] = {
+    "version": cube_version,
+    "commit": cube_commit,
+    "build_time": cube_build_time,
+    "digest_sha256": required_sha256(vmm_worker_bin),
 }
 components["cube-runtime"] = {
     "version": cube_version,

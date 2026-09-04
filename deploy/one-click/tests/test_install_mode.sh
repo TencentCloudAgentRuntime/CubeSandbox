@@ -571,6 +571,11 @@ test_install_sh_wires_upgrade_flow() {
   assert_contains "${f}" 'redis_timeout_args+=(--connect-timeout "${connect_timeout}")'
   assert_contains "${f}" 'redis_timeout_args+=(--timeout "${connect_timeout}")'
   assert_contains "${f}" 'run_redis_preflight_cmd "${use_timeout_wrapper}" "${connect_timeout}"'
+  # The worker is a mandatory sibling of CubeShim: install the executable,
+  # validate its manifest entry, and publish the stable host symlink.
+  assert_contains "${f}" 'chmod +x "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" "${INSTALL_PREFIX}/cube-shim/bin/cube-vmm-worker" "${INSTALL_PREFIX}/cube-shim/bin/cube-runtime"'
+  assert_contains "${f}" 'ln -sf "${INSTALL_PREFIX}/cube-shim/bin/cube-vmm-worker" /usr/local/bin/cube-vmm-worker'
+  assert_contains "${f}" 'for key in containerd-shim-cube-rs cube-vmm-worker cube-runtime; do'
   # on upgrade, CIDR host-conflict detection is skipped (M2)
   assert_contains "${f}" 'check_cidr_preflight "${CUBE_SANDBOX_NETWORK_CIDR}" "${cidr_skip_conflict}" "CUBE_SANDBOX_NETWORK_CIDR" 24 16'
   assert_contains "${f}" 'check_cidr_preflight "192.168.0.0/18" "${cidr_skip_conflict}" "default CubeSandbox network CIDR" 24 16'

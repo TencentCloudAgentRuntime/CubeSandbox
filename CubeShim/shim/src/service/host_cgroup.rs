@@ -299,6 +299,23 @@ struct ContainmentIdentity {
     inode: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum VmmWorkerState {
+    SpawnIntent,
+    Allocated,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct VmmWorkerRecord {
+    state: VmmWorkerState,
+    operation_epoch: u64,
+    protocol_version: u16,
+    launch_nonce_sha256: String,
+    expected_executable: FileIdentity,
+    identity: Option<ProcessIdentity>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct LifecycleRecord {
     schema_version: u32,
@@ -327,6 +344,8 @@ struct LifecycleRecord {
     create_waiters: u32,
     failure: Option<FailureResult>,
     containment_breach: Option<ContainmentIdentity>,
+    #[serde(default)]
+    vmm_worker: Option<VmmWorkerRecord>,
     #[serde(default)]
     degraded_reason: Option<String>,
 }
@@ -973,6 +992,103 @@ impl LifecycleOperation {
     }
 }
 
+impl crate::hypervisor::worker::WorkerPlacement for LifecycleOperation {
+    fn prepare_vmm_worker_spawn(
+        &self,
+        executable: &Path,
+        nonce: &str,
+        protocol_version: u16,
+    ) -> Result<(), String> {
+        self.verify()?;
+        let executable = fs::canonicalize(executable).map_err(|error| {
+            format!(
+                "canonicalize cube-vmm-worker executable {}: {error}",
+                executable.display()
+            )
+        })?;
+        let expected_executable = file_identity(&executable)?;
+        let _record_lock = self.handle.record_lock()?;
+        let mut record = self.handle.read_record()?;
+        self.verify_record(&record)?;
+        if record.vmm_worker.is_some() {
+            return Err("lifecycle already has a cube-vmm-worker record".to_string());
+        }
+        record.vmm_worker = Some(VmmWorkerRecord {
+            state: VmmWorkerState::SpawnIntent,
+            operation_epoch: self.epoch,
+            protocol_version,
+            launch_nonce_sha256: sha256_hex(nonce.as_bytes()),
+            expected_executable,
+            identity: None,
+        });
+        record.sequence = record
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| "lifecycle sequence overflow".to_string())?;
+        atomic_write_json(&self.handle.directory.join(RECORD_FILE), &record)
+    }
+
+    fn place_vmm_worker(&self, pid: u32) -> Result<(), String> {
+        let pid = i32::try_from(pid)
+            .map_err(|error| format!("cube-vmm-worker pid does not fit i32: {error}"))?;
+        self.verify()?;
+        let before = process_identity(pid)?;
+        let nonce_hash = process_environment_value(pid, "CUBE_VMM_WORKER_NONCE")?
+            .map(|value| sha256_hex(value.as_bytes()))
+            .ok_or_else(|| format!("cube-vmm-worker {pid} has no launch nonce"))?;
+        let expected = {
+            let _record_lock = self.handle.record_lock()?;
+            let record = self.handle.read_record()?;
+            self.verify_record(&record)?;
+            let worker = record
+                .vmm_worker
+                .as_ref()
+                .ok_or_else(|| "cube-vmm-worker has no durable spawn INTENT".to_string())?;
+            if worker.state != VmmWorkerState::SpawnIntent
+                || worker.operation_epoch != self.epoch
+                || worker.protocol_version != crate::hypervisor::worker::PROTOCOL_VERSION
+                || worker.launch_nonce_sha256 != nonce_hash
+                || worker.expected_executable != before.executable
+                || worker.identity.is_some()
+            {
+                return Err("cube-vmm-worker does not match durable spawn INTENT".to_string());
+            }
+            worker.clone()
+        };
+
+        if before.cgroup != self.target.cgroup() {
+            move_process_to(self.target.cgroup(), pid)?;
+        }
+        let actual = process_identity(pid)?;
+        if !immutable_identity_matches(&before, &actual)
+            || actual.cgroup != self.target.cgroup()
+            || actual.executable != expected.expected_executable
+        {
+            return Err("cube-vmm-worker identity changed during placement".to_string());
+        }
+        verify_target_membership(&self.target, pid, false)?;
+
+        let _record_lock = self.handle.record_lock()?;
+        let mut record = self.handle.read_record()?;
+        self.verify_record(&record)?;
+        let worker = record
+            .vmm_worker
+            .as_mut()
+            .ok_or_else(|| "cube-vmm-worker spawn INTENT disappeared".to_string())?;
+        if *worker != expected {
+            return Err("cube-vmm-worker spawn INTENT changed during placement".to_string());
+        }
+        worker.state = VmmWorkerState::Allocated;
+        worker.identity = Some(actual);
+        record.sequence = record
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| "lifecycle sequence overflow".to_string())?;
+        atomic_write_json(&self.handle.directory.join(RECORD_FILE), &record)?;
+        verify_target_membership(&self.target, pid, false)
+    }
+}
+
 impl LifecycleHandle {
     pub(crate) fn classification(&self) -> Result<Classification, String> {
         Ok(self.read_record()?.classification)
@@ -1165,6 +1281,7 @@ impl LifecycleHandle {
             create_waiters: 0,
             failure: None,
             containment_breach: None,
+            vmm_worker: None,
             degraded_reason: None,
         };
         let host_owner = HostCgroupOwner {
@@ -3854,6 +3971,7 @@ async fn scan_lifecycle(handle: &LifecycleHandle, queue: &Path) -> Result<(), St
 
     let helper_alive = immutable_process_is_live(&record.helper)?;
     let server_observation = record.server.as_ref().map(observe_process).transpose()?;
+    let worker_observation = observe_allocated_vmm_worker(&record)?;
     let now = unix_time_ms()?;
     let precommit_expired = now.saturating_sub(record.created_at_ms) >= PRECOMMIT_GRACE.as_millis();
     let takeover_expired = record
@@ -3864,6 +3982,14 @@ async fn scan_lifecycle(handle: &LifecycleHandle, queue: &Path) -> Result<(), St
         Some(ProcessObservation::Gone | ProcessObservation::Reused)
     );
     let containment_breach = match &server_observation {
+        Some(ProcessObservation::Exact {
+            identity,
+            containment_ok: false,
+            ..
+        }) => Some(identity.cgroup.clone()),
+        _ => None,
+    };
+    let worker_containment_breach = match &worker_observation {
         Some(ProcessObservation::Exact {
             identity,
             containment_ok: false,
@@ -3899,11 +4025,18 @@ async fn scan_lifecycle(handle: &LifecycleHandle, queue: &Path) -> Result<(), St
         record.phase,
         LifecyclePhase::TakeoverClaimed | LifecyclePhase::ContainerdCommitted
     ) {
-        let invalid_containment = containment_breach.as_deref().filter(|observed| {
+        let invalid_server_containment = containment_breach.as_deref().filter(|observed| {
             record.phase != LifecyclePhase::TakeoverClaimed
                 || !takeover_cgroup_allowed(&record, observed)
         });
+        let invalid_containment = worker_containment_breach
+            .as_deref()
+            .or(invalid_server_containment);
         let claim_timed_out = record.phase == LifecyclePhase::TakeoverClaimed && takeover_expired;
+        // Worker exit is delivered synchronously to the live CubeShim through
+        // the event channel. Do not race a normal Join/Shutdown window here;
+        // if the Shim also exits, server_dead drives durable cleanup and the
+        // recorded worker identity is reaped below.
         let terminal_fault = server_dead || claim_timed_out || invalid_containment.is_some();
         let failure_ready =
             record.create_state == CreateState::Failed && create_failure_cleanup_ready(&record)?;
@@ -3912,7 +4045,10 @@ async fn scan_lifecycle(handle: &LifecycleHandle, queue: &Path) -> Result<(), St
             let (code, message) = if server_dead {
                 ("INTERNAL", "CubeShim server exited during Create")
             } else if invalid_containment.is_some() {
-                ("INTERNAL", "CubeShim server left both claimed Host cgroups")
+                (
+                    "INTERNAL",
+                    "CubeShim or cube-vmm-worker left the claimed Host cgroup",
+                )
             } else {
                 ("DEADLINE_EXCEEDED", "Host placement claim timed out")
             };
@@ -3930,7 +4066,7 @@ async fn scan_lifecycle(handle: &LifecycleHandle, queue: &Path) -> Result<(), St
                 ))
         {
             let reason = if invalid_containment.is_some() {
-                "committed server containment breach"
+                "committed CubeShim or cube-vmm-worker containment breach"
             } else if server_dead {
                 "committed server exited"
             } else if claim_timed_out {
@@ -4041,6 +4177,178 @@ fn process_launch_nonce_hash(pid: i32) -> Result<Option<String>, String> {
         }
     }
     Ok(None)
+}
+
+fn process_environment_value(pid: i32, name: &str) -> Result<Option<String>, String> {
+    let data = fs::read(format!("/proc/{pid}/environ"))
+        .map_err(|error| format!("read process {pid} environment: {error}"))?;
+    let prefix = format!("{name}=");
+    for entry in data.split(|byte| *byte == 0) {
+        if let Some(value) = entry.strip_prefix(prefix.as_bytes()) {
+            return std::str::from_utf8(value)
+                .map(|value| Some(value.to_string()))
+                .map_err(|error| format!("process {pid} {name} is not UTF-8: {error}"));
+        }
+    }
+    Ok(None)
+}
+
+fn observe_allocated_vmm_worker(
+    record: &LifecycleRecord,
+) -> Result<Option<ProcessObservation>, String> {
+    let Some(worker) = record.vmm_worker.as_ref() else {
+        return Ok(None);
+    };
+    validate_vmm_worker_record(record, worker)?;
+    if worker.state == VmmWorkerState::SpawnIntent {
+        return Ok(None);
+    }
+    let identity = worker
+        .identity
+        .as_ref()
+        .ok_or_else(|| "allocated cube-vmm-worker has no process identity".to_string())?;
+    if identity.executable != worker.expected_executable
+        || identity.cgroup != record.target.cgroup()
+        || worker.launch_nonce_sha256.is_empty()
+    {
+        return Err("allocated cube-vmm-worker durable identity is invalid".to_string());
+    }
+    observe_process(identity).map(Some)
+}
+
+fn find_spawn_intent_vmm_worker(
+    record: &LifecycleRecord,
+    worker: &VmmWorkerRecord,
+) -> Result<Option<ProcessIdentity>, String> {
+    validate_vmm_worker_record(record, worker)?;
+    if worker.state != VmmWorkerState::SpawnIntent || worker.identity.is_some() {
+        return Err("cube-vmm-worker is not an unallocated spawn INTENT".to_string());
+    }
+    let expected_parent = record.server.as_ref().map(|server| server.pid);
+    let mut candidate = None;
+    for process in
+        fs::read_dir("/proc").map_err(|error| format!("scan processes for worker: {error}"))?
+    {
+        let process = process.map_err(|error| format!("read worker process entry: {error}"))?;
+        let Ok(pid) = process.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        let nonce = match process_environment_value(pid, "CUBE_VMM_WORKER_NONCE") {
+            Ok(Some(nonce)) if sha256_hex(nonce.as_bytes()) == worker.launch_nonce_sha256 => nonce,
+            Ok(_) => continue,
+            Err(_error) if !process.path().exists() => continue,
+            Err(error) => return Err(error),
+        };
+        if nonce.is_empty() {
+            continue;
+        }
+        let identity = match process_identity(pid) {
+            Ok(identity) => identity,
+            Err(_error) if !process.path().exists() => continue,
+            Err(error) => return Err(error),
+        };
+        if identity.executable != worker.expected_executable {
+            continue;
+        }
+        let parent = match process_parent_pid(pid) {
+            Ok(parent) => parent,
+            Err(_error) if !process.path().exists() => continue,
+            Err(error) => return Err(error),
+        };
+        if expected_parent.is_some_and(|expected| parent != expected && parent != 1) {
+            continue;
+        }
+        if candidate.replace(identity).is_some() {
+            return Err("multiple processes match cube-vmm-worker spawn INTENT".to_string());
+        }
+    }
+    Ok(candidate)
+}
+
+fn terminate_recorded_vmm_worker(record: &LifecycleRecord) -> Result<(), String> {
+    let Some(worker) = record.vmm_worker.as_ref() else {
+        return Ok(());
+    };
+    validate_vmm_worker_record(record, worker)?;
+    let expected = match worker.state {
+        VmmWorkerState::SpawnIntent => find_spawn_intent_vmm_worker(record, worker)?,
+        VmmWorkerState::Allocated => Some(
+            worker
+                .identity
+                .clone()
+                .ok_or_else(|| "allocated cube-vmm-worker has no identity".to_string())?,
+        ),
+    };
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    match observe_process(&expected)? {
+        ProcessObservation::Gone | ProcessObservation::Reused => Ok(()),
+        ProcessObservation::Exact {
+            pidfd,
+            identity,
+            containment_ok,
+        } => {
+            if worker.state == VmmWorkerState::SpawnIntent {
+                let nonce = process_environment_value(identity.pid, "CUBE_VMM_WORKER_NONCE")?
+                    .ok_or_else(|| "spawn INTENT worker lost its launch nonce".to_string())?;
+                if sha256_hex(nonce.as_bytes()) != worker.launch_nonce_sha256 {
+                    return Err("spawn INTENT worker nonce changed before termination".to_string());
+                }
+            }
+            if identity.executable != worker.expected_executable {
+                return Err("cube-vmm-worker executable changed before termination".to_string());
+            }
+            let target_breach = identity.cgroup != record.target.cgroup();
+            let allow_durable_breach = worker.state == VmmWorkerState::Allocated
+                && !containment_ok
+                && target_breach
+                && record
+                    .containment_breach
+                    .as_ref()
+                    .is_some_and(|breach| breach.cgroup == identity.cgroup);
+            if worker.state == VmmWorkerState::Allocated
+                && (!containment_ok || target_breach)
+                && !allow_durable_breach
+            {
+                return Err(
+                    "refuse to terminate allocated cube-vmm-worker outside its durable cgroup"
+                        .to_string(),
+                );
+            }
+            signal_exact_process(&expected, &pidfd, allow_durable_breach)
+        }
+    }
+}
+
+fn validate_vmm_worker_record(
+    record: &LifecycleRecord,
+    worker: &VmmWorkerRecord,
+) -> Result<(), String> {
+    if worker.protocol_version != crate::hypervisor::worker::PROTOCOL_VERSION {
+        return Err(format!(
+            "cube-vmm-worker durable protocol version {} is not supported",
+            worker.protocol_version
+        ));
+    }
+    if worker.operation_epoch == 0 || worker.operation_epoch > record.operation_owner.epoch {
+        return Err(format!(
+            "cube-vmm-worker durable operation epoch {} is inconsistent with owner epoch {}",
+            worker.operation_epoch, record.operation_owner.epoch
+        ));
+    }
+    if worker.launch_nonce_sha256.is_empty() {
+        return Err("cube-vmm-worker durable launch nonce is empty".to_string());
+    }
+    match (&worker.state, &worker.identity) {
+        (VmmWorkerState::SpawnIntent, None) | (VmmWorkerState::Allocated, Some(_)) => Ok(()),
+        (VmmWorkerState::SpawnIntent, Some(_)) => {
+            Err("spawn INTENT cube-vmm-worker unexpectedly has an identity".to_string())
+        }
+        (VmmWorkerState::Allocated, None) => {
+            Err("allocated cube-vmm-worker has no process identity".to_string())
+        }
+    }
 }
 
 fn process_parent_pid(pid: i32) -> Result<i32, String> {
@@ -4218,6 +4526,7 @@ async fn converge_cleanup(handle: &LifecycleHandle, queue: &Path) -> Result<(), 
     ensure_scanner_owner(handle)?;
     let mut record = handle.read_record()?;
     if record.phase == LifecyclePhase::CleanupOwnersDurable {
+        terminate_recorded_vmm_worker(&record)?;
         if let Some(server) = record.server.as_ref() {
             match observe_process(server)? {
                 ProcessObservation::Gone | ProcessObservation::Reused => {}
@@ -7215,6 +7524,294 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn vmm_worker_spawn_intent_precedes_identity_allocation() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-vmm-worker-placement-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let handle = lifecycle_fixture(&root, LifecyclePhase::ContainerdCommitted);
+        let server = process_identity(std::process::id() as i32).unwrap();
+        handle
+            .update_record(|record| {
+                record.phase = LifecyclePhase::ContainerdCommitted;
+                record.create_state = CreateState::Succeeded;
+                record.server = Some(server.clone());
+                record.target = HostTarget::Legacy {
+                    cgroup: server.cgroup.clone(),
+                };
+                record.operation_owner = OperationOwner {
+                    kind: OwnerKind::Server,
+                    epoch: 2,
+                    identity: server.clone(),
+                    revoked_epoch: None,
+                };
+                Ok(())
+            })
+            .unwrap();
+
+        let operation = handle.begin_start_operation().unwrap();
+        let executable = fs::canonicalize("/bin/sleep").unwrap();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        crate::hypervisor::worker::WorkerPlacement::prepare_vmm_worker_spawn(
+            &operation,
+            &executable,
+            &nonce,
+            crate::hypervisor::worker::PROTOCOL_VERSION,
+        )
+        .unwrap();
+        let intent = handle.read_record().unwrap().vmm_worker.unwrap();
+        assert_eq!(intent.state, VmmWorkerState::SpawnIntent);
+        assert_eq!(intent.operation_epoch, 2);
+        assert_eq!(intent.launch_nonce_sha256, sha256_hex(nonce.as_bytes()));
+        assert!(intent.identity.is_none());
+
+        let mut child = ProcessCommand::new(&executable)
+            .arg("30")
+            .env("CUBE_VMM_WORKER_NONCE", &nonce)
+            .spawn()
+            .unwrap();
+        let spawn_record = handle.read_record().unwrap();
+        let discovered =
+            find_spawn_intent_vmm_worker(&spawn_record, spawn_record.vmm_worker.as_ref().unwrap())
+                .unwrap()
+                .unwrap();
+        assert_eq!(discovered.pid, child.id() as i32);
+        crate::hypervisor::worker::WorkerPlacement::place_vmm_worker(&operation, child.id())
+            .unwrap();
+        let allocated_record = handle.read_record().unwrap();
+        let allocated = allocated_record.vmm_worker.as_ref().unwrap();
+        assert_eq!(allocated.state, VmmWorkerState::Allocated);
+        assert_eq!(allocated.operation_epoch, 2);
+        assert_eq!(allocated.launch_nonce_sha256, sha256_hex(nonce.as_bytes()));
+        let identity = allocated.identity.as_ref().unwrap();
+        assert_eq!(identity.pid, child.id() as i32);
+        assert_eq!(identity.executable, file_identity(&executable).unwrap());
+
+        terminate_recorded_vmm_worker(&allocated_record).unwrap();
+        child.wait().unwrap();
+        drop(operation);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn vmm_worker_spawn_intent_cleanup_does_not_require_placement() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-vmm-worker-intent-cleanup-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let handle = lifecycle_fixture(&root, LifecyclePhase::ContainerdCommitted);
+        let server = process_identity(std::process::id() as i32).unwrap();
+        handle
+            .update_record(|record| {
+                record.phase = LifecyclePhase::ContainerdCommitted;
+                record.create_state = CreateState::Succeeded;
+                record.server = Some(server.clone());
+                record.target = HostTarget::Legacy {
+                    cgroup: server.cgroup.clone(),
+                };
+                record.operation_owner = OperationOwner {
+                    kind: OwnerKind::Server,
+                    epoch: 2,
+                    identity: server.clone(),
+                    revoked_epoch: None,
+                };
+                Ok(())
+            })
+            .unwrap();
+        let operation = handle.begin_start_operation().unwrap();
+        let executable = fs::canonicalize("/bin/sleep").unwrap();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        crate::hypervisor::worker::WorkerPlacement::prepare_vmm_worker_spawn(
+            &operation,
+            &executable,
+            &nonce,
+            crate::hypervisor::worker::PROTOCOL_VERSION,
+        )
+        .unwrap();
+        let mut child = ProcessCommand::new(&executable)
+            .arg("30")
+            .env("CUBE_VMM_WORKER_NONCE", &nonce)
+            .spawn()
+            .unwrap();
+
+        let mut record = handle.read_record().unwrap();
+        record.operation_owner.epoch = 2;
+        record.target = HostTarget::Legacy {
+            cgroup: "/not-yet-placed".to_string(),
+        };
+        terminate_recorded_vmm_worker(&record).unwrap();
+        child.wait().unwrap();
+
+        drop(operation);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn vmm_worker_allocated_containment_breach_requires_durable_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-vmm-worker-breach-cleanup-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let handle = lifecycle_fixture(&root, LifecyclePhase::ContainerdCommitted);
+        let executable = fs::canonicalize("/bin/sleep").unwrap();
+        let mut child = ProcessCommand::new(&executable).arg("30").spawn().unwrap();
+        let actual = process_identity(child.id() as i32).unwrap();
+        let mut recorded = actual.clone();
+        recorded.cgroup = "/durable-target".to_string();
+        let mut record = handle.read_record().unwrap();
+        record.operation_owner.epoch = 2;
+        record.target = HostTarget::Legacy {
+            cgroup: recorded.cgroup.clone(),
+        };
+        record.vmm_worker = Some(VmmWorkerRecord {
+            state: VmmWorkerState::Allocated,
+            operation_epoch: 2,
+            protocol_version: crate::hypervisor::worker::PROTOCOL_VERSION,
+            launch_nonce_sha256: "durable-nonce".to_string(),
+            expected_executable: recorded.executable.clone(),
+            identity: Some(recorded),
+        });
+        assert!(terminate_recorded_vmm_worker(&record)
+            .unwrap_err()
+            .contains("outside its durable cgroup"));
+        assert!(child.try_wait().unwrap().is_none());
+
+        record.containment_breach = Some(containment_identity(&actual.cgroup).unwrap());
+        terminate_recorded_vmm_worker(&record).unwrap();
+        child.wait().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn scanner_server_death_converges_allocated_worker() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-vmm-worker-server-death-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let queue = root.join("queue");
+        fs::create_dir_all(queue.join(HOST_QUEUE_DIRECTORY)).unwrap();
+        fs::create_dir_all(queue.join(RUNTIME_QUEUE_DIRECTORY)).unwrap();
+        let handle = lifecycle_fixture(&root, LifecyclePhase::ContainerdCommitted);
+        let mut server = ProcessCommand::new("sleep").arg("30").spawn().unwrap();
+        let server_identity = process_identity(server.id() as i32).unwrap();
+        let mut worker = ProcessCommand::new("sleep").arg("30").spawn().unwrap();
+        let worker_identity = process_identity(worker.id() as i32).unwrap();
+        assert_eq!(server_identity.cgroup, worker_identity.cgroup);
+        handle
+            .update_record(|record| {
+                record.phase = LifecyclePhase::ContainerdCommitted;
+                record.create_state = CreateState::Succeeded;
+                record.server = Some(server_identity.clone());
+                record.target = HostTarget::Legacy {
+                    cgroup: worker_identity.cgroup.clone(),
+                };
+                record.operation_owner = OperationOwner {
+                    kind: OwnerKind::Server,
+                    epoch: 2,
+                    identity: server_identity.clone(),
+                    revoked_epoch: None,
+                };
+                record.vmm_worker = Some(VmmWorkerRecord {
+                    state: VmmWorkerState::Allocated,
+                    operation_epoch: 2,
+                    protocol_version: crate::hypervisor::worker::PROTOCOL_VERSION,
+                    launch_nonce_sha256: sha256_hex(b"allocated-worker"),
+                    expected_executable: worker_identity.executable.clone(),
+                    identity: Some(worker_identity.clone()),
+                });
+                Ok(())
+            })
+            .unwrap();
+        server.kill().unwrap();
+        server.wait().unwrap();
+
+        scan_lifecycle(&handle, &queue).await.unwrap();
+        worker.wait().unwrap();
+        let record = handle.read_record().unwrap();
+        assert_eq!(record.phase, LifecyclePhase::ServerStopped);
+        assert_eq!(record.operation_owner.kind, OwnerKind::Scanner);
+        assert!(cleanup_queue_path(&queue, HOST_QUEUE_DIRECTORY, &record.generation).is_file());
+        assert!(cleanup_queue_path(&queue, RUNTIME_QUEUE_DIRECTORY, &record.generation).is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn multiple_spawn_intent_workers_fail_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-vmm-worker-multiple-intent-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let handle = lifecycle_fixture(&root, LifecyclePhase::ContainerdCommitted);
+        let executable = fs::canonicalize("/bin/sleep").unwrap();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let mut first = ProcessCommand::new(&executable)
+            .arg("30")
+            .env("CUBE_VMM_WORKER_NONCE", &nonce)
+            .spawn()
+            .unwrap();
+        let mut second = ProcessCommand::new(&executable)
+            .arg("30")
+            .env("CUBE_VMM_WORKER_NONCE", &nonce)
+            .spawn()
+            .unwrap();
+        let mut record = handle.read_record().unwrap();
+        record.server = Some(process_identity(std::process::id() as i32).unwrap());
+        record.vmm_worker = Some(VmmWorkerRecord {
+            state: VmmWorkerState::SpawnIntent,
+            operation_epoch: 1,
+            protocol_version: crate::hypervisor::worker::PROTOCOL_VERSION,
+            launch_nonce_sha256: sha256_hex(nonce.as_bytes()),
+            expected_executable: file_identity(&executable).unwrap(),
+            identity: None,
+        });
+        let error =
+            find_spawn_intent_vmm_worker(&record, record.vmm_worker.as_ref().unwrap()).unwrap_err();
+        assert!(error.contains("multiple processes match"), "{error}");
+        assert!(first.try_wait().unwrap().is_none());
+        assert!(second.try_wait().unwrap().is_none());
+        first.kill().unwrap();
+        second.kill().unwrap();
+        first.wait().unwrap();
+        second.wait().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scanner_rejects_incoherent_worker_protocol_and_epoch() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-vmm-worker-invalid-record-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let handle = lifecycle_fixture(&root, LifecyclePhase::ContainerdCommitted);
+        let identity = process_identity(std::process::id() as i32).unwrap();
+        let mut record = handle.read_record().unwrap();
+        record.vmm_worker = Some(VmmWorkerRecord {
+            state: VmmWorkerState::Allocated,
+            operation_epoch: 1,
+            protocol_version: crate::hypervisor::worker::PROTOCOL_VERSION + 1,
+            launch_nonce_sha256: sha256_hex(b"invalid-record"),
+            expected_executable: identity.executable.clone(),
+            identity: Some(identity),
+        });
+        assert!(observe_allocated_vmm_worker(&record)
+            .unwrap_err()
+            .contains("protocol version"));
+        let worker = record.vmm_worker.as_mut().unwrap();
+        worker.protocol_version = crate::hypervisor::worker::PROTOCOL_VERSION;
+        worker.operation_epoch = record.operation_owner.epoch + 1;
+        assert!(observe_allocated_vmm_worker(&record)
+            .unwrap_err()
+            .contains("operation epoch"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     fn lifecycle_fixture(root: &Path, phase: LifecyclePhase) -> LifecycleHandle {
         let directory = root.join("lifecycle");
         fs::create_dir_all(&directory).unwrap();
@@ -7264,6 +7861,7 @@ mod tests {
             create_waiters: 0,
             failure: None,
             containment_breach: None,
+            vmm_worker: None,
             degraded_reason: None,
         };
         atomic_write_json(&directory.join(RECORD_FILE), &record).unwrap();

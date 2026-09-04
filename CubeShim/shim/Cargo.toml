@@ -8,6 +8,10 @@ build = "build.rs"
 name = "containerd-shim-cube-rs"
 path = "src/main.rs"
 
+[[bin]]
+name = "cube-vmm-worker"
+path = "src/bin/cube-vmm-worker.rs"
+
 [features]
 default = ["async"]
 async =["async-trait","containerd-shim-protos/async", "containerd-shim/async", "futures"]

@@ -353,8 +353,17 @@ check_shim() {
     warn "cubeshim_binary" "${shim} not found (expected after first sandbox launch)"
   fi
 
+  local worker="${TOOLBOX_ROOT}/cube-shim/bin/cube-vmm-worker"
+  if [[ -x "${worker}" ]]; then
+    pass "cube_vmm_worker_binary" "${worker}"
+  else
+    warn "cube_vmm_worker_binary" "${worker} not found"
+  fi
+
   local cnt; cnt="$(pgrep -c -f 'containerd-shim-cube-rs' 2>/dev/null || echo 0)"
   pass "cubeshim_instances" "${cnt} shim instance(s) running"
+  cnt="$(pgrep -c -f 'cube-vmm-worker' 2>/dev/null || echo 0)"
+  pass "cube_vmm_worker_instances" "${cnt} VMM worker instance(s) running"
 }
 
 check_cube_proxy() {

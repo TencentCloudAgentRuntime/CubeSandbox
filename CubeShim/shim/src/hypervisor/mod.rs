@@ -5,3 +5,4 @@
 pub mod config;
 pub mod cube_hypervisor;
 pub mod snapshot;
+pub mod worker;

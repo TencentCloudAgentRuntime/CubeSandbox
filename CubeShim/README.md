@@ -9,7 +9,10 @@ containerd
     │  (Shim v2 API)
     ▼
 containerd-shim-cube-rs   ← CubeShim (this component)
-    │  (ttrpc)
+    │  (versioned local IPC + explicit FD handoff)
+    ▼
+cube-vmm-worker           ← per-Pod VMM owner
+    │  (vsock/ttrpc)
     ▼
 cube-agent                ← in-VM guest agent
     │
@@ -19,11 +22,12 @@ container workload        ← running inside the MicroVM
 
 When containerd needs to create a sandbox, it spawns `containerd-shim-cube-rs` as a subprocess. CubeShim then:
 
-1. **Requests VM creation** — communicates with Cubelet (via the Cube runtime) to launch a KVM MicroVM with the appropriate resources (CPU, memory, disk).
+1. **Requests runtime resources** — communicates with Cubelet to prepare node-owned network and VM resources.
 2. **Bridges the shim API** — exposes the containerd Shim v2 interface upward, hiding all VM-level complexity from containerd.
-3. **Manages container lifecycle** — forwards `Create / Start / Exec / Kill / Delete` calls down to the in-VM `cube-agent` over ttrpc/vsock.
-4. **Handles I/O and signaling** — proxies stdio streams and forwards signals between the host and the container process inside the VM.
-5. **Reports sandbox state** — tracks sandbox status and surfaces it back to containerd through the Shim v2 event model.
+3. **Owns the worker lifecycle** — starts one `cube-vmm-worker` per Pod, places it in the Pod runtime cgroup, and controls it through versioned local IPC.
+4. **Manages container lifecycle** — forwards `Create / Start / Exec / Kill / Delete` calls down to the in-VM `cube-agent` over ttrpc/vsock.
+5. **Handles I/O and signaling** — proxies stdio streams and forwards signals between the host and the container process inside the VM.
+6. **Reports sandbox state** — tracks sandbox status and surfaces it back to containerd through the Shim v2 event model.
 
 ## Documentation
 
@@ -35,7 +39,8 @@ When containerd needs to create a sandbox, it spawns `containerd-shim-cube-rs` a
 
 | Directory | Binary | Description |
 |-----------|--------|-------------|
-| `shim/` | `containerd-shim-cube-rs` | The shim process itself; implements Shim v2 |
+| `shim/` | `containerd-shim-cube-rs` | The shim process; implements Shim v2 and owns Pod orchestration |
+| `shim/` | `cube-vmm-worker` | Per-Pod VMM process controlled only by its CubeShim parent |
 | `cube-runtime/` | `cube-runtime` | CLI helper invoked by Cubelet to perform snapshot/restore operations on the VM |
 | `protoc/` | — | Internal protobuf code-generation helper (build-time only) |
 
@@ -61,7 +66,8 @@ cargo build --release --locked
 make all-docker
 ```
 
-The release binary is output to `target/release/containerd-shim-cube-rs`.
+The release binaries are output to `target/release/containerd-shim-cube-rs`,
+`target/release/cube-vmm-worker`, and `target/release/cube-runtime`.
 
 ## Development Notes
 

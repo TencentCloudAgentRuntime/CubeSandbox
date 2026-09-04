@@ -53,7 +53,7 @@ resolve_component_version() {
   if [[ -f "${json}" ]]; then
     case "${component}" in
       cube-shim)
-        for key in containerd-shim-cube-rs cube-runtime; do
+        for key in containerd-shim-cube-rs cube-vmm-worker cube-runtime; do
           ver="$(json_object_version "${json}" "${key}")"
           [[ -n "${ver}" ]] && break
         done
@@ -411,12 +411,14 @@ stage_component() {
       [[ -x "${dst}/bin/cubecli" ]] || fail "missing cubecli after stage"
       ;;
     cube-shim)
-      chmod +x "${dst}/bin/cube-runtime" "${dst}/bin/containerd-shim-cube-rs" 2>/dev/null || true
+      chmod +x "${dst}/bin/cube-runtime" "${dst}/bin/cube-vmm-worker" "${dst}/bin/containerd-shim-cube-rs" 2>/dev/null || true
       [[ -x "${dst}/bin/containerd-shim-cube-rs" ]] || fail "missing shim after stage"
+      [[ -x "${dst}/bin/cube-vmm-worker" ]] || fail "missing cube-vmm-worker after stage"
       [[ -x "${dst}/bin/cube-runtime" ]] || fail "missing cube-runtime after stage"
       # containerd resolves io.containerd.cube.rs via PATH (same as one-click install.sh).
       mkdir -p /usr/local/bin
       ln -sf "${dst}/bin/containerd-shim-cube-rs" /usr/local/bin/containerd-shim-cube-rs
+      ln -sf "${dst}/bin/cube-vmm-worker" /usr/local/bin/cube-vmm-worker
       ln -sf "${dst}/bin/cube-runtime" /usr/local/bin/cube-runtime
       ;;
     cube-kernel)

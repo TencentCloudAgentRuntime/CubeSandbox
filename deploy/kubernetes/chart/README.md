@@ -153,7 +153,7 @@ can set it to `false`.
 
 `cube-node` mirrors the one-click runtime layout:
 
-- runtime tools are available through `/usr/local/bin/containerd-shim-cube-rs`, `/usr/local/bin/cube-runtime`, `/usr/local/bin/cubecli`, and `/usr/local/bin/cubevsmapdump`;
+- runtime tools are available through `/usr/local/bin/containerd-shim-cube-rs`, `/usr/local/bin/cube-vmm-worker`, `/usr/local/bin/cube-runtime`, `/usr/local/bin/cubecli`, and `/usr/local/bin/cubevsmapdump`;
 - `cubeNode.network.autoDetectEthName=true` auto-detects the primary host NIC and patches Cubelet `eth_name`;
 - `cubeNode.network.cidr` patches Cubelet cubevs/sandbox CIDR (default `172.16.0.0/18`, chosen to avoid common cluster Service CIDR `192.168.0.0/16` while keeping a /18 pool). A Helm `pre-install`/`pre-upgrade` Hook fails fast when this range overlaps the cluster Service CIDR or existing ClusterIPs; set `cubeNode.network.cidrSkipConflictCheck=true` only if you accept that risk.
 

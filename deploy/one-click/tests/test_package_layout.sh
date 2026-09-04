@@ -15,6 +15,7 @@ ONE_CLICK_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ROOT_DIR="$(cd "${ONE_CLICK_DIR}/../.." && pwd)"
 TF_DIR="${ONE_CLICK_DIR}/terraform/tencentcloud"
 BUNDLE_SH="${ONE_CLICK_DIR}/build-release-bundle.sh"
+VM_ASSETS_SH="${ONE_CLICK_DIR}/build-vm-assets.sh"
 BUILD_IMAGES_SH="${TF_DIR}/build_images.sh"
 TKE_ADDONS_TF="${TF_DIR}/tke-addons.tf"
 CUBE_PROXY_COMPOSE="${ONE_CLICK_DIR}/cubeproxy/docker-compose.yaml.template"
@@ -129,6 +130,21 @@ test_component_build_inputs_exist() {
   if grep -q -- '--aws' "${ROOT_DIR}/examples/volume/s3/install-deps.sh"; then
     fail "S3 install-deps.sh must not offer --aws"
   fi
+}
+
+test_vmm_worker_release_wiring() {
+  require_file "${ROOT_DIR}/CubeShim/shim/src/bin/cube-vmm-worker.rs" \
+    "cube-vmm-worker binary source"
+  grep -q -F 'build_cube_shim_workspace' "${VM_ASSETS_SH}" \
+    || fail "build-vm-assets.sh must build the shared Rust workspace"
+  grep -q -F 'CUBE_VMM_WORKER_BIN="$(build_cube_vmm_worker)"' "${VM_ASSETS_SH}" \
+    || fail "build-vm-assets.sh must resolve cube-vmm-worker"
+  grep -q -F 'cube-shim/bin/cube-vmm-worker' "${VM_ASSETS_SH}" \
+    || fail "runtime layout must contain cube-vmm-worker beside CubeShim"
+  grep -q -F 'components["cube-vmm-worker"]' "${BUNDLE_SH}" \
+    || fail "release manifest must inventory cube-vmm-worker"
+  grep -q -F 'required_sha256(vmm_worker_bin)' "${BUNDLE_SH}" \
+    || fail "release manifest must require the cube-vmm-worker digest"
 }
 
 # 2) The component image base names must match between what build_images.sh
@@ -397,6 +413,7 @@ test_build_scripts_parse() {
 }
 
 test_component_build_inputs_exist
+test_vmm_worker_release_wiring
 test_image_names_match
 test_webui_nginx_placeholders
 test_cubeproxy_nginx_template_generation

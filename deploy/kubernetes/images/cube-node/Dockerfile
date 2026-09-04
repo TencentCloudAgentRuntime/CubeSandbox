@@ -35,11 +35,13 @@ RUN chmod +x \
       ${TOOLBOX_ROOT}/Cubelet/bin/cubelet \
       ${TOOLBOX_ROOT}/Cubelet/bin/cubecli \
       ${TOOLBOX_ROOT}/cube-shim/bin/cube-runtime \
+      ${TOOLBOX_ROOT}/cube-shim/bin/cube-vmm-worker \
       ${TOOLBOX_ROOT}/cube-shim/bin/containerd-shim-cube-rs \
       ${TOOLBOX_ROOT}/cube-vs/network/bin/cubevsmapdump \
       /usr/local/bin/cube-node-entrypoint.sh \
       /usr/local/bin/stage-toolbox.sh \
     && ln -sfn ${TOOLBOX_ROOT}/cube-shim/bin/containerd-shim-cube-rs /usr/local/bin/containerd-shim-cube-rs \
+    && ln -sfn ${TOOLBOX_ROOT}/cube-shim/bin/cube-vmm-worker /usr/local/bin/cube-vmm-worker \
     && ln -sfn ${TOOLBOX_ROOT}/cube-shim/bin/cube-runtime /usr/local/bin/cube-runtime \
     && ln -sfn ${TOOLBOX_ROOT}/Cubelet/bin/cubecli /usr/local/bin/cubecli \
     && ln -sfn ${TOOLBOX_ROOT}/cube-vs/network/bin/cubevsmapdump /usr/local/bin/cubevsmapdump \

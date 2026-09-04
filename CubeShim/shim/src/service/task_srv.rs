@@ -660,7 +660,7 @@ impl Task for TaskService {
                     );
                 }
 
-                if let Err(e) = sb.create_sandbox().await {
+                if let Err(e) = sb.create_sandbox(None).await {
                     let message = format!("Create sandbox failed:{}", e);
                     errf!(self.log, "{}", message);
                     return Err(

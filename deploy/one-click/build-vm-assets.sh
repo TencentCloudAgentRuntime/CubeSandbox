@@ -13,7 +13,7 @@ RUNTIME_LAYOUT_DIR="${ONE_CLICK_RUNTIME_LAYOUT_DIR:-${WORK_ROOT}/runtime-layout}
 
 LATEST_RELEASE_TAG="$(git -C "${ROOT_DIR}" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
 
-# Version injection for Rust build.rs (shim, cube-runtime) when built on host.
+# Version injection for Rust build.rs (shim, VMM worker, cube-runtime) when built on host.
 # In CI these are prebuilt via the builder container; for local dev, provide
 # consistent fallbacks so all components share the same version information.
 : "${CUBE_VERSION:=${LATEST_RELEASE_TAG:-0.0.0-dev}}"
@@ -28,6 +28,7 @@ CUBE_KERNEL_PVM_VMLINUX="${ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX:-${RAW_ARTIFACTS_DI
 CUBE_SHIM_BUILD_MODE="${ONE_CLICK_CUBE_SHIM_BUILD_MODE:-local}"
 
 CUBESHIM_BIN_OVERRIDE="${ONE_CLICK_CUBESHIM_BIN:-}"
+CUBE_VMM_WORKER_BIN_OVERRIDE="${ONE_CLICK_CUBE_VMM_WORKER_BIN:-}"
 CUBE_RUNTIME_BIN_OVERRIDE="${ONE_CLICK_CUBE_RUNTIME_BIN:-}"
 RUNTIME_CFG_OVERRIDE="${ONE_CLICK_RUNTIME_CFG_SRC:-}"
 CUBE_SHIM_WORKSPACE_READY=0
@@ -85,6 +86,18 @@ build_cube_runtime() {
   find_built_binary "${ROOT_DIR}/CubeShim/target/release" "cube-runtime"
 }
 
+build_cube_vmm_worker() {
+  if [[ -n "${CUBE_VMM_WORKER_BIN_OVERRIDE}" ]]; then
+    ensure_file "${CUBE_VMM_WORKER_BIN_OVERRIDE}"
+    log "using prebuilt cube-vmm-worker: ${CUBE_VMM_WORKER_BIN_OVERRIDE}"
+    printf '%s\n' "${CUBE_VMM_WORKER_BIN_OVERRIDE}"
+    return 0
+  fi
+
+  build_cube_shim_workspace
+  find_built_binary "${ROOT_DIR}/CubeShim/target/release" "cube-vmm-worker"
+}
+
 prepare_runtime_config() {
   local out_cfg="$1"
   mkdir -p "$(dirname "${out_cfg}")"
@@ -102,7 +115,15 @@ require_cmd python3
 
 ensure_kernel_vmlinux "${CUBE_KERNEL_VMLINUX}" "${RAW_ARTIFACTS_DIR}"
 
+# Command substitution runs each build_* helper in a subshell, so prime the
+# shared workspace once in the parent whenever any Rust artifact lacks an
+# override. The READY guard then remains visible to all three lookups.
+if [[ -z "${CUBESHIM_BIN_OVERRIDE}" || -z "${CUBE_VMM_WORKER_BIN_OVERRIDE}" || -z "${CUBE_RUNTIME_BIN_OVERRIDE}" ]]; then
+  build_cube_shim_workspace
+fi
+
 CUBESHIM_BIN="$(build_cube_shim)"
+CUBE_VMM_WORKER_BIN="$(build_cube_vmm_worker)"
 CUBE_RUNTIME_BIN="$(build_cube_runtime)"
 
 remove_path_with_optional_sudo "${RUNTIME_LAYOUT_DIR}"
@@ -115,8 +136,9 @@ mkdir -p \
 
 log "copying runtime binaries"
 copy_file "${CUBESHIM_BIN}" "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/containerd-shim-cube-rs"
+copy_file "${CUBE_VMM_WORKER_BIN}" "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/cube-vmm-worker"
 copy_file "${CUBE_RUNTIME_BIN}" "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/cube-runtime"
-chmod +x "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/containerd-shim-cube-rs" "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/cube-runtime"
+chmod +x "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/containerd-shim-cube-rs" "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/cube-vmm-worker" "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/cube-runtime"
 prepare_runtime_config "${RUNTIME_LAYOUT_DIR}/cube-shim/conf/config-cube.toml"
 
 log "building guest image artifacts via build-guest-image.sh"

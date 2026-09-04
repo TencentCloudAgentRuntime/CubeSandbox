@@ -21,8 +21,26 @@ use tokio::sync::Mutex;
 pub use cube_hypervisor::NotifyEvent;
 
 use super::config::PciDeviceInfo;
+use super::worker::{
+    extract_vm_fds, worker_backend_enabled, LaunchConfig, WorkerClient, WorkerCommand,
+    WorkerPlacement, WorkerReply,
+};
 
 const CALLE_ACTION_ADD_DEV_PRE: &str = "AddDevice";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VmmBackendRoute {
+    Worker,
+    Embedded,
+}
+
+fn select_vmm_backend(worker_enabled: bool, has_managed_placement: bool) -> VmmBackendRoute {
+    if worker_enabled && has_managed_placement {
+        VmmBackendRoute::Worker
+    } else {
+        VmmBackendRoute::Embedded
+    }
+}
 
 pub(crate) fn runtime_seccomp_syscalls() -> Vec<i64> {
     vec![
@@ -60,6 +78,7 @@ pub struct CubeHypervisor {
     status: HypStatus,
     config: HypConfig,
     ch: Option<Arc<Mutex<cube_hypervisor::VmmInstance>>>,
+    worker: Option<WorkerClient>,
     ev_receiver: Option<Arc<Mutex<Receiver<NotifyEvent>>>>,
     log: Log,
 }
@@ -69,6 +88,7 @@ impl CubeHypervisor {
         CubeHypervisor {
             status: HypStatus::Init,
             ch: None,
+            worker: None,
             config: config.clone(),
             ev_receiver: None,
             log,
@@ -87,9 +107,32 @@ impl CubeHypervisor {
             self.log.clone(),
         )
     }
-    pub async fn launch_vmm(&mut self) -> CResult<()> {
-        if let Some(_ch) = &self.ch {
-            return Err(self.status_err("oops: ch is not None".to_string()));
+    pub async fn launch_vmm(&mut self, placement: Option<&dyn WorkerPlacement>) -> CResult<()> {
+        if self.ch.is_some() || self.worker.is_some() {
+            return Err(self.status_err("oops: VMM backend is already initialized".to_string()));
+        }
+        let mut stat = self.new_stat(stat_defer::CALLEE_ACT_LAUNCH_VMM.to_string());
+        let worker_enabled = worker_backend_enabled()?;
+        if select_vmm_backend(worker_enabled, placement.is_some()) == VmmBackendRoute::Worker {
+            let (worker, receiver) = WorkerClient::spawn(
+                LaunchConfig::new(
+                    self.config.sandbox_id.clone(),
+                    self.config.log_level,
+                    self.config.ch_http_api.clone(),
+                ),
+                placement,
+            )?;
+            self.worker = Some(worker);
+            self.ev_receiver = Some(Arc::new(Mutex::new(receiver)));
+            self.status = HypStatus::Launched;
+            stat.set_ok();
+            return Ok(());
+        }
+        if worker_enabled {
+            infof!(
+                self.log,
+                "legacy Task path has no durable worker placement; using embedded VMM backend"
+            );
         }
         cube_hypervisor::set_runtime_seccomp_rules(
             runtime_seccomp_syscalls()
@@ -103,8 +146,6 @@ impl CubeHypervisor {
         vmm_config.event_notifier = Some(notifier);
         self.ev_receiver = Some(Arc::new(Mutex::new(receiver)));
 
-        let mut stat = self.new_stat(stat_defer::CALLEE_ACT_LAUNCH_VMM.to_string());
-
         let ch: cube_hypervisor::VmmInstance = cube_hypervisor::VmmInstance::new(vmm_config)
             .map_err(|e| self.status_err(format!("New vmm instance failed:{}", e)))?;
         self.ch = Some(Arc::new(Mutex::new(ch)));
@@ -114,6 +155,10 @@ impl CubeHypervisor {
     }
 
     pub async fn ping_vmm(&self, _timeout_ms: u64) -> CResult<()> {
+        if let Some(worker) = &self.worker {
+            worker.request(WorkerCommand::Ping, &[])?;
+            return Ok(());
+        }
         let ch = self.ch.as_ref().unwrap().lock().await;
         let _ = ch
             .send_request(ApiRequest::VmmPing)
@@ -123,10 +168,17 @@ impl CubeHypervisor {
     }
 
     pub async fn create_vm(&self, config: &VmConfig) -> CResult<()> {
+        let mut stat = self.new_stat(stat_defer::CALLEE_ACT_CREATE_VM.to_string());
+        if let Some(worker) = &self.worker {
+            let mut config = config.to_vm_config();
+            let descriptors = extract_vm_fds(&mut config);
+            worker.request(WorkerCommand::CreateVm(config), &descriptors)?;
+            stat.set_ok();
+            return Ok(());
+        }
         let ch = self.ch.as_ref().unwrap().lock().await;
         let vm_config = config.to_vm_config();
         let b_vm_config = Box::new(vm_config);
-        let mut stat = self.new_stat(stat_defer::CALLEE_ACT_CREATE_VM.to_string());
         let _ = ch
             .send_request(ApiRequest::VmCreate(b_vm_config))
             .map_err(|e| self.status_err(format!("Create vm failed:{}", e)))?
@@ -136,8 +188,14 @@ impl CubeHypervisor {
     }
 
     pub async fn boot_vm(&mut self) -> CResult<()> {
-        let ch = self.ch.as_ref().unwrap().lock().await;
         let mut stat = self.new_stat(stat_defer::CALLEE_ACT_BOOT_VM.to_string());
+        if let Some(worker) = &self.worker {
+            worker.request(WorkerCommand::BootVm, &[])?;
+            self.status = HypStatus::Running;
+            stat.set_ok();
+            return Ok(());
+        }
+        let ch = self.ch.as_ref().unwrap().lock().await;
         let _ = ch
             .send_request(ApiRequest::VmBoot)
             .map_err(|e| self.status_err(format!("Boot vm failed:{}", e)))?
@@ -148,6 +206,16 @@ impl CubeHypervisor {
     }
 
     pub async fn snapshot_vm(&self, path: &str, snapshot_type: SnapshotType) -> CResult<()> {
+        if let Some(worker) = &self.worker {
+            worker.request(
+                WorkerCommand::SnapshotVm {
+                    path: path.to_string(),
+                    snapshot_type,
+                },
+                &[],
+            )?;
+            return Ok(());
+        }
         let ch = self.ch.as_ref().unwrap().lock().await;
         let snap_config = Arc::new(SnapshotConfig {
             destination_url: path.to_string(),
@@ -163,6 +231,10 @@ impl CubeHypervisor {
     }
 
     pub async fn pause_vm(&self) -> CResult<()> {
+        if let Some(worker) = &self.worker {
+            worker.request(WorkerCommand::PauseVm, &[])?;
+            return Ok(());
+        }
         let ch = self.ch.as_ref().unwrap().lock().await;
         let _ = ch
             .send_request(ApiRequest::VmPause)
@@ -173,6 +245,10 @@ impl CubeHypervisor {
     }
 
     pub async fn resume_vm(&self) -> CResult<()> {
+        if let Some(worker) = &self.worker {
+            worker.request(WorkerCommand::ResumeVm, &[])?;
+            return Ok(());
+        }
         let ch = self.ch.as_ref().unwrap().lock().await;
         let _ = ch
             .send_request(ApiRequest::VmResume)
@@ -183,6 +259,10 @@ impl CubeHypervisor {
     }
 
     pub async fn restore_vm(&self, config: config::RestoreConfig) -> CResult<()> {
+        if let Some(worker) = &self.worker {
+            worker.request(WorkerCommand::RestoreVm(config), &[])?;
+            return Ok(());
+        }
         let ch = self.ch.as_ref().unwrap().lock().await;
         let mut stat = self.new_stat(stat_defer::CALLEE_ACT_RESTORE_VM.to_string());
         let restore_config = Arc::new(config);
@@ -196,6 +276,11 @@ impl CubeHypervisor {
 
     pub async fn set_fs(&self, config: FsConfig) -> CResult<()> {
         infof!(self.log, "update fs allow dir start");
+        if let Some(worker) = &self.worker {
+            worker.request(WorkerCommand::SetFs(config), &[])?;
+            infof!(self.log, "update fs allow dir finish");
+            return Ok(());
+        }
         let ch = self.ch.as_ref().unwrap().lock().await;
         let fs_config = Arc::new(config);
         let _ = ch
@@ -215,6 +300,20 @@ impl CubeHypervisor {
         };
         let act = format!("{}-{}", CALLE_ACTION_ADD_DEV_PRE, id_pre);
         let mut stat = self.new_stat(act);
+        if let Some(worker) = &self.worker {
+            let reply = worker.request(WorkerCommand::AddDevice(config), &[])?;
+            let bdf = match reply {
+                WorkerReply::ActionPayload(Some(payload)) => {
+                    serde_json::from_slice::<PciDeviceInfo>(&payload)
+                        .map_err(|error| format!("decode worker add-device response: {error}"))?
+                        .bdf
+                        .to_string()
+                }
+                WorkerReply::ActionPayload(None) | WorkerReply::Empty => String::new(),
+            };
+            stat.set_ok();
+            return Ok(bdf);
+        }
         let ch = self.ch.as_ref().unwrap().lock().await;
         let dev_config = Arc::new(config);
         let rsp = ch
@@ -235,6 +334,11 @@ impl CubeHypervisor {
 
     pub async fn remove_dev(&self, config: VmRemoveDeviceData) -> CResult<()> {
         infof!(self.log, "remove dev:{} start", config.id.clone());
+        if let Some(worker) = &self.worker {
+            worker.request(WorkerCommand::RemoveDevice(config), &[])?;
+            infof!(self.log, "remove dev finish");
+            return Ok(());
+        }
         let ch = self.ch.as_ref().unwrap().lock().await;
         let dev_config = Arc::new(config);
         let _ = ch
@@ -254,6 +358,10 @@ impl CubeHypervisor {
     /// After this call the hypervisor process is still alive and can host a new VM
     /// (e.g. restored from a snapshot via `resume_vm_cube_with_config`).
     pub async fn delete_vm(&self) -> CResult<()> {
+        if let Some(worker) = &self.worker {
+            worker.request(WorkerCommand::DeleteVm, &[])?;
+            return Ok(());
+        }
         let ch = self.ch.as_ref().unwrap().lock().await;
         let _ = ch
             .send_request(ApiRequest::VmDelete)
@@ -268,6 +376,12 @@ impl CubeHypervisor {
     /// `SandBox::client` is installed. The normal guest-driven shutdown path
     /// cannot cover that interval, so rollback must address the VMM directly.
     pub async fn shutdown_vmm(&mut self) -> CResult<()> {
+        if let Some(worker) = self.worker.take() {
+            let result = worker.shutdown();
+            self.status = HypStatus::Init;
+            self.ev_receiver = None;
+            return result;
+        }
         let Some(instance) = self.ch.take() else {
             self.status = HypStatus::Init;
             self.ev_receiver = None;
@@ -322,6 +436,9 @@ impl CubeHypervisor {
     }
 
     pub async fn join(&mut self) -> CResult<()> {
+        if let Some(worker) = &self.worker {
+            return worker.join();
+        }
         let mut ch = self.ch.as_mut().unwrap().lock().await;
         ch.join().map_err(|e| format!("join ch failed:{}", e))
     }
@@ -344,6 +461,10 @@ impl CubeHypervisor {
             memory_vol_url,
             ..Default::default()
         });
+        if let Some(worker) = &self.worker {
+            worker.request(WorkerCommand::PauseToSnapshot((*snap_config).clone()), &[])?;
+            return Ok(());
+        }
         let ch = self.ch.as_ref().unwrap().lock().await;
         let _ = ch
             .send_request(ApiRequest::VmPauseToSnapshot(snap_config))
@@ -358,6 +479,13 @@ impl CubeHypervisor {
             source_url: path.into(),
             ..Default::default()
         });
+        if let Some(worker) = &self.worker {
+            worker.request(
+                WorkerCommand::ResumeFromSnapshot((*restore_config).clone()),
+                &[],
+            )?;
+            return Ok(());
+        }
         let ch = self.ch.as_ref().unwrap().lock().await;
         let _ = ch
             .send_request(ApiRequest::VmResumeFromSnapshot(restore_config))
@@ -368,6 +496,10 @@ impl CubeHypervisor {
     }
 
     pub async fn resume_vm_cube_with_config(&self, config: RestoreConfig) -> CResult<()> {
+        if let Some(worker) = &self.worker {
+            worker.request(WorkerCommand::ResumeFromSnapshot(config), &[])?;
+            return Ok(());
+        }
         let restore_config = Arc::new(config);
         let ch = self.ch.as_ref().unwrap().lock().await;
         let _ = ch
@@ -376,6 +508,19 @@ impl CubeHypervisor {
             .map_err(|e| self.status_err(format!("resume vm from snapshot failed:{}", e)))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod backend_tests {
+    use super::{select_vmm_backend, VmmBackendRoute};
+
+    #[test]
+    fn backend_route_requires_worker_switch_and_managed_placement() {
+        assert_eq!(select_vmm_backend(true, true), VmmBackendRoute::Worker);
+        assert_eq!(select_vmm_backend(true, false), VmmBackendRoute::Embedded);
+        assert_eq!(select_vmm_backend(false, true), VmmBackendRoute::Embedded);
+        assert_eq!(select_vmm_backend(false, false), VmmBackendRoute::Embedded);
     }
 }
 

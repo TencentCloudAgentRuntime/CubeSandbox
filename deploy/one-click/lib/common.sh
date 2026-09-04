@@ -642,6 +642,17 @@ if not isinstance(data, dict):
 for key in ("components", "guest_image", "kernel"):
     if key not in data:
         raise ValueError(f"release manifest missing required key: {key}")
+components = data["components"]
+if not isinstance(components, dict):
+    raise ValueError("release manifest components must be a JSON object")
+for name in ("containerd-shim-cube-rs", "cube-vmm-worker", "cube-runtime"):
+    component = components.get(name)
+    if not isinstance(component, dict):
+        raise ValueError(f"release manifest missing required runtime component: {name}")
+    digest = component.get("digest_sha256")
+    if not isinstance(digest, str) or len(digest) != 71 or not digest.startswith("sha256:"):
+        raise ValueError(f"release manifest has invalid digest for runtime component: {name}")
+    int(digest[7:], 16)
 PY
   log "release manifest contract OK: ${manifest_path}"
 }
@@ -1408,6 +1419,7 @@ DEPRECATED_KEYS = {
     "ONE_CLICK_CUBE_AGENT_BIN",
     "ONE_CLICK_CUBE_INIT_BIN",
     "ONE_CLICK_CUBESHIM_BIN",
+    "ONE_CLICK_CUBE_VMM_WORKER_BIN",
     "ONE_CLICK_CUBE_RUNTIME_BIN",
     "ONE_CLICK_GUEST_IMAGE_DOCKERFILE",
     "ONE_CLICK_GUEST_IMAGE_CONTEXT_DIR",

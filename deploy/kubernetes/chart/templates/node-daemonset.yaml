@@ -83,7 +83,7 @@ spec:
                   - -ec
                   - |
                     # Kill only this container's pidfile. Never pkill -f —
-                    # must not match containerd-shim-cube-rs / cube-runtime / VMM.
+                    # must not match containerd-shim-cube-rs / cube-vmm-worker / cube-runtime / VMM.
                     pidfile=/run/cube-node/cubelet.pid
                     if [[ -f "${pidfile}" ]]; then
                       kill -TERM "$(cat "${pidfile}")" 2>/dev/null || true

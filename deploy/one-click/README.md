@@ -5,7 +5,7 @@ This directory is used to build and deliver the single-machine one-click release
 ## Directory Overview
 
 - `build-release-bundle-builder.sh`: Recommended entry point. Compiles the components needed by one-click inside a builder image, then continues the release package assembly on the host machine.
-- `build-vm-assets.sh`: Builds `containerd-shim-cube-rs`, `cube-runtime`, guest image (with `cube-init` as `/sbin/init`), and independent `cube-agent.ext4`; collects the guest kernel.
+- `build-vm-assets.sh`: Builds `containerd-shim-cube-rs`, `cube-vmm-worker`, `cube-runtime`, guest image (with `cube-init` as `/sbin/init`), and independent `cube-agent.ext4`; collects the guest kernel.
 - `build-guest-image.sh`: Builds guest OS image with lightweight `cube-init` only (no baked-in agent).
 - `build-agent-ext4.sh`: Builds independent `cube-agent/cube-agent.ext4` (+ `version`) for virtio-pmem1.
 - `build-release-bundle.sh`: Low-level packaging entry point. Consumes either the source tree or `ONE_CLICK_*_BIN` pre-built artifacts, assembles `sandbox-package`, and produces the final release package.
@@ -107,7 +107,7 @@ When this variable is set, the host wrapper copies the file into `deploy/one-cli
 
 This entry point will:
 
-- Compile `cubemaster`, `cubemastercli`, `cubelet`, `cubecli`, `cube-api`, `cube-agent`, `containerd-shim-cube-rs`, and `cube-runtime` inside a container using the root-level builder image. The network runtime is embedded in `cubelet` and no standalone network runtime binary is built.
+- Compile `cubemaster`, `cubemastercli`, `cubelet`, `cubecli`, `cube-api`, `cube-agent`, `containerd-shim-cube-rs`, `cube-vmm-worker`, and `cube-runtime` inside a container using the root-level builder image. The network runtime is embedded in `cubelet` and no standalone network runtime binary is built.
 - Run `go mod download` for `CubeMaster` and `Cubelet` inside the builder. The first build will fetch Go modules online; subsequent builds reuse the module cache under the builder's HOME directory.
 - Place the pre-built artifacts in `deploy/one-click/.work/prebuilt/`.
 - Return to the host machine and call `build-release-bundle.sh` to build the WebUI static assets, continue with guest image generation, and finish final packaging.
@@ -144,7 +144,7 @@ The release package contains:
 - `sandbox-package.tar.gz`
 - `release-manifest.json`
 - `CubeAPI/bin/cube-api`
-- `containerd-shim-cube-rs`, `cube-runtime`
+- `containerd-shim-cube-rs`, `cube-vmm-worker`, `cube-runtime`
 - Locally built `cube-image/cube-guest-image-cpu.img` (with `cube-init` as `/sbin/init`)
 - Independent `cube-agent/cube-agent.ext4` (+ `cube-agent/version`)
 - `cubeproxy/` directory and its build context
