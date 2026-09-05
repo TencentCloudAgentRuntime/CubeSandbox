@@ -71,17 +71,18 @@ metadata:
   name: cube
   annotations:
     cubesandbox.io/poc-resource: "勿删"
+    cubesandbox.io/poc-overhead-profile: "vm-768Mi"
 handler: cube
 overhead:
   podFixed:
     cpu: 250m
-    memory: 256Mi
+    memory: 768Mi
 scheduling:
   nodeSelector:
     cubesandbox.io/runtime: cube
 EOF
 "${kube[@]}" get runtimeclass cube -o json \
-  | jq -e '.handler == "cube" and .overhead.podFixed.cpu == "250m" and .overhead.podFixed.memory == "256Mi" and .scheduling.nodeSelector["cubesandbox.io/runtime"] == "cube" and .metadata.annotations["cubesandbox.io/poc-resource"] == "勿删"' >/dev/null
+  | jq -e '.handler == "cube" and .overhead.podFixed.cpu == "250m" and .overhead.podFixed.memory == "768Mi" and .scheduling.nodeSelector["cubesandbox.io/runtime"] == "cube" and .metadata.annotations["cubesandbox.io/poc-resource"] == "勿删" and .metadata.annotations["cubesandbox.io/poc-overhead-profile"] == "vm-768Mi"' >/dev/null
 
 ctr --address /run/containerd/containerd.sock --namespace k8s.io containers list -q | sort >"$evidence/containers-before.txt"
 ctr --address /run/containerd/containerd.sock --namespace k8s.io tasks list -q | sort >"$evidence/tasks-before.txt"

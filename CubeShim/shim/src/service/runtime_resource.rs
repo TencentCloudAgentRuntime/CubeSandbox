@@ -3216,7 +3216,7 @@ mod tests {
             host_resource_ceiling_with_config(&v1, &HashMap::new(), &node).unwrap(),
             HostResourceCeiling {
                 cpu_max: "125000 100000".to_string(),
-                memory_max: "536870912".to_string(),
+                memory_max: "805306368".to_string(),
                 pids_max: "512".to_string(),
                 memory_oom_group: "1".to_string(),
             }
@@ -3247,7 +3247,7 @@ mod tests {
         );
         let v3_ceiling = host_resource_ceiling_with_config(&v3, &HashMap::new(), &node).unwrap();
         assert_eq!(v3_ceiling.cpu_max, "125000 100000");
-        assert_eq!(v3_ceiling.memory_max, "603979776");
+        assert_eq!(v3_ceiling.memory_max, "805306368");
 
         let v4 = ceiling_config(
             CriLinuxContainerResources {
@@ -3261,7 +3261,7 @@ mod tests {
         );
         let v4 = host_resource_ceiling_with_config(&v4, &HashMap::new(), &node).unwrap();
         assert_eq!(v4.cpu_max, "125000 100000");
-        assert_eq!(v4.memory_max, "671088640");
+        assert_eq!(v4.memory_max, "805306368");
 
         let v5_annotations = HashMap::from([(
             ANNO_VM_RES.to_string(),
@@ -3313,7 +3313,7 @@ mod tests {
         let v10 = ceiling_config(CriLinuxContainerResources::default(), v10_overhead);
         let v10 = host_resource_ceiling_with_config(&v10, &HashMap::new(), &node).unwrap();
         assert_eq!(v10.cpu_max, "150000 100000");
-        assert_eq!(v10.memory_max, "805306368");
+        assert_eq!(v10.memory_max, "1073741824");
     }
 
     #[test]

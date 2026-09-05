@@ -4,11 +4,12 @@ metadata:
   name: cube
   annotations:
     cubesandbox.io/poc-resource: "勿删"
+    cubesandbox.io/poc-overhead-profile: "vm-768Mi"
 handler: cube
 overhead:
   podFixed:
     cpu: 250m
-    memory: 256Mi
+    memory: 768Mi
 scheduling:
   nodeSelector:
     cubesandbox.io/runtime: cube
