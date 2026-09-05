@@ -1002,34 +1002,46 @@ fn ensure_symlink(src: &str, dst: &str) -> Result<()> {
     }
 }
 
-fn dev_rel_path(path: &str) -> Option<&Path> {
+// Resolve an OCI device path below the container rootfs. The OCI runtime
+// specification explicitly permits device nodes outside /dev, which is used
+// by Kubernetes device-plugin and CDI conformance tests. Resolve image
+// symlinks while the container is still stopped so the relative path cannot
+// escape the rootfs when mknod is called below.
+fn device_rel_path(rootfs: &Path, path: &str) -> Option<PathBuf> {
     let path = Path::new(path);
 
-    if !path.starts_with("/dev")
-        || path == Path::new("/dev")
+    if !path.is_absolute()
+        || path == Path::new("/")
         || path.components().any(|c| c == Component::ParentDir)
     {
         return None;
     }
-    path.strip_prefix("/").ok()
+
+    let rootfs = rootfs.to_str()?;
+    PathBuf::from(secure_join(rootfs, path.to_str()?))
+        .strip_prefix(rootfs)
+        .ok()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(Path::to_path_buf)
 }
 
 fn create_devices(devices: &[LinuxDevice], bind: bool) -> Result<()> {
     let op: fn(&LinuxDevice, &Path) -> Result<()> = if bind { bind_dev } else { mknod_dev };
     let old = stat::umask(Mode::from_bits_truncate(0o000));
+    let rootfs = unistd::getcwd().context("get container rootfs for device creation")?;
     for dev in DEFAULT_DEVICES.iter() {
         let path = Path::new(&dev.path[1..]);
         op(dev, path).context(format!("Creating container device {:?}", dev))?;
     }
     for dev in devices {
-        let path = dev_rel_path(&dev.path).ok_or_else(|| {
+        let path = device_rel_path(&rootfs, &dev.path).ok_or_else(|| {
             let msg = format!("{} is not a valid device path", dev.path);
             anyhow!(msg)
         })?;
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).context(format!("Creating container device {:?}", dev))?;
         }
-        op(dev, path).context(format!("Creating container device {:?}", dev))?;
+        op(dev, &path).context(format!("Creating container device {:?}", dev))?;
     }
     stat::umask(old);
     Ok(())
@@ -1906,24 +1918,53 @@ mod tests {
     }
 
     #[test]
-    fn test_dev_rel_path() {
+    fn test_device_rel_path() {
+        let rootfs = tempdir().unwrap();
+        create_dir(rootfs.path().join("tmp")).unwrap();
+        unix::fs::symlink("tmp", rootfs.path().join("tmp-link")).unwrap();
+
         // Valid device paths
-        assert_eq!(dev_rel_path("/dev/sda").unwrap(), Path::new("dev/sda"));
-        assert_eq!(dev_rel_path("//dev/sda").unwrap(), Path::new("dev/sda"));
         assert_eq!(
-            dev_rel_path("/dev/vfio/99").unwrap(),
+            device_rel_path(rootfs.path(), "/dev/sda").unwrap(),
+            Path::new("dev/sda")
+        );
+        assert_eq!(
+            device_rel_path(rootfs.path(), "//dev/sda").unwrap(),
+            Path::new("dev/sda")
+        );
+        assert_eq!(
+            device_rel_path(rootfs.path(), "/dev/vfio/99").unwrap(),
             Path::new("dev/vfio/99")
         );
-        assert_eq!(dev_rel_path("/dev/...").unwrap(), Path::new("dev/..."));
-        assert_eq!(dev_rel_path("/dev/a..b").unwrap(), Path::new("dev/a..b"));
-        assert_eq!(dev_rel_path("/dev//foo").unwrap(), Path::new("dev/foo"));
+        assert_eq!(
+            device_rel_path(rootfs.path(), "/tmp/CDI-Dev-2").unwrap(),
+            Path::new("tmp/CDI-Dev-2")
+        );
+        assert_eq!(
+            device_rel_path(rootfs.path(), "/etc/device").unwrap(),
+            Path::new("etc/device")
+        );
+        assert_eq!(
+            device_rel_path(rootfs.path(), "/tmp-link/device").unwrap(),
+            Path::new("tmp/device")
+        );
+        assert_eq!(
+            device_rel_path(rootfs.path(), "/dev/...").unwrap(),
+            Path::new("dev/...")
+        );
+        assert_eq!(
+            device_rel_path(rootfs.path(), "/dev/a..b").unwrap(),
+            Path::new("dev/a..b")
+        );
+        assert_eq!(
+            device_rel_path(rootfs.path(), "/dev//foo").unwrap(),
+            Path::new("dev/foo")
+        );
 
         // Bad device paths
-        assert!(dev_rel_path("/devfoo").is_none());
-        assert!(dev_rel_path("/etc/passwd").is_none());
-        assert!(dev_rel_path("/dev/../etc/passwd").is_none());
-        assert!(dev_rel_path("dev/foo").is_none());
-        assert!(dev_rel_path("").is_none());
-        assert!(dev_rel_path("/dev").is_none());
+        assert!(device_rel_path(rootfs.path(), "/dev/../etc/passwd").is_none());
+        assert!(device_rel_path(rootfs.path(), "dev/foo").is_none());
+        assert!(device_rel_path(rootfs.path(), "").is_none());
+        assert!(device_rel_path(rootfs.path(), "/").is_none());
     }
 }
