@@ -5,10 +5,14 @@
 use containerd_shim::parse;
 use containerd_shim_cube_rs::common;
 use containerd_shim_cube_rs::service;
+use containerd_shim_protos::{
+    protobuf::{well_known_types::any::Any, Message, MessageField},
+    types::introspection::{RuntimeInfo, RuntimeVersion},
+};
 
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use tokio::runtime::Builder;
 //const SHIM_VERSION: &str = env!("GIT_COMMIT_INFO");
 //const CH_VERSION: &str = env!("CH_GIT_COMMIT_INFO");
@@ -78,13 +82,53 @@ fn is_runtime_info_request(args: &[OsString]) -> bool {
     })
 }
 
-fn handle_runtime_info_request() -> io::Result<()> {
-    // containerd v2 expects shim -info to print a RuntimeInfo protobuf.
-    // An empty message is sufficient for CubeShim because we do not expose
-    // extra runtime capabilities through this probe yet.
-    io::copy(&mut io::stdin().lock(), &mut io::sink())?;
-    io::stdout().flush()?;
+fn handle_runtime_info_request() -> Result<(), Box<dyn std::error::Error>> {
+    // containerd writes runtime options to stdin and expects a RuntimeInfo
+    // protobuf on stdout. Cube does not consume the options today.
+    let mut _options = Vec::new();
+    io::stdin().lock().read_to_end(&mut _options)?;
+    let encoded = runtime_info().write_to_bytes()?;
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(&encoded)?;
+    stdout.flush()?;
     Ok(())
+}
+
+fn runtime_info() -> RuntimeInfo {
+    RuntimeInfo {
+        name: "io.containerd.cube.rs".to_string(),
+        version: MessageField::some(RuntimeVersion {
+            version: common::SHIM_VERSION.to_string(),
+            revision: common::SHIM_COMMIT.to_string(),
+            ..Default::default()
+        }),
+        features: MessageField::some(Any {
+            type_url: "types.containerd.io/opencontainers/runtime-spec/1/features/Features"
+                .to_string(),
+            value: br#"{"ociVersionMin":"1.0.0","ociVersionMax":"1.2.0","mountOptions":["rro"]}"#
+                .to_vec(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_info_advertises_recursive_read_only_mounts() {
+        let encoded = runtime_info().write_to_bytes().unwrap();
+        let decoded = RuntimeInfo::parse_from_bytes(&encoded).unwrap();
+        let features = decoded.features.as_ref().unwrap();
+        assert_eq!(
+            features.type_url,
+            "types.containerd.io/opencontainers/runtime-spec/1/features/Features"
+        );
+        let json: serde_json::Value = serde_json::from_slice(&features.value).unwrap();
+        assert_eq!(json["mountOptions"], serde_json::json!(["rro"]));
+    }
 }
 
 fn set_process() {
