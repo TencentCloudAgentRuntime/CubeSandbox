@@ -16,12 +16,12 @@ use netlink_packet_route::route::{
     RouteType,
 };
 use netlink_packet_route::AddressFamily;
-use nix::errno::Errno;
 use protocols::types::{ARPNeighbor, IPAddress, IPFamily, Interface, Route};
 use rtnetlink::{new_connection, IpVersion};
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::num::NonZeroI32;
 use std::ops::Deref;
 use std::str::{self, FromStr};
 // Convenience macro to obtain the scope logger
@@ -41,6 +41,32 @@ const ALL_RULE_FLAGS: [NeighbourFlag; 8] = [
     NeighbourFlag::Sticky,
     NeighbourFlag::Router,
 ];
+
+/// Return true when the kernel rejected an idempotent connected-route add.
+///
+/// Netlink reports errors as negative errno values. Assigning an address to an
+/// interface makes the kernel install its connected route before the runtime
+/// replays the route list supplied by CNI, so adding that same route returns
+/// `-EEXIST`. Only ignore that error for a directly connected route whose
+/// preferred source belongs to the destination network; gateway routes and
+/// malformed routes must still fail.
+fn connected_route_already_exists(code: Option<NonZeroI32>, route: &Route) -> bool {
+    if code.map(NonZeroI32::get) != Some(-libc::EEXIST)
+        || !route.gateway.is_empty()
+        || route.dest.is_empty()
+        || route.source.is_empty()
+    {
+        return false;
+    }
+
+    match (
+        IpNetwork::from_str(&route.dest),
+        IpNetwork::from_str(&route.source),
+    ) {
+        (Ok(destination), Ok(source)) => destination.contains(source.ip()),
+        _ => false,
+    }
+}
 
 /// Search criteria to use when looking for a link in `find_link`.
 pub enum LinkFilter<'a> {
@@ -404,17 +430,19 @@ impl Handle {
                     request = request.gateway(ip);
                 }
 
-                if let Err(rtnetlink::Error::NetlinkError(message)) = request.execute().await {
-                    if let Some(code) = message.code {
-                        if Errno::from_i32(code.get()) != Errno::EEXIST {
-                            return Err(anyhow!(
-                                "Failed to add IP v6 route (src: {}, dst: {}, gtw: {},Err: {})",
-                                route.source(),
-                                route.dest(),
-                                route.gateway(),
-                                message
-                            ));
-                        }
+                if let Err(err) = request.execute().await {
+                    if !matches!(
+                        &err,
+                        rtnetlink::Error::NetlinkError(message)
+                            if connected_route_already_exists(message.code, &route)
+                    ) {
+                        return Err(anyhow!(
+                            "Failed to add IP v6 route (src: {}, dst: {}, gtw: {}, Err: {})",
+                            route.source(),
+                            route.dest(),
+                            route.gateway(),
+                            err
+                        ));
                     }
                 }
             } else {
@@ -458,17 +486,19 @@ impl Handle {
                     request = request.gateway(ip);
                 }
 
-                if let Err(rtnetlink::Error::NetlinkError(message)) = request.execute().await {
-                    if let Some(code) = message.code {
-                        if Errno::from_i32(code.get()) != Errno::EEXIST {
-                            return Err(anyhow!(
-                                "Failed to add IP v4 route (src: {}, dst: {}, gtw: {},Err: {})",
-                                route.source(),
-                                route.dest(),
-                                route.gateway(),
-                                message
-                            ));
-                        }
+                if let Err(err) = request.execute().await {
+                    if !matches!(
+                        &err,
+                        rtnetlink::Error::NetlinkError(message)
+                            if connected_route_already_exists(message.code, &route)
+                    ) {
+                        return Err(anyhow!(
+                            "Failed to add IP v4 route (src: {}, dst: {}, gtw: {}, Err: {})",
+                            route.source(),
+                            route.dest(),
+                            route.gateway(),
+                            err
+                        ));
                     }
                 }
             }
@@ -858,7 +888,53 @@ mod tests {
     use crate::{skip_if_no_cap, skip_if_not_root};
     use capctl::caps::Cap;
     use std::iter;
+    use std::num::NonZeroI32;
     use std::process::Command;
+
+    fn route(dest: &str, source: &str, gateway: &str) -> Route {
+        Route {
+            dest: dest.to_owned(),
+            source: source.to_owned(),
+            gateway: gateway.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn connected_route_eexist_is_idempotent() {
+        let eexist = NonZeroI32::new(-libc::EEXIST);
+
+        assert!(connected_route_already_exists(
+            eexist,
+            &route("10.254.0.0/24", "10.254.0.21", "")
+        ));
+        assert!(connected_route_already_exists(
+            eexist,
+            &route("fd00::/64", "fd00::21", "")
+        ));
+    }
+
+    #[test]
+    fn connected_route_conflicts_are_not_ignored() {
+        let eexist = NonZeroI32::new(-libc::EEXIST);
+
+        assert!(!connected_route_already_exists(
+            NonZeroI32::new(-libc::EINVAL),
+            &route("10.254.0.0/24", "10.254.0.21", "")
+        ));
+        assert!(!connected_route_already_exists(
+            eexist,
+            &route("0.0.0.0/0", "10.254.0.21", "10.254.0.1")
+        ));
+        assert!(!connected_route_already_exists(
+            eexist,
+            &route("10.254.0.0/24", "10.255.0.21", "")
+        ));
+        assert!(!connected_route_already_exists(
+            eexist,
+            &route("not-a-network", "10.254.0.21", "")
+        ));
+    }
 
     #[tokio::test]
     async fn find_link_by_name() {
