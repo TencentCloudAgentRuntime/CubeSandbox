@@ -776,17 +776,6 @@ fn recursive_read_only_requested(m: &Mount) -> bool {
     m.options.iter().any(|option| option == "rro")
 }
 
-fn validate_recursive_read_only(m: &Mount, flags: MsFlags) -> Result<bool> {
-    let requested = recursive_read_only_requested(m);
-    if requested && !flags.contains(MsFlags::MS_RDONLY) {
-        return Err(anyhow!(
-            "recursive read-only mount {} requires the ro option",
-            m.destination
-        ));
-    }
-    Ok(requested)
-}
-
 #[cfg(not(test))]
 fn set_recursive_read_only(path: &str) -> Result<()> {
     let path = CString::new(path).map_err(|_| anyhow!("mount path contains NUL byte"))?;
@@ -874,7 +863,12 @@ fn mount_from(
     data: &str,
     _label: &str,
 ) -> Result<()> {
-    let recursive_read_only = validate_recursive_read_only(m, flags)?;
+    // OCI `rro` is itself the request to make this mount and all of its
+    // submounts read-only. containerd does not have to duplicate that request
+    // with a separate `ro` option. The mount is changed before the container
+    // process starts, so accepting `rro` alone does not expose a writable
+    // interval to the workload.
+    let recursive_read_only = recursive_read_only_requested(m);
 
     let d = String::from(data);
     let dest = secure_join(rootfs, &m.destination);
@@ -1635,7 +1629,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recursive_read_only_requires_read_only() {
+    fn test_recursive_read_only_option_is_self_contained() {
         let mount = Mount {
             source: "/source".to_string(),
             destination: "/destination".to_string(),
@@ -1644,9 +1638,8 @@ mod tests {
         };
         let (flags, _, data) = parse_mount(&mount);
 
-        let result = validate_recursive_read_only(&mount, flags);
-        assert!(result.is_err());
-        assert!(format!("{}", result.unwrap_err()).contains("requires the ro option"));
+        assert!(!flags.contains(MsFlags::MS_RDONLY));
+        assert!(recursive_read_only_requested(&mount));
         assert_eq!(data, "");
     }
 
@@ -1660,7 +1653,8 @@ mod tests {
         };
         let (flags, _, data) = parse_mount(&mount);
 
-        assert!(validate_recursive_read_only(&mount, flags).unwrap());
+        assert!(flags.contains(MsFlags::MS_RDONLY));
+        assert!(recursive_read_only_requested(&mount));
         assert_eq!(data, "");
     }
 
