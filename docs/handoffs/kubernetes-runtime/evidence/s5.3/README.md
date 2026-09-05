@@ -2,9 +2,10 @@
 
 ## 当前状态
 
-`IN_PROGRESS`。本文件先固定已验证的执行方式、错误模式和门禁结论；完整 477 项结果、
-失败分类、清理及 reviewer 结论尚未补齐。Guest dummy netdev 缺口已经修复并通过官方
-单项门禁；修复后的完整运行正在进行。未完成重跑前不得把 S5.3 标记为 `DONE`。
+`DONE`。官方 477 个 `[NodeConformance]` `It` 已通过互斥分片完整执行并唯一归并，
+结果为 456 Passed、17 Failed、4 Skipped；17 个失败与 4 个 Skip 均已逐项分类，测试环境
+已经恢复，W1/W2 最终 exact-zero。同一 reviewer 终审 `PASS`（P0/P1/P2=0）；
+完整结果见 [S5.3b/S5.3c 最终报告](./s5.3b-nodeconformance.md)。
 
 ## 固定环境与制品
 
@@ -13,9 +14,10 @@
   `fe66edafa1595ee7bfb55bcbdf107e6dca7a7c1e59dd15ecff1f6575793f3b5b`。
 - 官方 `e2e_node.test` SHA-256：
   `560a097a5aef06fe640d9bfe87d4a67dda3faafd599d7d5f028ae21fab6ec408`。
-- 已验证实现 commit：`1df1da09`；W1 CubeShim SHA-256 前缀 `e0052c7e`，Agent ext4
-  SHA-256 前缀 `c768706b`。
-- 目标节点：`cubesandbox-s0-worker`；运行时根：
+- 最终 Host runtime commit：`0e0258fb`；最终 Agent commit：`64381287`、tree
+  `41297a0a1ed1eb88ff39ab0e34245278fad67ecc`。CubeShim/worker/runtime SHA-256 前缀
+  分别为 `410d1799`、`3ff0b7d9`、`ea6df43e`，Agent ext4 为 `3c36bcb9…`。
+- 目标节点：`cubesandbox-s0-worker` 与 `vm-200-13-ubuntu`；运行时根：
   `/opt/cubesandbox-s0-multinode-runtime-2269a3b3`。
 
 ## 为什么不能使用 containerd 缺省 Cube handler
@@ -88,10 +90,11 @@ kubelet unit，无法识别 kubeadm 默认的 `kubelet.service`；测试期由�
 ## 已确认的非阻断差异
 
 1. memory-backed EmptyDir 经 Host tmpfs bind + 固定 virtiofs Volume 通道进入 Guest，
-   数据、mode、共享和清理正确，但 mount identity 为 FUSE。三项标准 tmpfs 类型断言会
-   失败；按 `K8S-OQ-025` 转 S5.4 设计 Guest Pod 级 tmpfs，不能伪造 statfs。
-2. 首版明确不支持 hostNetwork/hostPID/hostIPC；完整报告中相关失败按支持面外分类，
-   不把它们伪装成已通过。
+   数据、mode、FSGroup、共享和清理正确，但 mount identity 为 FUSE。最终有 12 项标准
+   tmpfs 类型断言失败；按 `K8S-OQ-025` 转 S6.1 设计 Guest Pod 级 tmpfs，不能伪造 statfs。
+2. 首版明确不支持 hostNetwork/hostPID/hostIPC。最终有 3 个 hostNetwork 相关用例通过，
+   但测试对象按准入排除规则走 runc 或只验证 API 拒绝，因此计入官方 Passed 总数、但不
+   计入 Cube 可归因通过数。
 3. NodeAllocatable Host OOM 的无 limit 语义不属于本次 NodeConformance 集合，按
    `K8S-OQ-026` 记录。
 4. `PrivilegedPod` 暴露的 dummy netdev 缺口已关闭，不再属于已知差异，修复证据见下节。
@@ -111,7 +114,9 @@ containerd 的 Sandbox metadata 由 kubelet 异步 GC，在约 55 秒后走标�
 
 ## 完整运行历史
 
-所有运行均使用 focus `\[NodeConformance\]`，选择 477 / 1197 specs；runner 为
+最终 dry-run 基准使用 focus `\[NodeConformance\]`，从 1197 个注册 spec 中选出 477 个
+唯一 `It`。部分包含 AppArmor 环境注册的执行报告其 `PreRunStats.TotalSpecs=1201`；归并不
+依赖该总数，而只接受 dry-run 的 477 个唯一键及互斥源文件分片。runner 为
 `--start-services=false --stop-services=false`，凭证仅来自节点本地临时投影，不写入仓库。
 
 - `inv-686tgvghci`，report `node-conformance-runtimeclass-full-2`：在发现执行器路径问题后
@@ -131,6 +136,11 @@ containerd 的 Sandbox metadata 由 kubelet 异步 GC，在约 55 秒后走标�
   398/477 项，357 Passed、41 Failed、79 未执行。Ginkgo JSON SHA-256 为
   `f641f3bb55c0c1bd822430cd054191efbe0d4291defbd56b4b5fae00e0618209`，JUnit XML
   SHA-256 为 `c0c4890656fd84420007c64ce11c1404ac22b8d0ff388422842af6ac165fb226`。
+- worker 快路径最终分片执行：477/477 无遗漏、无重复，归并为 456 Passed、17 Failed、
+  4 Skipped。最终 Agent 的 Device/PodResources 重跑 `inv-389w3ggrk9` 为 10/10 通过、
+  1 个 SR-IOV 条件 Skip。终审中以正确 shim manager privileged 门禁精确重跑 NFS mirror
+  与 non-recursive RRO，两项均进入真实业务断言后失败，最终计数不变；完整输入哈希、
+  失败名称与责任层见最终报告。
 
 ## 缓存镜像 Pod 热启动诊断
 
@@ -152,14 +162,13 @@ Cloud Hypervisor `LaunchVmm`/`BootVm` API 平均 1/18ms，Agent `CreateSandbox` 
 `inv-v88827gg63` 删除；`inv-b8882igpkh` 等待 containerd 异步 GC 后确认匹配的 CRI
 Pod/container 均为 0。此项作为 `K8S-OQ-030` 转 S5.4，不阻断 S5.3 功能验收。
 
-## 完成前必须补齐
+## 最终收口
 
-1. 将 full-4 失败分为：首版支持面外、已知非阻断差异、runner/环境、真实 Cube 缺陷。
-2. 对阻断主路径的真实缺陷完成修复和定向回归；其余问题必须有连续问题 ID 和后续
-   Stage。
-3. 删除 e2e namespace，并确认 W1 exact-zero。
-4. 删除 mutation policy/binding；恢复 `kubelet.service`；移除 containerd e2e 片段；
-   删除 auth carrier/SA/RBAC。
-5. 启动 control/W2 kubelet，恢复 3/3 Ready，完成双 Worker exact-zero。
-6. 运行 `make handoff-validate`，由同一 reviewer 审计；没有 reviewer `APPROVE` 不得
-   标记 S5.3 `DONE`。
+1. full-4 旧失败已被最终分片替代；16 个当前架构差异、1 个 runner/环境失败和 4 个 Skip
+   都有上游用例、责任层、问题 ID 与后续方案。
+2. e2e namespace、临时 admission policy/binding、auth namespace、ClusterRoleBinding 和
+   节点本地 token 已删除；普通 kubelet、原 CNI 与系统 workloads 已恢复。
+3. 终审重跑后 W1/W2 再次均 Ready，kube-system 非 Ready Pod=0，双 Worker 的 Sandbox、
+   lease、VM、TAP、mount、scope 均精确为 0；`RuntimeClass/cube` 保留供后续 S6 使用。
+4. 同一 reviewer 最终审计 `PASS`（P0/P1/P2=0），`make handoff-validate` 通过，S5.3
+   状态已收口为 `DONE`。
