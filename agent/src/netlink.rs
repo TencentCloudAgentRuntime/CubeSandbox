@@ -1223,6 +1223,13 @@ mod tests {
             return;
         }
         run_ip(&["link", "add", "cube-e2e1", "type", "dummy"]).unwrap();
+        for interface in ["cube-e2e0", "cube-e2e1"] {
+            std::fs::write(
+                format!("/proc/sys/net/ipv6/conf/{}/disable_ipv6", interface),
+                b"0",
+            )
+            .unwrap();
+        }
         run_ip(&["link", "set", "cube-e2e0", "up"]).unwrap();
         run_ip(&["link", "set", "cube-e2e1", "up"]).unwrap();
         run_ip(&["addr", "add", "192.0.2.2/24", "dev", "cube-e2e0"]).unwrap();
