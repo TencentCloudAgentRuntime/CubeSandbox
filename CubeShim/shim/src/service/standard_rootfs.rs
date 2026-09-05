@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::io;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -397,6 +398,7 @@ fn export_host_bind_mounts(
             ));
         }
 
+        mirror_export_target_mode(&metadata, &export_target)?;
         bind_mount(&source, &export_target, metadata.is_dir())?;
         mounted.push(export_target);
         mount.set_source(Some(guest_bind_source(
@@ -407,6 +409,17 @@ fn export_host_bind_mounts(
         )));
     }
     Ok(())
+}
+
+fn mirror_export_target_mode(metadata: &fs::Metadata, export_target: &Path) -> Result<(), String> {
+    let mode = metadata.mode() & 0o7777;
+    fs::set_permissions(export_target, fs::Permissions::from_mode(mode)).map_err(|error| {
+        format!(
+            "set host bind export mode {:04o} on {} failed: {error}",
+            mode,
+            export_target.display()
+        )
+    })
 }
 
 fn host_bind_export_target(
@@ -894,6 +907,37 @@ mod tests {
             ),
             PathBuf::from("/shared/volumes/task-a-42-7/003")
         );
+    }
+
+    #[test]
+    fn host_bind_export_target_mirrors_source_mode() {
+        let root = std::env::temp_dir().join(format!(
+            "cubesandbox-host-bind-mode-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source_dir = root.join("source-dir");
+        let target_dir = root.join("target-dir");
+        fs::create_dir(&source_dir).unwrap();
+        fs::create_dir(&target_dir).unwrap();
+        fs::set_permissions(&source_dir, fs::Permissions::from_mode(0o1777)).unwrap();
+        fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        mirror_export_target_mode(&fs::metadata(&source_dir).unwrap(), &target_dir).unwrap();
+
+        assert_eq!(fs::metadata(&target_dir).unwrap().mode() & 0o7777, 0o1777);
+
+        let source_file = root.join("source-file");
+        let target_file = root.join("target-file");
+        fs::write(&source_file, b"source").unwrap();
+        fs::write(&target_file, b"target").unwrap();
+        fs::set_permissions(&source_file, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::set_permissions(&target_file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        mirror_export_target_mode(&fs::metadata(&source_file).unwrap(), &target_file).unwrap();
+
+        assert_eq!(fs::metadata(&target_file).unwrap().mode() & 0o7777, 0o640);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
