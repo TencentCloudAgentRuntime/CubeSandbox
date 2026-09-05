@@ -779,6 +779,23 @@ fn recursive_read_only_requested(m: &Mount) -> bool {
 #[cfg(not(test))]
 fn set_recursive_read_only(path: &str) -> Result<()> {
     let path = CString::new(path).map_err(|_| anyhow!("mount path contains NUL byte"))?;
+    // Multiple OCI mounts can be bind views of the same propagated volume
+    // subtree. Isolate this view before changing attributes recursively, or
+    // the read-only transition can leak to a sibling mount which explicitly
+    // requested non-recursive read-only (or read-write) semantics.
+    mount(
+        None::<&str>,
+        path.as_c_str(),
+        None::<&str>,
+        MsFlags::MS_PRIVATE | MsFlags::MS_REC,
+        None::<&str>,
+    )
+    .map_err(|error| {
+        anyhow!(error).context(format!(
+            "making recursive read-only mount {} private",
+            path.to_string_lossy()
+        ))
+    })?;
     let attr = libc::mount_attr {
         attr_set: libc::MOUNT_ATTR_RDONLY,
         attr_clr: 0,
