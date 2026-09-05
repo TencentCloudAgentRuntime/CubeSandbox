@@ -1209,13 +1209,18 @@ mod tests {
         // Some distributions create new network namespaces with IPv6 disabled
         // even when the host namespace has it enabled. Turn it on inside this
         // throwaway namespace so the v6 connected-route branch is exercised.
-        for sysctl in [
-            "/proc/sys/net/ipv6/conf/all/disable_ipv6",
-            "/proc/sys/net/ipv6/conf/default/disable_ipv6",
-        ] {
-            if std::path::Path::new(sysctl).exists() {
+        // A host booted with ipv6.disable=1 has no IPv6 sysctls at all; the
+        // exact v6 identity remains covered by the pure test above in that case.
+        let ipv6_available = std::path::Path::new("/proc/sys/net/ipv6/conf").is_dir();
+        if ipv6_available {
+            for sysctl in [
+                "/proc/sys/net/ipv6/conf/all/disable_ipv6",
+                "/proc/sys/net/ipv6/conf/default/disable_ipv6",
+            ] {
                 std::fs::write(sysctl, b"0").unwrap();
             }
+        } else {
+            println!("INFO: IPv6 is disabled by the host kernel; exercising IPv4 in netns");
         }
 
         if let Err(error) = run_ip(&["link", "add", "cube-e2e0", "type", "dummy"]) {
@@ -1223,17 +1228,21 @@ mod tests {
             return;
         }
         run_ip(&["link", "add", "cube-e2e1", "type", "dummy"]).unwrap();
-        for interface in ["cube-e2e0", "cube-e2e1"] {
-            std::fs::write(
-                format!("/proc/sys/net/ipv6/conf/{}/disable_ipv6", interface),
-                b"0",
-            )
-            .unwrap();
+        if ipv6_available {
+            for interface in ["cube-e2e0", "cube-e2e1"] {
+                std::fs::write(
+                    format!("/proc/sys/net/ipv6/conf/{}/disable_ipv6", interface),
+                    b"0",
+                )
+                .unwrap();
+            }
         }
         run_ip(&["link", "set", "cube-e2e0", "up"]).unwrap();
         run_ip(&["link", "set", "cube-e2e1", "up"]).unwrap();
         run_ip(&["addr", "add", "192.0.2.2/24", "dev", "cube-e2e0"]).unwrap();
-        run_ip(&["-6", "addr", "add", "2001:db8:1::2/64", "dev", "cube-e2e0"]).unwrap();
+        if ipv6_available {
+            run_ip(&["-6", "addr", "add", "2001:db8:1::2/64", "dev", "cube-e2e0"]).unwrap();
+        }
 
         let mut handle = Handle::new().unwrap();
         let link = handle
@@ -1255,16 +1264,18 @@ mod tests {
         conflict.device = "cube-e2e1".to_string();
         assert!(handle.add_routes(iter::once(conflict)).await.is_err());
 
-        let mut route6 = route("2001:db8:1::/64", "2001:db8:1::2", "");
-        route6.device = "cube-e2e0".to_string();
-        assert!(handle
-            .connected_route_exists(&route6, link.index())
-            .await
-            .unwrap());
-        let routes6_before = handle.query_routes(Some(IpVersion::V6)).await.unwrap();
-        handle.add_routes(iter::once(route6)).await.unwrap();
-        let routes6_after = handle.query_routes(Some(IpVersion::V6)).await.unwrap();
-        assert_eq!(routes6_after, routes6_before);
+        if ipv6_available {
+            let mut route6 = route("2001:db8:1::/64", "2001:db8:1::2", "");
+            route6.device = "cube-e2e0".to_string();
+            assert!(handle
+                .connected_route_exists(&route6, link.index())
+                .await
+                .unwrap());
+            let routes6_before = handle.query_routes(Some(IpVersion::V6)).await.unwrap();
+            handle.add_routes(iter::once(route6)).await.unwrap();
+            let routes6_after = handle.query_routes(Some(IpVersion::V6)).await.unwrap();
+            assert_eq!(routes6_after, routes6_before);
+        }
     }
 
     #[tokio::test]
