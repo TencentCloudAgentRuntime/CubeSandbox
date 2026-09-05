@@ -776,6 +776,17 @@ fn recursive_read_only_requested(m: &Mount) -> bool {
     m.options.iter().any(|option| option == "rro")
 }
 
+fn validate_recursive_read_only(m: &Mount, flags: MsFlags) -> Result<bool> {
+    let requested = recursive_read_only_requested(m);
+    if requested && !flags.contains(MsFlags::MS_RDONLY) {
+        return Err(anyhow!(
+            "recursive read-only mount {} requires the ro option",
+            m.destination
+        ));
+    }
+    Ok(requested)
+}
+
 #[cfg(not(test))]
 fn set_recursive_read_only(path: &str) -> Result<()> {
     let path = CString::new(path).map_err(|_| anyhow!("mount path contains NUL byte"))?;
@@ -863,15 +874,7 @@ fn mount_from(
     data: &str,
     _label: &str,
 ) -> Result<()> {
-    let recursive_read_only = recursive_read_only_requested(m);
-    if recursive_read_only
-        && (!flags.contains(MsFlags::MS_BIND) || !flags.contains(MsFlags::MS_RDONLY))
-    {
-        return Err(anyhow!(
-            "recursive read-only mount {} requires bind and ro options",
-            m.destination
-        ));
-    }
+    let recursive_read_only = validate_recursive_read_only(m, flags)?;
 
     let d = String::from(data);
     let dest = secure_join(rootfs, &m.destination);
@@ -1632,28 +1635,33 @@ mod tests {
     }
 
     #[test]
-    fn test_recursive_read_only_requires_read_only_bind() {
-        let tempdir = tempdir().unwrap();
-        let source = tempdir.path().join("source");
-        std::fs::create_dir_all(&source).unwrap();
+    fn test_recursive_read_only_requires_read_only() {
         let mount = Mount {
-            source: source.to_string_lossy().into_owned(),
+            source: "/source".to_string(),
             destination: "/destination".to_string(),
             r#type: "bind".to_string(),
             options: vec!["rbind".to_string(), "rro".to_string()],
         };
         let (flags, _, data) = parse_mount(&mount);
 
-        let result = mount_from(
-            -1,
-            &mount,
-            tempdir.path().to_str().unwrap(),
-            flags,
-            &data,
-            "",
-        );
+        let result = validate_recursive_read_only(&mount, flags);
         assert!(result.is_err());
-        assert!(format!("{}", result.unwrap_err()).contains("requires bind and ro options"));
+        assert!(format!("{}", result.unwrap_err()).contains("requires the ro option"));
+        assert_eq!(data, "");
+    }
+
+    #[test]
+    fn test_recursive_read_only_accepts_read_only_non_bind_mount() {
+        let mount = Mount {
+            source: "/run/virtiofs/cubeVolumes/volumes/example".to_string(),
+            destination: "/destination".to_string(),
+            r#type: "virtiofs".to_string(),
+            options: vec!["ro".to_string(), "rro".to_string()],
+        };
+        let (flags, _, data) = parse_mount(&mount);
+
+        assert!(validate_recursive_read_only(&mount, flags).unwrap());
+        assert_eq!(data, "");
     }
 
     #[test]
