@@ -459,14 +459,14 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 |---|---|---|---|---|---|
 | S5.1 安装与共存 | `NOT_STARTED` | 待指定 | — | — | 提供安装、卸载和 runc 共存方案 |
 | S5.2 升级与回滚 | `NOT_STARTED` | 待指定 | — | — | 验证版本协商、滚动升级和回滚 |
-| S5.3 兼容性 | `DONE` | Codex | Kubernetes v1.36.4 官方 477 个 NodeConformance `It` 已通过互斥分片完整执行并唯一归并：456 Passed、17 Failed、4 Skipped；支持路径真实缺陷已修复，17 个失败和 4 个 Skip 均有上游名称、责任层、问题 ID 与后续方案；测试环境、普通 kubelet/CNI/系统 workload 已恢复 | 最终 Agent `64381287`；Device/PodResources `inv-389w3ggrk9` 为 10/10 通过、1 个 SR-IOV 条件 Skip；终审重跑后双节点 exact-zero `inv-98a04qgm41`；集群恢复 `inv-a8a04sguer`；同一 reviewer `PASS`（P0/P1/P2=0）；[最终报告](../../handoffs/kubernetes-runtime/evidence/s5.3/s5.3b-nodeconformance.md) | 进入 S6.1，与用户讨论并冻结模板、快照和暂停恢复方案 |
+| S5.3 兼容性 | `IN_PROGRESS` | Codex/OpenCode | S5.3a～c 已完成 Kubernetes v1.36.4 官方 477 个 NodeConformance `It`：456 Passed、17 Failed、4 Skipped；S5.3d 将在冻结基线上处理全部 Node E2E，并补齐逐用例 Cube 运行时归因 | 既有结果见[最终报告](../../handoffs/kubernetes-runtime/evidence/s5.3/s5.3b-nodeconformance.md)；S5.3d 基线 commit `9ac62220`、官方测试 SHA-256 `560a097a…`；[OpenCode 独立验收计划](../../handoffs/kubernetes-runtime/evidence/s5.3/s5.3d-full-node-e2e-opencode-plan.md) | OpenCode 在独立 clone 诊断；由独立 runner 在同一最终基线上执行、归因和聚合全部 Node E2E |
 | S5.4 启动架构、性能与稳定性 | `IN_PROGRESS` | Codex | S5.4a/b/c 已完成：worker 拆分后以单次 D-Bus placement + inode/`/proc` 轻量门禁取代正常启动的重复 `systemctl show`；50 次串行和 5×10 并发均 100% 成功且无 PullImage，串行入口 P95 达标；生命周期矩阵和 exact-zero 无回退 | 实现 `7a4d5554 → 26d3ca74 → c949d6d4 → 94c01e21 → fa278467`；[S5.4b 证据](../../handoffs/kubernetes-runtime/evidence/s5.4/s5.4b-worker-split.md)；[S5.4c 证据](../../handoffs/kubernetes-runtime/evidence/s5.4/s5.4c-startup-fastpath.md)；同一 reviewer `PASS`，P0/P1/P2=0/0/1 | 进入 S6.1；普通启动离最终一秒目标的差距在 S6.2/S5.4d 关闭 |
 
 ### S5.3/S5.4 剩余实现单元与执行顺序
 
-下列顺序是后续工作的权威顺序。worker 拆分、普通启动优化和 Kubernetes Node E2E 分片执行
-均已完成，S5.3 最终 reviewer 审计 `PASS`。下一步进入 S6.1，讨论并冻结 RuntimeTemplate、
-PodSnapshot 和 Pause/Resume，不再回退已经验收的普通启动路径。
+下列顺序是后续工作的权威顺序。worker 拆分、普通启动优化和 477 项 NodeConformance 已完成；
+用户决定先增加 S5.3d 全量 Node E2E，并采用 OpenCode 诊断、独立 runner 验收的双路径。S5.3d
+完成后再进入 S6.1，不回退已经验收的普通启动路径。
 
 | 顺序 | 实现单元 | 状态 | 目标 | 验收标准/下一步 |
 |---|---|---|---|---|
@@ -476,8 +476,9 @@ PodSnapshot 和 Pause/Resume，不再回退已经验收的普通启动路径。
 | 4 | S5.4c 非快照启动优化与 E2E 入口门禁 | `DONE` | 已删除正常启动的 systemd CLI 门禁，使用单次 D-Bus placement + `/proc`/inode/epoch 轻量验证；100 个性能样本与生命周期故障矩阵证明 E2E 将运行在新 worker 快路径 | trace 中 `systemctl show=0`；串行 50/50，Scheduled→Ready P95=1935.438ms、RunPodSandbox P95=1575.632ms；5×10 并发 50/50；PullImage=0；故障后 exact-zero；[验收证据](../../handoffs/kubernetes-runtime/evidence/s5.4/s5.4c-startup-fastpath.md)；reviewer `PASS`，P0/P1/P2=0/0/1 |
 | 5 | S5.3b Node E2E 支持面收口 | `DONE` | worker 普通启动路径上的 477 项已全部执行；支持路径缺陷已关闭，环境失败与当前架构差异分开记录 | 456 Passed、17 Failed、4 Skipped；其中 1 个环境限制、16 个已解释架构差异；3 个 hostNetwork 相关 Passed 未走 Cube；最终 Device/PodResources 10/10 通过、1 个硬件 Skip；同一 reviewer `PASS`（P0/P1/P2=0） |
 | 6 | S5.3c 最终 Node E2E 与报告 | `DONE` | 477 项唯一归并、原始输入哈希、失败/Skip 分类、问题 ID、双节点恢复和 exact-zero 已完成 | [最终报告](../../handoffs/kubernetes-runtime/evidence/s5.3/s5.3b-nodeconformance.md)；`inv-98a04qgm41`/`inv-a8a04sguer` 证明 W1/W2 Ready、kube-system 全 Ready、临时 policy/auth 已删除且双 Worker exact-zero；`make handoff-validate` 通过；同一 reviewer `PASS`（P0/P1/P2=0） |
-| 7 | S6.1～S6.4 模板、快照与暂停恢复 | `NOT_STARTED` | E2E 完成后再与用户讨论并冻结 RuntimeTemplate、PodSnapshot 和 Pause/Resume 的产品语义、切点、CRD、卷与分发方案，再决定实现顺序 | 见 S6 子阶段；不得用旧 Pod UID、IP、DNS、Secret 或 volume mount 污染新 Pod；若设计需要调整 worker IPC，使用版本化扩展而非改写已经验收的普通启动路径 |
-| 8 | S5.4d 最终一秒门禁与回归 | `NOT_STARTED` | 若普通 boot 尚未达到一秒目标，使用 RuntimeTemplate 快路径关闭最终 SLO；新默认路径必须补做 Node E2E 回归 | 所有镜像预拉取且日志证明无 PullImage；单容器无 probe 的 PodScheduled→Ready P95≤1s，同时 RunPodSandbox 接收→Ready P95≤700ms；50 次串行、10 并发，成功率 100%；P99、普通 boot fallback 和模板 miss 单列；若模板成为默认路径，NodeConformance 支持面回归仍为 0 失败 |
+| 7 | S5.3d 全量 Node E2E 与运行时归因 | `IN_PROGRESS` | 已冻结代码/制品并创建无共享对象库、无可写 origin 的 OpenCode 独立 clone；下一步在专用测试环境覆盖全部 Node E2E，OpenCode 负责诊断，独立 runner 负责最终执行和聚合 | 每个权威 inventory spec 有唯一结论；workload spec 按 `CUBE_ONLY/MIXED/RUNC_ONLY/NO_RUNTIME` 分类且 `UNKNOWN=0`；同一最终基线、原始报告哈希、失败/Skip 责任层、随机复验和 exact-zero 全部闭环；[验收计划](../../handoffs/kubernetes-runtime/evidence/s5.3/s5.3d-full-node-e2e-opencode-plan.md) |
+| 8 | S6.1～S6.4 模板、快照与暂停恢复 | `NOT_STARTED` | 全量 Node E2E 完成后再与用户讨论并冻结 RuntimeTemplate、PodSnapshot 和 Pause/Resume 的产品语义、切点、CRD、卷与分发方案，再决定实现顺序 | 见 S6 子阶段；不得用旧 Pod UID、IP、DNS、Secret 或 volume mount 污染新 Pod；若设计需要调整 worker IPC，使用版本化扩展而非改写已经验收的普通启动路径 |
+| 9 | S5.4d 最终一秒门禁与回归 | `NOT_STARTED` | 若普通 boot 尚未达到一秒目标，使用 RuntimeTemplate 快路径关闭最终 SLO；新默认路径必须补做 Node E2E 回归 | 所有镜像预拉取且日志证明无 PullImage；单容器无 probe 的 PodScheduled→Ready P95≤1s，同时 RunPodSandbox 接收→Ready P95≤700ms；50 次串行、10 并发，成功率 100%；P99、普通 boot fallback 和模板 miss 单列；若模板成为默认路径，NodeConformance 支持面回归仍为 0 失败 |
 
 一秒门禁默认使用 P95 而不是单次最好值，且“不包含镜像拉取”必须由节点预拉取和运行日志共同证明。S5.4c 先给普通 boot 建立性能门禁，避免在已知慢路径上消耗完整 E2E 时间；S5.3c 随后完成 worker 普通路径的 Kubernetes 验收。若普通 boot 未达到最终一秒目标，S6.2 再用 runtime template restore 关闭差距，不把模板 miss 或 fallback 隐藏在命中样本中；若模板成为默认启动路径，必须补跑受影响的 Node E2E，而不是沿用普通路径结果。
 
