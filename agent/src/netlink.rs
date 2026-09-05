@@ -1206,6 +1206,18 @@ mod tests {
         }
         defer!(let _ = nix::sched::setns(original.as_raw_fd(), nix::sched::CloneFlags::CLONE_NEWNET););
 
+        // Some distributions create new network namespaces with IPv6 disabled
+        // even when the host namespace has it enabled. Turn it on inside this
+        // throwaway namespace so the v6 connected-route branch is exercised.
+        for sysctl in [
+            "/proc/sys/net/ipv6/conf/all/disable_ipv6",
+            "/proc/sys/net/ipv6/conf/default/disable_ipv6",
+        ] {
+            if std::path::Path::new(sysctl).exists() {
+                std::fs::write(sysctl, b"0").unwrap();
+            }
+        }
+
         if let Err(error) = run_ip(&["link", "add", "cube-e2e0", "type", "dummy"]) {
             println!("INFO: skipping netns route test: {}", error);
             return;
