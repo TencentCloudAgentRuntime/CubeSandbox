@@ -9,7 +9,8 @@ S6.1 `NOT_STARTED`。S5.3、S5.3a、S5.3b、S5.3c 与 S5.4a～S5.4c 均为 `DONE
 ## 基线
 
 最后验证实现 commit 为 `643812879228e513a20e3a29499af7b9cfe57480`，tree 为
-`41297a0a1ed1eb88ff39ab0e34245278fad67ecc`；S5.3 收口证据 commit 为 `3a0b7873`。
+`41297a0a1ed1eb88ff39ab0e34245278fad67ecc`；S5.3 收口与分类证据最新 commit 为
+`c6921b17`（最终结果基线 `3a0b7873`）。
 W1/W2 已部署最终 Host CubeShim/worker/runtime（SHA-256 前缀 `410d1799`、`3ff0b7d9`、
 `ea6df43e`）和 Agent ext4 `3c36bcb9…`。`RuntimeClass/cube` 保留。
 
@@ -21,7 +22,8 @@ Passed、17 Failed、4 Skipped；Cube 可归因通过 453 项。17 个失败包�
 认证。最终 Device/PodResources 为 10/10 Passed、1 个无 SR-IOV VF 的条件 Skip。支持路径
 发现的 Device、CPU/NUMA、route、stats、hostname、sysctl、SIGKILL 与 sidecar 等缺陷已修复。
 同一 reviewer 终审 `PASS`（P0/P1/P2=0）。完整证据见
-[S5.3 最终报告](./evidence/s5.3/s5.3b-nodeconformance.md)。
+[S5.3 最终报告](./evidence/s5.3/s5.3b-nodeconformance.md)和
+[477 项分类与失败分析](./evidence/s5.3/s5.3-nodeconformance-classification.md)。
 
 S5.4b/c 已完成每 Pod `cube-vmm-worker` 拆分及普通启动快路径：正常启动不再执行
 `systemctl show`；50 次串行与 5×10 并发成功率 100%、PullImage=0。串行
@@ -40,6 +42,8 @@ PodScheduled→Ready P95=1935.438ms、RunPodSandbox P95=1575.632ms。
 ## 验证
 
 - 477 项归并输出 SHA-256：`fe78040305a0f7bc58d8a2bc569d5a755c5a02d7bca8a0fa1466d0cbc0fd2424`。
+- 477 项已归入 8 个能力域、63 个上游测试文件；分类与失败分析经同一 reviewer
+  `PASS`（P0/P1/P2=0）。
 - Device/PodResources：`inv-389w3ggrk9`；privileged 定向终审：`inv-689xwbgpag`。
 - 双 Worker exact-zero：`inv-98a04qgm41`。
 - W1/W2 Ready、kube-system 非 Ready=0、e2e namespace/policy=0：`inv-a8a04sguer`。
