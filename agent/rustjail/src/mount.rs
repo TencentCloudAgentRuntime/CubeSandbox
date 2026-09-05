@@ -14,6 +14,8 @@ use nix::unistd::{self, Gid, Uid};
 use nix::NixPath;
 use oci::{LinuxDevice, Mount, Process, Spec};
 use std::collections::{HashMap, HashSet};
+#[cfg(not(test))]
+use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::mem::MaybeUninit;
 use std::os::unix;
@@ -762,12 +764,49 @@ fn parse_mount(m: &Mount) -> (MsFlags, MsFlags, String) {
             }
         } else if let Some(fl) = PROPAGATION.get(o.as_str()) {
             pgflags |= *fl;
-        } else {
+        } else if o != "rro" {
             data.push(o.clone());
         }
     }
 
     (flags, pgflags, data.join(","))
+}
+
+fn recursive_read_only_requested(m: &Mount) -> bool {
+    m.options.iter().any(|option| option == "rro")
+}
+
+#[cfg(not(test))]
+fn set_recursive_read_only(path: &str) -> Result<()> {
+    let path = CString::new(path).map_err(|_| anyhow!("mount path contains NUL byte"))?;
+    let attr = libc::mount_attr {
+        attr_set: libc::MOUNT_ATTR_RDONLY,
+        attr_clr: 0,
+        propagation: 0,
+        userns_fd: 0,
+    };
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_mount_setattr,
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            libc::AT_RECURSIVE,
+            &attr,
+            std::mem::size_of::<libc::mount_attr>(),
+        )
+    };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error()).context(format!(
+            "recursively remounting {} read-only with mount_setattr",
+            path.to_string_lossy()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn set_recursive_read_only(_path: &str) -> Result<()> {
+    Ok(())
 }
 
 // This function constructs a canonicalized path by combining the `rootfs` and `unsafe_path` elements.
@@ -824,6 +863,16 @@ fn mount_from(
     data: &str,
     _label: &str,
 ) -> Result<()> {
+    let recursive_read_only = recursive_read_only_requested(m);
+    if recursive_read_only
+        && (!flags.contains(MsFlags::MS_BIND) || !flags.contains(MsFlags::MS_RDONLY))
+    {
+        return Err(anyhow!(
+            "recursive read-only mount {} requires bind and ro options",
+            m.destination
+        ));
+    }
+
     let d = String::from(data);
     let dest = secure_join(rootfs, &m.destination);
 
@@ -905,6 +954,10 @@ fn mount_from(
             log_child!(cfd_log, "remout {}: {:?}", dest.as_str(), e);
             e
         })?;
+    }
+
+    if recursive_read_only {
+        set_recursive_read_only(dest.as_str())?;
     }
     Ok(())
 }
@@ -1552,6 +1605,55 @@ mod tests {
                 assert!(error_msg.contains(d.error_contains), "{}", msg);
             }
         }
+    }
+
+    #[test]
+    fn test_recursive_read_only_mount_option() {
+        let mount = Mount {
+            source: "/source".to_string(),
+            destination: "/destination".to_string(),
+            r#type: "bind".to_string(),
+            options: vec![
+                "rbind".to_string(),
+                "ro".to_string(),
+                "rprivate".to_string(),
+                "rro".to_string(),
+            ],
+        };
+
+        let (flags, propagation, data) = parse_mount(&mount);
+        assert!(flags.contains(MsFlags::MS_BIND));
+        assert!(flags.contains(MsFlags::MS_REC));
+        assert!(flags.contains(MsFlags::MS_RDONLY));
+        assert!(propagation.contains(MsFlags::MS_PRIVATE));
+        assert!(propagation.contains(MsFlags::MS_REC));
+        assert_eq!(data, "");
+        assert!(recursive_read_only_requested(&mount));
+    }
+
+    #[test]
+    fn test_recursive_read_only_requires_read_only_bind() {
+        let tempdir = tempdir().unwrap();
+        let source = tempdir.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        let mount = Mount {
+            source: source.to_string_lossy().into_owned(),
+            destination: "/destination".to_string(),
+            r#type: "bind".to_string(),
+            options: vec!["rbind".to_string(), "rro".to_string()],
+        };
+        let (flags, _, data) = parse_mount(&mount);
+
+        let result = mount_from(
+            -1,
+            &mount,
+            tempdir.path().to_str().unwrap(),
+            flags,
+            &data,
+            "",
+        );
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("requires bind and ro options"));
     }
 
     #[test]
