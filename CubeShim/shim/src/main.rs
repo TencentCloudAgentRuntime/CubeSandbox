@@ -6,7 +6,7 @@ use containerd_shim::parse;
 use containerd_shim_cube_rs::common;
 use containerd_shim_cube_rs::service;
 use containerd_shim_protos::{
-    protobuf::{well_known_types::any::Any, Message, MessageField},
+    protobuf::{Message, MessageField},
     types::introspection::{RuntimeInfo, RuntimeVersion},
 };
 
@@ -102,13 +102,6 @@ fn runtime_info() -> RuntimeInfo {
             revision: common::SHIM_COMMIT.to_string(),
             ..Default::default()
         }),
-        features: MessageField::some(Any {
-            type_url: "types.containerd.io/opencontainers/runtime-spec/1/features/Features"
-                .to_string(),
-            value: br#"{"ociVersionMin":"1.0.0","ociVersionMax":"1.2.0","mountOptions":["rro"]}"#
-                .to_vec(),
-            ..Default::default()
-        }),
         ..Default::default()
     }
 }
@@ -118,16 +111,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runtime_info_advertises_recursive_read_only_mounts() {
+    fn runtime_info_does_not_advertise_recursive_read_only_mounts() {
         let encoded = runtime_info().write_to_bytes().unwrap();
         let decoded = RuntimeInfo::parse_from_bytes(&encoded).unwrap();
-        let features = decoded.features.as_ref().unwrap();
-        assert_eq!(
-            features.type_url,
-            "types.containerd.io/opencontainers/runtime-spec/1/features/Features"
-        );
-        let json: serde_json::Value = serde_json::from_slice(&features.value).unwrap();
-        assert_eq!(json["mountOptions"], serde_json::json!(["rro"]));
+        assert_eq!(decoded.name, "io.containerd.cube.rs");
+        assert!(decoded.features.is_none());
     }
 }
 
