@@ -11,6 +11,10 @@ containerd release，并在节点部署记录中同时固定 containerd commit�
 下的 CRI `PodSandboxStats` 口径。标准 `podsandbox` 仍读取 Host Pod cgroup；自定义
 sandboxer 仅在所有运行中容器均有完整 CPU 和 Memory 指标时，改为汇总该 Sandbox
 内的 CRI 容器指标，避免把 VMM、virtiofs 和 worker 的 Host 开销计入 Pod 工作负载。
+CPU/Memory 的用量、工作集、RSS 和 fault 来自 Guest 容器；CPU/Memory/IO 的 Pod
+级 PSI 来自 Host Pod cgroup。后者是 kubelet 实际施加 `containers + PodOverhead`
+限额以及 VMM/virtio-fs 实际发生 stall 的压力域，不能用 Guest sibling cgroup 的 PSI
+代替。
 
 应用与验证：
 
@@ -24,9 +28,11 @@ GOFLAGS=-mod=vendor go test ./internal/cri/server -count=1
 这是 PoC 兼容补丁，不是最终上游接口。补丁只在所有运行中容器都有完整 CPU 和
 Memory 指标时聚合，Pod `AvailableBytes` 优先根据当前 sandbox resource status 中的
 Pod memory limit 计算，尚未更新时回退初始 CRI `PodSandboxConfig`；指标不完整时退回
-Host cgroup。兄弟容器的 PSI 不能正确合成，因此只在
-单个运行中容器时透传 PSI，多容器时保持为空。长期方案应由 Sandbox Controller 的
-`Metrics` 返回 Guest Pod cgroup 原生指标，再由 containerd CRI 消费该指标。补丁还从
+Host cgroup。兄弟容器的用量可以求和，但 PSI 不能从 sibling cgroup 合成，因此无论
+单容器还是多容器，Pod PSI 都使用 Host Pod cgroup 的自然聚合；Host PSI 不可用时才
+保留单容器 Guest PSI。长期方案应由 Sandbox Controller 的 `Metrics` 同时返回 Guest
+Pod cgroup 用量和可关联的 Host runtime pressure，再由 containerd CRI 消费明确的混合
+口径。补丁还从
 core sandbox 的 `updated-resources` extension 恢复 custom sandboxer 的当前资源状态，
 使 containerd 重启后的 Pod resize limit 不会退回初始值。
 

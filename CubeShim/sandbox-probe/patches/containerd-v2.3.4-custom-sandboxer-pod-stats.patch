@@ -42,7 +42,7 @@ index 70059a7..d9e7d34 100644
  // One container/sandbox hangs (e.g. containerd#2438) should not affect other
  // containers/sandboxes.
 diff --git a/internal/cri/server/sandbox_stats_linux.go b/internal/cri/server/sandbox_stats_linux.go
-index 9af3232..08ea901 100644
+index 9af3232..84f610d 100644
 --- a/internal/cri/server/sandbox_stats_linux.go
 +++ b/internal/cri/server/sandbox_stats_linux.go
 @@ -30,6 +30,7 @@ import (
@@ -65,7 +65,7 @@ index 9af3232..08ea901 100644
  	podSandboxStats := &runtime.PodSandboxStats{
  		Linux: &runtime.LinuxPodSandboxStats{},
  		Attributes: &runtime.PodSandboxAttributes{
-@@ -57,28 +53,73 @@ func (c *criService) podSandboxStats(
+@@ -57,28 +53,87 @@ func (c *criService) podSandboxStats(
  		},
  	}
  
@@ -112,6 +112,20 @@ index 9af3232..08ea901 100644
 +		aggregatedCPU, aggregatedMemory, aggregatedIO, useContainerMetrics = aggregateSandboxStats(css, runningContainerIDs, memoryLimit)
 +		if useContainerMetrics {
 +			timestamp = time.Now()
++			hostStats, err := cgroupMetricsForSandbox(sandbox)
++			if err != nil {
++				return nil, fmt.Errorf("failed getting host pressure metrics for custom sandbox %s: %w", sandbox.ID, err)
++			}
++			hostCPU, err := c.cpuContainerStats(meta.ID, true /* isSandbox */, *hostStats, timestamp)
++			if err != nil {
++				return nil, fmt.Errorf("failed to obtain host cpu pressure: %w", err)
++			}
++			hostMemory, err := c.memoryContainerStats(meta.ID, *hostStats, timestamp)
++			if err != nil {
++				return nil, fmt.Errorf("failed to obtain host memory pressure: %w", err)
++			}
++			hostIO := c.ioContainerStats(*hostStats, timestamp)
++			aggregatedIO = applySandboxPressure(aggregatedCPU, aggregatedMemory, aggregatedIO, hostCPU, hostMemory, hostIO)
 +		}
 +	}
 +
@@ -157,7 +171,7 @@ index 9af3232..08ea901 100644
  
  	if sandbox.NetNSPath != "" {
  		allStats, err := getAllContainerNetIO(ctx, sandbox.NetNSPath)
-@@ -114,11 +155,15 @@ func (c *criService) podSandboxStats(
+@@ -114,11 +169,15 @@ func (c *criService) podSandboxStats(
  		podSandboxStats.Linux.Network = networkUsage
  	}
  
@@ -177,7 +191,7 @@ index 9af3232..08ea901 100644
  	var pidCount uint64
  	for _, cs := range css {
  		pidCount += cs.pids
-@@ -132,6 +177,121 @@ func (c *criService) podSandboxStats(
+@@ -132,6 +191,138 @@ func (c *criService) podSandboxStats(
  	return podSandboxStats, nil
  }
  
@@ -296,15 +310,41 @@ index 9af3232..08ea901 100644
 +	return cpu, memory, io, true
 +}
 +
++func applySandboxPressure(cpu *runtime.CpuUsage, memory *runtime.MemoryUsage, io *runtime.IoUsage, hostCPU *runtime.CpuUsage, hostMemory *runtime.MemoryUsage, hostIO *runtime.IoUsage) *runtime.IoUsage {
++	if cpu != nil && hostCPU != nil && hostCPU.Psi != nil {
++		cpu.Psi = hostCPU.Psi
++	}
++	if memory != nil && hostMemory != nil && hostMemory.Psi != nil {
++		memory.Psi = hostMemory.Psi
++	}
++	if hostIO != nil && hostIO.Psi != nil {
++		if io == nil {
++			io = &runtime.IoUsage{}
++		}
++		io.Timestamp = hostIO.Timestamp
++		io.Psi = hostIO.Psi
++	}
++	return io
++}
++
  // interfaceStats contains statistics for a single network interface
  type interfaceStats struct {
  	name  string
+@@ -203,7 +394,7 @@ func cgroupMetricsForSandbox(sandbox sandboxstore.Sandbox) (*cgroupMetrics, erro
+ 		if err != nil {
+ 			return nil, fmt.Errorf("failed to load sandbox cgroup: %v: %w", cgroupPath, err)
+ 		}
+-		stats, err := cg.StatFiltered(cgroupsv2.StatCPU | cgroupsv2.StatMemory)
++		stats, err := cg.StatFiltered(cgroupsv2.StatCPU | cgroupsv2.StatMemory | cgroupsv2.StatIO)
+ 		if err != nil {
+ 			return nil, fmt.Errorf("failed to get stats for cgroup: %v: %w", cgroupPath, err)
+ 		}
 diff --git a/internal/cri/server/sandbox_stats_linux_test.go b/internal/cri/server/sandbox_stats_linux_test.go
 new file mode 100644
-index 0000000..3d2c5a6
+index 0000000..1dfadc6
 --- /dev/null
 +++ b/internal/cri/server/sandbox_stats_linux_test.go
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,295 @@
 +//go:build linux
 +
 +/*
@@ -371,6 +411,45 @@ index 0000000..3d2c5a6
 +	}
 +	if !customSandboxUsesContainerStats("shim") {
 +		t.Fatal("custom sandboxer must attempt container aggregation")
++	}
++}
++
++func TestApplySandboxPressureUsesHostPodCgroup(t *testing.T) {
++	guestPSI := &runtime.PsiStats{Some: &runtime.PsiData{Avg10: 1}}
++	hostCPU := &runtime.PsiStats{Some: &runtime.PsiData{Avg10: 2}}
++	hostMemory := &runtime.PsiStats{Full: &runtime.PsiData{Avg10: 3}}
++	hostIO := &runtime.PsiStats{Some: &runtime.PsiData{Avg10: 4}}
++	cpu := &runtime.CpuUsage{UsageCoreNanoSeconds: uint64Value(11), Psi: guestPSI}
++	memory := &runtime.MemoryUsage{WorkingSetBytes: uint64Value(12), Psi: guestPSI}
++
++	io := applySandboxPressure(
++		cpu,
++		memory,
++		nil,
++		&runtime.CpuUsage{Timestamp: 20, Psi: hostCPU},
++		&runtime.MemoryUsage{Timestamp: 21, Psi: hostMemory},
++		&runtime.IoUsage{Timestamp: 22, Psi: hostIO},
++	)
++	if cpu.UsageCoreNanoSeconds.Value != 11 || memory.WorkingSetBytes.Value != 12 {
++		t.Fatal("host pressure must not replace aggregated Guest usage")
++	}
++	if cpu.Psi != hostCPU || memory.Psi != hostMemory {
++		t.Fatal("CPU and memory PSI must come from the Host Pod cgroup")
++	}
++	if io == nil || io.Timestamp != 22 || io.Psi != hostIO {
++		t.Fatal("Host Pod cgroup IO PSI must be exposed even without Guest IO")
++	}
++}
++
++func TestApplySandboxPressurePreservesGuestWhenHostPressureMissing(t *testing.T) {
++	guestPSI := &runtime.PsiStats{Some: &runtime.PsiData{Avg10: 1}}
++	cpu := &runtime.CpuUsage{Psi: guestPSI}
++	memory := &runtime.MemoryUsage{Psi: guestPSI}
++	io := &runtime.IoUsage{Timestamp: 7, Psi: guestPSI}
++
++	gotIO := applySandboxPressure(cpu, memory, io, &runtime.CpuUsage{}, &runtime.MemoryUsage{}, &runtime.IoUsage{})
++	if cpu.Psi != guestPSI || memory.Psi != guestPSI || gotIO != io || gotIO.Psi != guestPSI {
++		t.Fatal("missing Host PSI must preserve available Guest pressure")
 +	}
 +}
 +
@@ -561,4 +640,3 @@ index 0000000..3d2c5a6
 +		t.Fatalf("overflow must saturate, complete=%v memory=%+v", complete, memory)
 +	}
 +}
-
