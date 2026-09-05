@@ -1,0 +1,564 @@
+diff --git a/internal/cri/server/restart.go b/internal/cri/server/restart.go
+index 70059a7..d9e7d34 100644
+--- a/internal/cri/server/restart.go
++++ b/internal/cri/server/restart.go
+@@ -119,6 +119,10 @@ func (c *criService) recover(ctx context.Context) error {
+ 			}
+ 			return fmt.Errorf("failed to get metadata for stored sandbox %q: %w", sbx.ID, err)
+ 		}
++		updatedResources := podsandbox.UpdatedResources{}
++		if err := sbx.GetExtension(podsandbox.UpdatedResourcesKey, &updatedResources); err != nil && !errdefs.IsNotFound(err) {
++			return fmt.Errorf("failed to get updated resources for stored sandbox %q: %w", sbx.ID, err)
++		}
+ 
+ 		var (
+ 			state    = sandboxstore.StateUnknown
+@@ -147,7 +151,8 @@ func (c *criService) recover(ctx context.Context) error {
+ 			}
+ 		}
+ 
+-		sb := sandboxstore.NewSandbox(metadata, sandboxstore.Status{State: state})
++		localStatus := sandboxStatusWithUpdatedResources(state, updatedResources)
++		sb := sandboxstore.NewSandbox(metadata, localStatus)
+ 		sb.Sandboxer = sbx.Sandboxer
+ 		sb.Endpoint = endpoint
+ 
+@@ -248,6 +253,17 @@ func (c *criService) recover(ctx context.Context) error {
+ 	return nil
+ }
+ 
++func sandboxStatusWithUpdatedResources(state sandboxstore.State, updatedResources podsandbox.UpdatedResources) sandboxstore.Status {
++	status := sandboxstore.Status{State: state}
++	if updatedResources.Resources != nil {
++		status.Resources = &runtime.ContainerResources{Linux: updatedResources.Resources}
++	}
++	if updatedResources.Overhead != nil {
++		status.Overhead = &runtime.ContainerResources{Linux: updatedResources.Overhead}
++	}
++	return status
++}
++
+ // loadContainerTimeout is the default timeout for loading a container/sandbox.
+ // One container/sandbox hangs (e.g. containerd#2438) should not affect other
+ // containers/sandboxes.
+diff --git a/internal/cri/server/sandbox_stats_linux.go b/internal/cri/server/sandbox_stats_linux.go
+index 9af3232..08ea901 100644
+--- a/internal/cri/server/sandbox_stats_linux.go
++++ b/internal/cri/server/sandbox_stats_linux.go
+@@ -30,6 +30,7 @@ import (
+ 	"github.com/vishvananda/netlink"
+ 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
+ 
++	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
+ 	sandboxstore "github.com/containerd/containerd/v2/internal/cri/store/sandbox"
+ )
+ 
+@@ -42,11 +43,6 @@ func (c *criService) podSandboxStats(
+ 		return nil, fmt.Errorf("failed to get pod sandbox stats since sandbox container %q is not in ready state: %w", meta.ID, errdefs.ErrUnavailable)
+ 	}
+ 
+-	stats, err := cgroupMetricsForSandbox(sandbox)
+-	if err != nil {
+-		return nil, fmt.Errorf("failed getting metrics for sandbox %s: %w", sandbox.ID, err)
+-	}
+-
+ 	podSandboxStats := &runtime.PodSandboxStats{
+ 		Linux: &runtime.LinuxPodSandboxStats{},
+ 		Attributes: &runtime.PodSandboxAttributes{
+@@ -57,28 +53,73 @@ func (c *criService) podSandboxStats(
+ 		},
+ 	}
+ 
+-	timestamp := time.Now()
+-
+-	cpuStats, err := c.cpuContainerStats(meta.ID, true /* isSandbox */, *stats, timestamp)
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to obtain cpu stats: %w", err)
+-	}
+-	if cpuStats != nil && cpuStats.UsageCoreNanoSeconds != nil {
+-		nanoUsage, err := c.getUsageNanoCores(meta.ID, true /* isSandbox */, cpuStats.UsageCoreNanoSeconds.Value, timestamp)
++	var timestamp time.Time
++	var css []containerStats
++	containerStatsLoaded := false
++	useContainerMetrics := false
++	var aggregatedCPU *runtime.CpuUsage
++	var aggregatedMemory *runtime.MemoryUsage
++	var aggregatedIO *runtime.IoUsage
++	if customSandboxUsesContainerStats(sandbox.Sandboxer) {
++		listContainerStatsRequest := &runtime.ListContainerStatsRequest{Filter: &runtime.ContainerStatsFilter{PodSandboxId: meta.ID}}
++		var err error
++		css, err = c.listContainerStats(ctx, listContainerStatsRequest)
+ 		if err != nil {
+-			return nil, fmt.Errorf("failed to get usage nano cores: %w", err)
++			return nil, fmt.Errorf("failed to obtain container stats during podSandboxStats call: %w", err)
+ 		}
+-		if nanoUsage != nil {
+-			cpuStats.UsageNanoCores = &runtime.UInt64Value{Value: *nanoUsage}
+-		}
+-	}
+-	podSandboxStats.Linux.Cpu = cpuStats
++		containerStatsLoaded = true
+ 
+-	memoryStats, err := c.memoryContainerStats(meta.ID, *stats, timestamp)
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to obtain memory stats: %w", err)
++		runningContainerIDs := make(map[string]struct{})
++		for _, container := range c.containerStore.List() {
++			if container.SandboxID == meta.ID && container.Status.Get().State() == runtime.ContainerState_CONTAINER_RUNNING {
++				runningContainerIDs[container.ID] = struct{}{}
++			}
++		}
++		memoryLimit := sandboxMemoryLimit(sandbox)
++		aggregatedCPU, aggregatedMemory, aggregatedIO, useContainerMetrics = aggregateSandboxStats(css, runningContainerIDs, memoryLimit)
++		if useContainerMetrics {
++			timestamp = time.Now()
++		}
++	}
++
++	// The built-in podsandbox controller places native containers below the
++	// host Pod cgroup, so that cgroup remains the authoritative aggregate.
++	// A custom sandboxer may put a VM or another runtime process in that same
++	// host cgroup while reporting workload metrics through its task shims. In
++	// that case, aggregate the CRI container metrics so Pod usage describes the
++	// workloads rather than charging opaque runtime overhead to every Pod.
++	if !useContainerMetrics {
++		stats, err := cgroupMetricsForSandbox(sandbox)
++		if err != nil {
++			return nil, fmt.Errorf("failed getting metrics for sandbox %s: %w", sandbox.ID, err)
++		}
++		timestamp = time.Now()
++
++		cpuStats, err := c.cpuContainerStats(meta.ID, true /* isSandbox */, *stats, timestamp)
++		if err != nil {
++			return nil, fmt.Errorf("failed to obtain cpu stats: %w", err)
++		}
++		if cpuStats != nil && cpuStats.UsageCoreNanoSeconds != nil {
++			nanoUsage, err := c.getUsageNanoCores(meta.ID, true /* isSandbox */, cpuStats.UsageCoreNanoSeconds.Value, timestamp)
++			if err != nil {
++				return nil, fmt.Errorf("failed to get usage nano cores: %w", err)
++			}
++			if nanoUsage != nil {
++				cpuStats.UsageNanoCores = &runtime.UInt64Value{Value: *nanoUsage}
++			}
++		}
++		podSandboxStats.Linux.Cpu = cpuStats
++
++		memoryStats, err := c.memoryContainerStats(meta.ID, *stats, timestamp)
++		if err != nil {
++			return nil, fmt.Errorf("failed to obtain memory stats: %w", err)
++		}
++		podSandboxStats.Linux.Memory = memoryStats
++	} else {
++		podSandboxStats.Linux.Cpu = aggregatedCPU
++		podSandboxStats.Linux.Memory = aggregatedMemory
++		podSandboxStats.Linux.Io = aggregatedIO
+ 	}
+-	podSandboxStats.Linux.Memory = memoryStats
+ 
+ 	if sandbox.NetNSPath != "" {
+ 		allStats, err := getAllContainerNetIO(ctx, sandbox.NetNSPath)
+@@ -114,11 +155,15 @@ func (c *criService) podSandboxStats(
+ 		podSandboxStats.Linux.Network = networkUsage
+ 	}
+ 
+-	listContainerStatsRequest := &runtime.ListContainerStatsRequest{Filter: &runtime.ContainerStatsFilter{PodSandboxId: meta.ID}}
+-	css, err := c.listContainerStats(ctx, listContainerStatsRequest)
+-	if err != nil {
+-		return nil, fmt.Errorf("failed to obtain container stats during podSandboxStats call: %w", err)
++	if !containerStatsLoaded {
++		listContainerStatsRequest := &runtime.ListContainerStatsRequest{Filter: &runtime.ContainerStatsFilter{PodSandboxId: meta.ID}}
++		var err error
++		css, err = c.listContainerStats(ctx, listContainerStatsRequest)
++		if err != nil {
++			return nil, fmt.Errorf("failed to obtain container stats during podSandboxStats call: %w", err)
++		}
+ 	}
++
+ 	var pidCount uint64
+ 	for _, cs := range css {
+ 		pidCount += cs.pids
+@@ -132,6 +177,121 @@ func (c *criService) podSandboxStats(
+ 	return podSandboxStats, nil
+ }
+ 
++func saturatingAdd(left, right uint64) uint64 {
++	if ^uint64(0)-left < right {
++		return ^uint64(0)
++	}
++	return left + right
++}
++
++func addUInt64(target **runtime.UInt64Value, value *runtime.UInt64Value) {
++	if value == nil {
++		return
++	}
++	if *target == nil {
++		*target = &runtime.UInt64Value{}
++	}
++	(*target).Value = saturatingAdd((*target).Value, value.Value)
++}
++
++func customSandboxUsesContainerStats(sandboxer string) bool {
++	return sandboxer != string(criconfig.ModePodSandbox)
++}
++
++func sandboxMemoryLimit(sandbox sandboxstore.Sandbox) int64 {
++	resources := sandbox.Status.Get().Resources
++	if resources != nil {
++		return resources.GetLinux().GetMemoryLimitInBytes()
++	}
++	return sandbox.Metadata.Config.GetLinux().GetResources().GetMemoryLimitInBytes()
++}
++
++func aggregateSandboxStats(css []containerStats, runningContainerIDs map[string]struct{}, memoryLimit int64) (*runtime.CpuUsage, *runtime.MemoryUsage, *runtime.IoUsage, bool) {
++	if len(runningContainerIDs) == 0 {
++		return nil, nil, nil, false
++	}
++
++	cpu := &runtime.CpuUsage{}
++	memory := &runtime.MemoryUsage{}
++	var io *runtime.IoUsage
++	seen := make(map[string]struct{}, len(runningContainerIDs))
++	nanoCoresComplete := true
++	for _, cs := range css {
++		stats := cs.stats
++		id := stats.GetAttributes().GetId()
++		if _, running := runningContainerIDs[id]; !running {
++			continue
++		}
++		if _, duplicate := seen[id]; duplicate {
++			return nil, nil, nil, false
++		}
++		seen[id] = struct{}{}
++
++		containerCPU := stats.GetCpu()
++		containerMemory := stats.GetMemory()
++		if containerCPU == nil || containerCPU.UsageCoreNanoSeconds == nil ||
++			containerMemory == nil || containerMemory.WorkingSetBytes == nil ||
++			containerMemory.UsageBytes == nil || containerMemory.RssBytes == nil ||
++			containerMemory.PageFaults == nil || containerMemory.MajorPageFaults == nil {
++			return nil, nil, nil, false
++		}
++
++		cpu.Timestamp = max(cpu.Timestamp, containerCPU.Timestamp)
++		addUInt64(&cpu.UsageCoreNanoSeconds, containerCPU.UsageCoreNanoSeconds)
++		if containerCPU.UsageNanoCores == nil {
++			nanoCoresComplete = false
++		} else {
++			addUInt64(&cpu.UsageNanoCores, containerCPU.UsageNanoCores)
++		}
++		memory.Timestamp = max(memory.Timestamp, containerMemory.Timestamp)
++		addUInt64(&memory.WorkingSetBytes, containerMemory.WorkingSetBytes)
++		addUInt64(&memory.UsageBytes, containerMemory.UsageBytes)
++		addUInt64(&memory.RssBytes, containerMemory.RssBytes)
++		addUInt64(&memory.PageFaults, containerMemory.PageFaults)
++		addUInt64(&memory.MajorPageFaults, containerMemory.MajorPageFaults)
++
++		if len(runningContainerIDs) == 1 {
++			value := stats.GetIo()
++			if value == nil {
++				continue
++			}
++			if io == nil {
++				io = &runtime.IoUsage{}
++			}
++			io.Timestamp = max(io.Timestamp, value.Timestamp)
++			io.Psi = value.Psi
++		}
++	}
++	if len(seen) != len(runningContainerIDs) {
++		return nil, nil, nil, false
++	}
++	if !nanoCoresComplete {
++		cpu.UsageNanoCores = nil
++	}
++	if memoryLimit > 0 && !isMemoryUnlimited(uint64(memoryLimit)) {
++		available := uint64(0)
++		if memory.WorkingSetBytes.Value < uint64(memoryLimit) {
++			available = uint64(memoryLimit) - memory.WorkingSetBytes.Value
++		}
++		memory.AvailableBytes = &runtime.UInt64Value{Value: available}
++	}
++
++	// PSI cannot be reconstructed from sibling cgroups because their stall
++	// intervals may overlap. With exactly one running container, its PSI is the
++	// workload PSI; otherwise leave Pod PSI unavailable until the sandbox
++	// controller supplies native Guest Pod cgroup metrics.
++	if len(runningContainerIDs) == 1 {
++		for _, cs := range css {
++			if _, running := runningContainerIDs[cs.stats.GetAttributes().GetId()]; !running {
++				continue
++			}
++			cpu.Psi = cs.stats.GetCpu().GetPsi()
++			memory.Psi = cs.stats.GetMemory().GetPsi()
++		}
++	}
++	return cpu, memory, io, true
++}
++
+ // interfaceStats contains statistics for a single network interface
+ type interfaceStats struct {
+ 	name  string
+diff --git a/internal/cri/server/sandbox_stats_linux_test.go b/internal/cri/server/sandbox_stats_linux_test.go
+new file mode 100644
+index 0000000..3d2c5a6
+--- /dev/null
++++ b/internal/cri/server/sandbox_stats_linux_test.go
+@@ -0,0 +1,256 @@
++//go:build linux
++
++/*
++   Copyright The containerd Authors.
++
++   Licensed under the Apache License, Version 2.0 (the "License");
++   you may not use this file except in compliance with the License.
++   You may obtain a copy of the License at
++
++       http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing, software
++   distributed under the License is distributed on an "AS IS" BASIS,
++   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++   See the License for the specific language governing permissions and
++   limitations under the License.
++*/
++
++package server
++
++import (
++	"testing"
++
++	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
++
++	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
++	"github.com/containerd/containerd/v2/internal/cri/server/podsandbox"
++	sandboxstore "github.com/containerd/containerd/v2/internal/cri/store/sandbox"
++)
++
++func uint64Value(value uint64) *runtime.UInt64Value {
++	return &runtime.UInt64Value{Value: value}
++}
++
++func completeContainerStats(id string, base uint64, psi *runtime.PsiStats, withIO bool) containerStats {
++	stats := &runtime.ContainerStats{
++		Attributes: &runtime.ContainerAttributes{Id: id},
++		Cpu: &runtime.CpuUsage{
++			Timestamp:            int64(base + 1),
++			UsageCoreNanoSeconds: uint64Value(base + 2),
++			UsageNanoCores:       uint64Value(base + 3),
++			Psi:                  psi,
++		},
++		Memory: &runtime.MemoryUsage{
++			Timestamp:       int64(base + 4),
++			WorkingSetBytes: uint64Value(base + 5),
++			AvailableBytes:  uint64Value(base + 6),
++			UsageBytes:      uint64Value(base + 7),
++			RssBytes:        uint64Value(base + 8),
++			PageFaults:      uint64Value(base + 9),
++			MajorPageFaults: uint64Value(base + 10),
++			Psi:             psi,
++		},
++	}
++	if withIO {
++		stats.Io = &runtime.IoUsage{Timestamp: int64(base + 11), Psi: psi}
++	}
++	return containerStats{stats: stats, pids: base + 12}
++}
++
++func TestCustomSandboxUsesContainerStats(t *testing.T) {
++	if customSandboxUsesContainerStats(string(criconfig.ModePodSandbox)) {
++		t.Fatal("built-in podsandbox must retain Host cgroup stats")
++	}
++	if !customSandboxUsesContainerStats("shim") {
++		t.Fatal("custom sandboxer must attempt container aggregation")
++	}
++}
++
++func TestSandboxMemoryLimit(t *testing.T) {
++	newSandbox := func(initial int64, updated *runtime.ContainerResources) sandboxstore.Sandbox {
++		return sandboxstore.NewSandbox(sandboxstore.Metadata{
++			Config: &runtime.PodSandboxConfig{Linux: &runtime.LinuxPodSandboxConfig{
++				Resources: &runtime.LinuxContainerResources{MemoryLimitInBytes: initial},
++			}},
++		}, sandboxstore.Status{Resources: updated})
++	}
++
++	tests := []struct {
++		name    string
++		sandbox sandboxstore.Sandbox
++		want    int64
++	}{
++		{name: "initial", sandbox: newSandbox(100, nil), want: 100},
++		{name: "updated", sandbox: newSandbox(100, &runtime.ContainerResources{Linux: &runtime.LinuxContainerResources{MemoryLimitInBytes: 200}}), want: 200},
++		{name: "updated cleared", sandbox: newSandbox(100, &runtime.ContainerResources{Linux: &runtime.LinuxContainerResources{}}), want: 0},
++		{name: "updated linux absent", sandbox: newSandbox(100, &runtime.ContainerResources{}), want: 0},
++	}
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			if got := sandboxMemoryLimit(test.sandbox); got != test.want {
++				t.Fatalf("sandboxMemoryLimit()=%d, want %d", got, test.want)
++			}
++		})
++	}
++}
++
++func TestSandboxStatusWithUpdatedResources(t *testing.T) {
++	resources := &runtime.LinuxContainerResources{MemoryLimitInBytes: 200}
++	overhead := &runtime.LinuxContainerResources{MemoryLimitInBytes: 20}
++	status := sandboxStatusWithUpdatedResources(sandboxstore.StateReady, podsandbox.UpdatedResources{
++		Resources: resources,
++		Overhead:  overhead,
++	})
++	if status.State != sandboxstore.StateReady || status.Resources.GetLinux() != resources || status.Overhead.GetLinux() != overhead {
++		t.Fatalf("updated resources were not restored: %+v", status)
++	}
++
++	status = sandboxStatusWithUpdatedResources(sandboxstore.StateNotReady, podsandbox.UpdatedResources{})
++	if status.State != sandboxstore.StateNotReady || status.Resources != nil || status.Overhead != nil {
++		t.Fatalf("absent updated resources must remain nil: %+v", status)
++	}
++}
++
++func TestAggregateSandboxStatsComplete(t *testing.T) {
++	psiA := &runtime.PsiStats{Some: &runtime.PsiData{Total: 13}}
++	psiB := &runtime.PsiStats{Some: &runtime.PsiData{Total: 43}}
++	css := []containerStats{
++		completeContainerStats("a", 10, psiA, true),
++		completeContainerStats("b", 40, psiB, true),
++		{stats: &runtime.ContainerStats{Attributes: &runtime.ContainerAttributes{Id: "exited"}}},
++	}
++	running := map[string]struct{}{"a": {}, "b": {}}
++
++	cpu, memory, io, complete := aggregateSandboxStats(css, running, 200)
++	if !complete {
++		t.Fatal("complete running-container metrics must aggregate")
++	}
++	if cpu.Timestamp != 41 || cpu.UsageCoreNanoSeconds.Value != 54 || cpu.UsageNanoCores.Value != 56 {
++		t.Fatalf("unexpected CPU aggregate: %+v", cpu)
++	}
++	if cpu.Psi != nil {
++		t.Fatalf("multi-container CPU PSI must remain unavailable: %+v", cpu.Psi)
++	}
++	if memory.Timestamp != 44 || memory.WorkingSetBytes.Value != 60 || memory.AvailableBytes.Value != 140 || memory.UsageBytes.Value != 64 || memory.RssBytes.Value != 66 || memory.PageFaults.Value != 68 || memory.MajorPageFaults.Value != 70 {
++		t.Fatalf("unexpected memory aggregate: %+v", memory)
++	}
++	if memory.Psi != nil {
++		t.Fatalf("multi-container memory PSI must remain unavailable: %+v", memory.Psi)
++	}
++	if io != nil {
++		t.Fatalf("multi-container IO without aggregatable data must remain nil: %+v", io)
++	}
++}
++
++func TestAggregateSandboxStatsSingleContainerPreservesPSI(t *testing.T) {
++	psi := &runtime.PsiStats{Some: &runtime.PsiData{Total: 13}}
++	css := []containerStats{completeContainerStats("a", 10, psi, true)}
++	running := map[string]struct{}{"a": {}}
++
++	cpu, memory, io, complete := aggregateSandboxStats(css, running, 0)
++	if !complete {
++		t.Fatal("single complete container must aggregate")
++	}
++	if cpu.Psi != psi || memory.Psi != psi {
++		t.Fatal("single-container PSI must be preserved")
++	}
++	if memory.AvailableBytes != nil {
++		t.Fatalf("unlimited Pod memory must not synthesize available bytes: %+v", memory.AvailableBytes)
++	}
++	if io == nil || io.Psi != psi {
++		t.Fatalf("single-container IO PSI must be preserved: %+v", io)
++	}
++}
++
++func TestAggregateSandboxStatsOptionalFields(t *testing.T) {
++	running := map[string]struct{}{"a": {}}
++
++	withoutNanoCores := completeContainerStats("a", 10, nil, false)
++	withoutNanoCores.stats.Cpu.UsageNanoCores = nil
++	cpu, _, io, complete := aggregateSandboxStats([]containerStats{withoutNanoCores}, running, 0)
++	if !complete || cpu.UsageNanoCores != nil || io != nil {
++		t.Fatalf("optional nano cores and IO must remain nil: complete=%v cpu=%+v io=%+v", complete, cpu, io)
++	}
++
++	unlimited := completeContainerStats("a", 10, nil, false)
++	_, memory, _, complete := aggregateSandboxStats([]containerStats{unlimited}, running, (1<<62)+1)
++	if !complete || memory.AvailableBytes != nil {
++		t.Fatalf("unlimited memory must keep available nil: complete=%v memory=%+v", complete, memory)
++	}
++
++	overLimit := completeContainerStats("a", 10, nil, false)
++	_, memory, _, complete = aggregateSandboxStats([]containerStats{overLimit}, running, 10)
++	if !complete || memory.AvailableBytes == nil || memory.AvailableBytes.Value != 0 {
++		t.Fatalf("working set above limit must clamp available to zero: complete=%v memory=%+v", complete, memory)
++	}
++}
++
++func TestAggregateSandboxStatsRejectsIncompleteRunningSet(t *testing.T) {
++	completeA := completeContainerStats("a", 10, nil, false)
++	missingCPU := completeContainerStats("a", 10, nil, false)
++	missingCPU.stats.Cpu = nil
++	missingMemory := completeContainerStats("a", 10, nil, false)
++	missingMemory.stats.Memory = nil
++	missingCoreUsage := completeContainerStats("a", 10, nil, false)
++	missingCoreUsage.stats.Cpu.UsageCoreNanoSeconds = nil
++	duplicateA := completeContainerStats("a", 20, nil, false)
++	cpuOnlyA := completeContainerStats("a", 10, nil, false)
++	cpuOnlyA.stats.Memory = nil
++	memoryOnlyB := completeContainerStats("b", 40, nil, false)
++	memoryOnlyB.stats.Cpu = nil
++	incompleteB := completeContainerStats("b", 40, nil, false)
++	incompleteB.stats.Memory = nil
++	missingWorkingSet := completeContainerStats("a", 10, nil, false)
++	missingWorkingSet.stats.Memory.WorkingSetBytes = nil
++	missingUsage := completeContainerStats("a", 10, nil, false)
++	missingUsage.stats.Memory.UsageBytes = nil
++	missingRSS := completeContainerStats("a", 10, nil, false)
++	missingRSS.stats.Memory.RssBytes = nil
++	missingFaults := completeContainerStats("a", 10, nil, false)
++	missingFaults.stats.Memory.PageFaults = nil
++	missingMajorFaults := completeContainerStats("a", 10, nil, false)
++	missingMajorFaults.stats.Memory.MajorPageFaults = nil
++
++	tests := []struct {
++		name    string
++		css     []containerStats
++		running map[string]struct{}
++	}{
++		{name: "no running containers"},
++		{name: "running metric absent", css: []containerStats{completeA}, running: map[string]struct{}{"a": {}, "b": {}}},
++		{name: "cpu absent", css: []containerStats{missingCPU}, running: map[string]struct{}{"a": {}}},
++		{name: "memory absent", css: []containerStats{missingMemory}, running: map[string]struct{}{"a": {}}},
++		{name: "core usage absent", css: []containerStats{missingCoreUsage}, running: map[string]struct{}{"a": {}}},
++		{name: "working set absent", css: []containerStats{missingWorkingSet}, running: map[string]struct{}{"a": {}}},
++		{name: "usage absent", css: []containerStats{missingUsage}, running: map[string]struct{}{"a": {}}},
++		{name: "rss absent", css: []containerStats{missingRSS}, running: map[string]struct{}{"a": {}}},
++		{name: "page faults absent", css: []containerStats{missingFaults}, running: map[string]struct{}{"a": {}}},
++		{name: "major page faults absent", css: []containerStats{missingMajorFaults}, running: map[string]struct{}{"a": {}}},
++		{name: "cpu and memory split", css: []containerStats{cpuOnlyA, memoryOnlyB}, running: map[string]struct{}{"a": {}, "b": {}}},
++		{name: "duplicate running metric", css: []containerStats{completeA, duplicateA}, running: map[string]struct{}{"a": {}}},
++		{name: "one of two incomplete", css: []containerStats{completeA, incompleteB}, running: map[string]struct{}{"a": {}, "b": {}}},
++	}
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			cpu, memory, io, complete := aggregateSandboxStats(test.css, test.running, 100)
++			if complete || cpu != nil || memory != nil || io != nil {
++				t.Fatalf("incomplete aggregate must select Host fallback: complete=%v cpu=%v memory=%v io=%v", complete, cpu, memory, io)
++			}
++		})
++	}
++}
++
++func TestAggregateSandboxStatsSaturates(t *testing.T) {
++	maximum := ^uint64(0)
++	first := completeContainerStats("a", 1, nil, false)
++	second := completeContainerStats("b", 1, nil, false)
++	first.stats.Memory.UsageBytes = uint64Value(maximum - 1)
++	second.stats.Memory.UsageBytes = uint64Value(10)
++	running := map[string]struct{}{"a": {}, "b": {}}
++
++	_, memory, _, complete := aggregateSandboxStats([]containerStats{first, second}, running, 100)
++	if !complete || memory.UsageBytes.Value != maximum {
++		t.Fatalf("overflow must saturate, complete=%v memory=%+v", complete, memory)
++	}
++}
+

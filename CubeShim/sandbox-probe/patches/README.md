@@ -1,0 +1,40 @@
+# containerd PoC 补丁
+
+本目录只保存 CubeSandbox Kubernetes RuntimeClass PoC 需要、但尚未进入上游
+containerd 的固定版本补丁。补丁必须能用 `git apply --check` 应用于标题所标记的
+containerd release，并在节点部署记录中同时固定 containerd commit、补丁 SHA-256
+和最终二进制 SHA-256。
+
+## custom sandboxer PodStats
+
+`containerd-v2.3.4-custom-sandboxer-pod-stats.patch` 修正自定义 Sandbox Controller
+下的 CRI `PodSandboxStats` 口径。标准 `podsandbox` 仍读取 Host Pod cgroup；自定义
+sandboxer 仅在所有运行中容器均有完整 CPU 和 Memory 指标时，改为汇总该 Sandbox
+内的 CRI 容器指标，避免把 VMM、virtiofs 和 worker 的 Host 开销计入 Pod 工作负载。
+
+应用与验证：
+
+```bash
+git checkout v2.3.4
+git apply --check /path/to/containerd-v2.3.4-custom-sandboxer-pod-stats.patch
+git apply /path/to/containerd-v2.3.4-custom-sandboxer-pod-stats.patch
+GOFLAGS=-mod=vendor go test ./internal/cri/server -count=1
+```
+
+这是 PoC 兼容补丁，不是最终上游接口。补丁只在所有运行中容器都有完整 CPU 和
+Memory 指标时聚合，Pod `AvailableBytes` 优先根据当前 sandbox resource status 中的
+Pod memory limit 计算，尚未更新时回退初始 CRI `PodSandboxConfig`；指标不完整时退回
+Host cgroup。兄弟容器的 PSI 不能正确合成，因此只在
+单个运行中容器时透传 PSI，多容器时保持为空。长期方案应由 Sandbox Controller 的
+`Metrics` 返回 Guest Pod cgroup 原生指标，再由 containerd CRI 消费该指标。补丁还从
+core sandbox 的 `updated-resources` extension 恢复 custom sandboxer 的当前资源状态，
+使 containerd 重启后的 Pod resize limit 不会退回初始值。
+
+已知限制：只聚合当前运行中的容器，因此 init container 切换或业务容器重启后，Pod
+级 `UsageCoreNanoSeconds`、`PageFaults` 等累计字段可能下降或重置。PoC 用它修正工作集、
+当前 memory usage 和瞬时 CPU 等主要统计；需要单调 Pod 生命周期累计值时必须改为
+Guest Pod cgroup 原生指标，不能继续从当前容器集合合成。
+
+## trace 补丁
+
+`containerd-v2.3.4-s34-trace.patch` 只用于 S3.4 诊断，不应进入运行时验收制品。
