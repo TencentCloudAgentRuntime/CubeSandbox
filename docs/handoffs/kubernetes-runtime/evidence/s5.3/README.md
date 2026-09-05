@@ -6,6 +6,8 @@
 结果为 456 Passed、17 Failed、4 Skipped；17 个失败与 4 个 Skip 均已逐项分类，测试环境
 已经恢复，W1/W2 最终 exact-zero。同一 reviewer 终审 `PASS`（P0/P1/P2=0）；
 完整结果见 [S5.3b/S5.3c 最终报告](./s5.3b-nodeconformance.md)。
+477 项能力域、上游文件和 17 个失败的展开说明见
+[NodeConformance 分类与失败分析](./s5.3-nodeconformance-classification.md)。
 
 ## 固定环境与制品
 
