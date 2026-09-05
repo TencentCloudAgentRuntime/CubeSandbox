@@ -21,7 +21,6 @@ use rtnetlink::{new_connection, IpVersion};
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::num::NonZeroI32;
 use std::ops::Deref;
 use std::str::{self, FromStr};
 // Convenience macro to obtain the scope logger
@@ -42,28 +41,139 @@ const ALL_RULE_FLAGS: [NeighbourFlag; 8] = [
     NeighbourFlag::Router,
 ];
 
-/// Return true when the kernel rejected an idempotent connected-route add.
-///
-/// Netlink reports errors as negative errno values. Assigning an address to an
-/// interface makes the kernel install its connected route before the runtime
-/// replays the route list supplied by CNI, so adding that same route returns
-/// `-EEXIST`. Only ignore that error for a directly connected route whose
-/// preferred source belongs to the destination network; gateway routes and
-/// malformed routes must still fail.
-fn connected_route_already_exists(code: Option<NonZeroI32>, route: &Route) -> bool {
-    if code.map(NonZeroI32::get) != Some(-libc::EEXIST)
-        || !route.gateway.is_empty()
-        || route.dest.is_empty()
-        || route.source.is_empty()
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConnectedRouteIdentity {
+    family: AddressFamily,
+    destination: IpNetwork,
+    preferred_source: IpAddr,
+    output_interface: u32,
+}
+
+fn connected_route_identity(
+    route: &Route,
+    output_interface: u32,
+) -> Option<ConnectedRouteIdentity> {
+    if !route.gateway.is_empty() || route.dest.is_empty() || route.source.is_empty() || route.onlink
+    {
+        return None;
+    }
+
+    let destination = IpNetwork::from_str(&route.dest).ok()?;
+    let source = IpNetwork::from_str(&route.source).ok()?;
+    let source_is_host = match source {
+        IpNetwork::V4(network) => network.prefix() == 32,
+        IpNetwork::V6(network) => network.prefix() == 128,
+    };
+    let expected_scope = if destination.is_ipv4() {
+        RouteScope::Link
+    } else {
+        RouteScope::Universe
+    };
+    if !source_is_host
+        || !destination.contains(source.ip())
+        || destination.is_ipv4() != source.is_ipv4()
+        || (route.family() == IPFamily::v6) != destination.is_ipv6()
+        || destination.prefix() == 0
+        || route.scope != u8::from(expected_scope) as u32
+    {
+        return None;
+    }
+
+    Some(ConnectedRouteIdentity {
+        family: if destination.is_ipv4() {
+            AddressFamily::Inet
+        } else {
+            AddressFamily::Inet6
+        },
+        destination,
+        preferred_source: source.ip(),
+        output_interface,
+    })
+}
+
+fn route_table(message: &RouteMessage) -> u32 {
+    message
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            RouteAttribute::Table(table) => Some(*table),
+            _ => None,
+        })
+        .unwrap_or(message.header.table as u32)
+}
+
+/// Match the exact kernel-created route which address assignment installs.
+/// IPv4 exports its source as RTA_PREFSRC. Linux IPv6 connected routes often
+/// omit RTA_PREFSRC, so the caller additionally verifies that the requested
+/// source address is assigned to the same output interface.
+fn matches_connected_route(message: &RouteMessage, expected: &ConnectedRouteIdentity) -> bool {
+    let expected_scope = match expected.family {
+        AddressFamily::Inet => RouteScope::Link,
+        AddressFamily::Inet6 => RouteScope::Universe,
+        _ => return false,
+    };
+    if message.header.address_family != expected.family
+        || message.header.destination_prefix_length != expected.destination.prefix()
+        || message.header.source_prefix_length != 0
+        || route_table(message) != RouteHeader::RT_TABLE_MAIN as u32
+        || message.header.protocol != RouteProtocol::Kernel
+        || message.header.scope != expected_scope
+        || message.header.kind != RouteType::Unicast
+        || message.header.flags.contains(&RouteFlag::Onlink)
     {
         return false;
     }
 
-    match (
-        IpNetwork::from_str(&route.dest),
-        IpNetwork::from_str(&route.source),
-    ) {
-        (Ok(destination), Ok(source)) => destination.contains(source.ip()),
+    let mut destination = None;
+    let mut preferred_source = None;
+    let mut output_interface = None;
+    for attribute in &message.attributes {
+        match attribute {
+            RouteAttribute::Destination(address) => {
+                let address = match parse_route_addr(address) {
+                    Ok(address) => address,
+                    Err(_) => return false,
+                };
+                if destination.replace(address).is_some() {
+                    return false;
+                }
+            }
+            RouteAttribute::PrefSource(address) => {
+                let address = match parse_route_addr(address) {
+                    Ok(address) => address,
+                    Err(_) => return false,
+                };
+                if preferred_source.replace(address).is_some() {
+                    return false;
+                }
+            }
+            RouteAttribute::Oif(index) => {
+                if output_interface.replace(*index).is_some() {
+                    return false;
+                }
+            }
+            RouteAttribute::Source(_)
+            | RouteAttribute::Gateway(_)
+            | RouteAttribute::Via(_)
+            | RouteAttribute::MultiPath(_) => return false,
+            _ => {}
+        }
+    }
+
+    let expected_destination = match expected.destination {
+        IpNetwork::V4(network) => IpAddr::V4(network.network()),
+        IpNetwork::V6(network) => IpAddr::V6(network.network()),
+    };
+    if destination != Some(expected_destination)
+        || output_interface != Some(expected.output_interface)
+        || preferred_source.is_some_and(|source| source != expected.preferred_source)
+    {
+        return false;
+    }
+
+    match expected.family {
+        AddressFamily::Inet => preferred_source == Some(expected.preferred_source),
+        AddressFamily::Inet6 => true,
         _ => false,
     }
 }
@@ -302,6 +412,36 @@ impl Handle {
         Ok(list)
     }
 
+    async fn connected_route_exists(&self, route: &Route, output_interface: u32) -> Result<bool> {
+        let expected = match connected_route_identity(route, output_interface) {
+            Some(expected) => expected,
+            None => return Ok(false),
+        };
+        let version = if expected.family == AddressFamily::Inet6 {
+            IpVersion::V6
+        } else {
+            IpVersion::V4
+        };
+        let route_matches = self
+            .query_routes(Some(version))
+            .await?
+            .iter()
+            .any(|message| matches_connected_route(message, &expected));
+        if !route_matches {
+            return Ok(false);
+        }
+
+        // This is required even when RTA_PREFSRC is present: it prevents a
+        // coincidentally identical route on an interface which does not own
+        // the source address from being accepted as the CNI connected route.
+        let source = expected.preferred_source.to_string();
+        Ok(self
+            .list_addresses(Some(AddressFilter::LinkIndex(output_interface)))
+            .await?
+            .iter()
+            .any(|address| address.address() == source || address.local() == source))
+    }
+
     pub async fn list_routes(&self) -> Result<Vec<Route>> {
         let mut result = Vec::new();
 
@@ -431,19 +571,26 @@ impl Handle {
                 }
 
                 if let Err(err) = request.execute().await {
-                    if !matches!(
+                    let eexist = matches!(
                         &err,
                         rtnetlink::Error::NetlinkError(message)
-                            if connected_route_already_exists(message.code, &route)
-                    ) {
-                        return Err(anyhow!(
-                            "Failed to add IP v6 route (src: {}, dst: {}, gtw: {}, Err: {})",
-                            route.source(),
-                            route.dest(),
-                            route.gateway(),
-                            err
-                        ));
+                            if message.code.map(|code| code.get()) == Some(-libc::EEXIST)
+                    );
+                    if eexist
+                        && self
+                            .connected_route_exists(route, link.index())
+                            .await
+                            .with_context(|| "read back existing IP v6 route")?
+                    {
+                        continue;
                     }
+                    return Err(anyhow!(
+                        "Failed to add IP v6 route (src: {}, dst: {}, gtw: {}, Err: {})",
+                        route.source(),
+                        route.dest(),
+                        route.gateway(),
+                        err
+                    ));
                 }
             } else {
                 let dest_addr = if !route.dest.is_empty() {
@@ -487,19 +634,26 @@ impl Handle {
                 }
 
                 if let Err(err) = request.execute().await {
-                    if !matches!(
+                    let eexist = matches!(
                         &err,
                         rtnetlink::Error::NetlinkError(message)
-                            if connected_route_already_exists(message.code, &route)
-                    ) {
-                        return Err(anyhow!(
-                            "Failed to add IP v4 route (src: {}, dst: {}, gtw: {}, Err: {})",
-                            route.source(),
-                            route.dest(),
-                            route.gateway(),
-                            err
-                        ));
+                            if message.code.map(|code| code.get()) == Some(-libc::EEXIST)
+                    );
+                    if eexist
+                        && self
+                            .connected_route_exists(route, link.index())
+                            .await
+                            .with_context(|| "read back existing IP v4 route")?
+                    {
+                        continue;
                     }
+                    return Err(anyhow!(
+                        "Failed to add IP v4 route (src: {}, dst: {}, gtw: {}, Err: {})",
+                        route.source(),
+                        route.dest(),
+                        route.gateway(),
+                        err
+                    ));
                 }
             }
         }
@@ -887,53 +1041,211 @@ mod tests {
     use super::*;
     use crate::{skip_if_no_cap, skip_if_not_root};
     use capctl::caps::Cap;
+    use serial_test::serial;
     use std::iter;
-    use std::num::NonZeroI32;
+    use std::os::unix::io::AsRawFd;
     use std::process::Command;
 
     fn route(dest: &str, source: &str, gateway: &str) -> Route {
-        Route {
+        let mut route = Route {
             dest: dest.to_owned(),
             source: source.to_owned(),
             gateway: gateway.to_owned(),
             ..Default::default()
+        };
+        if dest.contains(':') || source.contains(':') || gateway.contains(':') {
+            route.set_family(IPFamily::v6);
+            route.scope = u8::from(RouteScope::Universe) as u32;
+        } else {
+            route.scope = u8::from(RouteScope::Link) as u32;
+        }
+        route
+    }
+
+    fn connected_message(dest: &str, source: Option<&str>, oif: u32) -> RouteMessage {
+        let network = IpNetwork::from_str(dest).unwrap();
+        let mut message = RouteMessage::default();
+        message.header.address_family = if network.is_ipv4() {
+            AddressFamily::Inet
+        } else {
+            AddressFamily::Inet6
+        };
+        message.header.destination_prefix_length = network.prefix();
+        message.header.table = RouteHeader::RT_TABLE_MAIN;
+        message.header.protocol = RouteProtocol::Kernel;
+        message.header.scope = if network.is_ipv4() {
+            RouteScope::Link
+        } else {
+            RouteScope::Universe
+        };
+        message.header.kind = RouteType::Unicast;
+        let destination = match network {
+            IpNetwork::V4(network) => RouteAddress::from(network.network()),
+            IpNetwork::V6(network) => RouteAddress::from(network.network()),
+        };
+        message
+            .attributes
+            .push(RouteAttribute::Destination(destination));
+        message.attributes.push(RouteAttribute::Oif(oif));
+        if let Some(source) = source {
+            let source = IpAddr::from_str(source).unwrap();
+            let source = match source {
+                IpAddr::V4(source) => RouteAddress::from(source),
+                IpAddr::V6(source) => RouteAddress::from(source),
+            };
+            message.attributes.push(RouteAttribute::PrefSource(source));
+        }
+        message
+    }
+
+    #[test]
+    fn connected_route_readback_requires_exact_identity() {
+        let route4 = route("10.254.0.0/24", "10.254.0.21", "");
+        let expected4 = connected_route_identity(&route4, 7).unwrap();
+        let message4 = connected_message("10.254.0.0/24", Some("10.254.0.21"), 7);
+        assert!(matches_connected_route(&message4, &expected4));
+
+        let route6 = route("fd00::/64", "fd00::21", "");
+        let expected6 = connected_route_identity(&route6, 9).unwrap();
+        let message6 = connected_message("fd00::/64", None, 9);
+        assert!(matches_connected_route(&message6, &expected6));
+
+        let mut conflict = message4.clone();
+        conflict
+            .attributes
+            .retain(|attribute| !matches!(attribute, RouteAttribute::Oif(_)));
+        conflict.attributes.push(RouteAttribute::Oif(8));
+        assert!(!matches_connected_route(&conflict, &expected4));
+
+        let mut conflict = message4.clone();
+        conflict.header.protocol = RouteProtocol::Boot;
+        assert!(!matches_connected_route(&conflict, &expected4));
+
+        let mut conflict = message4.clone();
+        conflict.header.scope = RouteScope::Universe;
+        assert!(!matches_connected_route(&conflict, &expected4));
+
+        let mut conflict = message4.clone();
+        conflict.header.kind = RouteType::BlackHole;
+        assert!(!matches_connected_route(&conflict, &expected4));
+
+        let mut conflict = message4.clone();
+        conflict.header.table = libc::RT_TABLE_LOCAL as u8;
+        assert!(!matches_connected_route(&conflict, &expected4));
+
+        let mut conflict = message4.clone();
+        conflict.header.source_prefix_length = 32;
+        assert!(!matches_connected_route(&conflict, &expected4));
+
+        let mut conflict = message4.clone();
+        conflict.header.flags.push(RouteFlag::Onlink);
+        assert!(!matches_connected_route(&conflict, &expected4));
+
+        let conflict = connected_message("10.253.0.0/24", Some("10.254.0.21"), 7);
+        assert!(!matches_connected_route(&conflict, &expected4));
+
+        let mut conflict = message4.clone();
+        conflict
+            .attributes
+            .push(RouteAttribute::Gateway(RouteAddress::from(Ipv4Addr::new(
+                10, 254, 0, 1,
+            ))));
+        assert!(!matches_connected_route(&conflict, &expected4));
+
+        let mut conflict = message4.clone();
+        conflict
+            .attributes
+            .retain(|attribute| !matches!(attribute, RouteAttribute::PrefSource(_)));
+        conflict
+            .attributes
+            .push(RouteAttribute::PrefSource(RouteAddress::from(
+                Ipv4Addr::new(10, 254, 0, 22),
+            )));
+        assert!(!matches_connected_route(&conflict, &expected4));
+
+        assert!(connected_route_identity(&route("0.0.0.0/0", "10.254.0.21", ""), 7).is_none());
+        assert!(
+            connected_route_identity(&route("10.254.0.0/24", "10.254.0.0/24", ""), 7).is_none()
+        );
+        assert!(
+            connected_route_identity(&route("10.254.0.0/24", "10.254.0.21", "10.254.0.1"), 7)
+                .is_none()
+        );
+        let mut wrong_scope = route("10.254.0.0/24", "10.254.0.21", "");
+        wrong_scope.scope = u8::from(RouteScope::Universe) as u32;
+        assert!(connected_route_identity(&wrong_scope, 7).is_none());
+    }
+
+    fn run_ip(args: &[&str]) -> std::result::Result<(), String> {
+        let output = Command::new("ip")
+            .args(args)
+            .output()
+            .map_err(|error| format!("ip {:?} failed to execute: {}", args, error))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "ip {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            ))
         }
     }
 
-    #[test]
-    fn connected_route_eexist_is_idempotent() {
-        let eexist = NonZeroI32::new(-libc::EEXIST);
+    #[tokio::test(flavor = "current_thread")]
+    #[serial(netns)]
+    async fn connected_route_eexist_is_verified_in_kernel() {
+        skip_if_not_root!();
+        skip_if_no_cap!(Cap::NET_ADMIN);
+        skip_if_no_cap!(Cap::SYS_ADMIN);
 
-        assert!(connected_route_already_exists(
-            eexist,
-            &route("10.254.0.0/24", "10.254.0.21", "")
-        ));
-        assert!(connected_route_already_exists(
-            eexist,
-            &route("fd00::/64", "fd00::21", "")
-        ));
-    }
+        let original = std::fs::File::open("/proc/self/ns/net").unwrap();
+        if let Err(error) = nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWNET) {
+            println!("INFO: skipping netns route test: unshare failed: {}", error);
+            return;
+        }
+        defer!(let _ = nix::sched::setns(original.as_raw_fd(), nix::sched::CloneFlags::CLONE_NEWNET););
 
-    #[test]
-    fn connected_route_conflicts_are_not_ignored() {
-        let eexist = NonZeroI32::new(-libc::EEXIST);
+        if let Err(error) = run_ip(&["link", "add", "cube-e2e0", "type", "dummy"]) {
+            println!("INFO: skipping netns route test: {}", error);
+            return;
+        }
+        run_ip(&["link", "add", "cube-e2e1", "type", "dummy"]).unwrap();
+        run_ip(&["link", "set", "cube-e2e0", "up"]).unwrap();
+        run_ip(&["link", "set", "cube-e2e1", "up"]).unwrap();
+        run_ip(&["addr", "add", "192.0.2.2/24", "dev", "cube-e2e0"]).unwrap();
+        run_ip(&["-6", "addr", "add", "2001:db8:1::2/64", "dev", "cube-e2e0"]).unwrap();
 
-        assert!(!connected_route_already_exists(
-            NonZeroI32::new(-libc::EINVAL),
-            &route("10.254.0.0/24", "10.254.0.21", "")
-        ));
-        assert!(!connected_route_already_exists(
-            eexist,
-            &route("0.0.0.0/0", "10.254.0.21", "10.254.0.1")
-        ));
-        assert!(!connected_route_already_exists(
-            eexist,
-            &route("10.254.0.0/24", "10.255.0.21", "")
-        ));
-        assert!(!connected_route_already_exists(
-            eexist,
-            &route("not-a-network", "10.254.0.21", "")
-        ));
+        let mut handle = Handle::new().unwrap();
+        let link = handle
+            .find_link(LinkFilter::Name("cube-e2e0"))
+            .await
+            .unwrap();
+        let mut route4 = route("192.0.2.0/24", "192.0.2.2", "");
+        route4.device = "cube-e2e0".to_string();
+        assert!(handle
+            .connected_route_exists(&route4, link.index())
+            .await
+            .unwrap());
+        let routes4_before = handle.query_routes(Some(IpVersion::V4)).await.unwrap();
+        handle.add_routes(iter::once(route4.clone())).await.unwrap();
+        let routes4_after = handle.query_routes(Some(IpVersion::V4)).await.unwrap();
+        assert_eq!(routes4_after, routes4_before);
+
+        let mut conflict = route4;
+        conflict.device = "cube-e2e1".to_string();
+        assert!(handle.add_routes(iter::once(conflict)).await.is_err());
+
+        let mut route6 = route("2001:db8:1::/64", "2001:db8:1::2", "");
+        route6.device = "cube-e2e0".to_string();
+        assert!(handle
+            .connected_route_exists(&route6, link.index())
+            .await
+            .unwrap());
+        let routes6_before = handle.query_routes(Some(IpVersion::V6)).await.unwrap();
+        handle.add_routes(iter::once(route6)).await.unwrap();
+        let routes6_after = handle.query_routes(Some(IpVersion::V6)).await.unwrap();
+        assert_eq!(routes6_after, routes6_before);
     }
 
     #[tokio::test]

@@ -13,13 +13,14 @@ use nix::sys::stat::{self, Mode, SFlag};
 use nix::unistd::{self, Gid, Uid};
 use nix::NixPath;
 use oci::{LinuxDevice, Mount, Process, Spec};
+use safe_path::{PinnedPathBuf, ScopedDirBuilder};
 use std::collections::{HashMap, HashSet};
-#[cfg(not(test))]
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::mem::MaybeUninit;
 use std::os::unix;
-use std::os::unix::io::RawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Component, Path, PathBuf};
 
 use path_absolutize::*;
@@ -303,19 +304,27 @@ pub fn init_rootfs(
     // /dev/fd and /dev/{stdin,stdout,stderr} point into /proc/self/fd. devtmpfs
     // never provides them, so they are needed even when /dev is bind mounted
     // from the guest; only the device nodes can be skipped in that case.
-    default_symlinks().map_err(|e| anyhow!("default_symlinks failed:{:}", e))?;
+    let setup_result = (|| -> Result<()> {
+        default_symlinks().map_err(|e| anyhow!("default_symlinks failed:{:}", e))?;
 
-    // in case the /dev directory was binded mount from guest,
-    // then there's no need to create devices nodes in /dev.
-    if !bind_mount_dev {
-        create_devices(&linux.devices, bind_device)
-            .map_err(|e| anyhow!("create_devices failed:{:}", e))?;
-        ensure_ptmx()?;
+        // in case the /dev directory was binded mount from guest,
+        // then there's no need to create devices nodes in /dev.
+        if !bind_mount_dev {
+            create_devices(Path::new(rootfs), &linux.devices, bind_device)
+                .map_err(|e| anyhow!("create_devices failed:{:}", e))?;
+            ensure_ptmx()?;
+        }
+        Ok(())
+    })();
+    let restore_result = unistd::chdir(&olddir)
+        .map_err(|e| anyhow!("restore working directory {:?} failed: {}", olddir, e));
+
+    match (setup_result, restore_result) {
+        (Err(setup), Err(restore)) => Err(setup.context(restore.to_string())),
+        (Err(setup), Ok(())) => Err(setup),
+        (Ok(()), Err(restore)) => Err(restore),
+        (Ok(()), Ok(())) => Ok(()),
     }
-
-    unistd::chdir(&olddir)?;
-
-    Ok(())
 }
 
 fn check_proc_mount(m: &Mount) -> Result<()> {
@@ -1002,48 +1011,67 @@ fn ensure_symlink(src: &str, dst: &str) -> Result<()> {
     }
 }
 
-// Resolve an OCI device path below the container rootfs. The OCI runtime
-// specification explicitly permits device nodes outside /dev, which is used
-// by Kubernetes device-plugin and CDI conformance tests. Resolve image
-// symlinks while the container is still stopped so the relative path cannot
-// escape the rootfs when mknod is called below.
-fn device_rel_path(rootfs: &Path, path: &str) -> Option<PathBuf> {
+// Resolve and pin the parent of an OCI device path below the container rootfs.
+// The OCI runtime specification permits device nodes outside /dev. Image
+// symlinks are therefore untrusted: create each parent below a pinned rootfs
+// and perform the final operation relative to that directory fd.
+fn device_dir_builder(rootfs: &Path) -> Result<ScopedDirBuilder> {
+    let mut builder = ScopedDirBuilder::new(rootfs)
+        .with_context(|| format!("pin container rootfs {}", rootfs.display()))?;
+    builder.recursive(true);
+    Ok(builder)
+}
+
+fn pinned_device_target(
+    builder: &ScopedDirBuilder,
+    path: &str,
+) -> Result<(PinnedPathBuf, CString)> {
     let path = Path::new(path);
 
     if !path.is_absolute()
         || path == Path::new("/")
         || path.components().any(|c| c == Component::ParentDir)
     {
-        return None;
+        return Err(anyhow!("{} is not a valid device path", path.display()));
     }
 
-    let rootfs = rootfs.to_str()?;
-    PathBuf::from(secure_join(rootfs, path.to_str()?))
-        .strip_prefix(rootfs)
-        .ok()
-        .filter(|path| !path.as_os_str().is_empty())
-        .map(Path::to_path_buf)
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("{} has no device name", path.display()))?;
+    let name = CString::new(name.as_bytes())
+        .map_err(|_| anyhow!("{} contains an invalid device name", path.display()))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no device parent", path.display()))?;
+
+    let parent = builder
+        .create(parent)
+        .with_context(|| format!("create device parent {}", path.display()))?;
+
+    Ok((parent, name))
 }
 
-fn create_devices(devices: &[LinuxDevice], bind: bool) -> Result<()> {
-    let op: fn(&LinuxDevice, &Path) -> Result<()> = if bind { bind_dev } else { mknod_dev };
+fn create_devices(rootfs: &Path, devices: &[LinuxDevice], bind: bool) -> Result<()> {
     let old = stat::umask(Mode::from_bits_truncate(0o000));
-    let rootfs = unistd::getcwd().context("get container rootfs for device creation")?;
-    for dev in DEFAULT_DEVICES.iter() {
-        let path = Path::new(&dev.path[1..]);
-        op(dev, path).context(format!("Creating container device {:?}", dev))?;
-    }
-    for dev in devices {
-        let path = device_rel_path(&rootfs, &dev.path).ok_or_else(|| {
-            let msg = format!("{} is not a valid device path", dev.path);
-            anyhow!(msg)
-        })?;
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).context(format!("Creating container device {:?}", dev))?;
+    let _restore_umask = scopeguard::guard(old, |mode| {
+        stat::umask(mode);
+    });
+
+    // Pin rootfs once for the whole device batch. Reopening the pathname for
+    // each device would allow a concurrent rename to split one OCI spec across
+    // different filesystem trees.
+    let builder = device_dir_builder(rootfs)?;
+    for dev in DEFAULT_DEVICES.iter().chain(devices) {
+        let (parent, name) = pinned_device_target(&builder, &dev.path)
+            .with_context(|| format!("Creating container device {:?}", dev))?;
+        if bind {
+            bind_dev_at(dev, &parent, &name)
+                .with_context(|| format!("Creating container device {:?}", dev))?;
+        } else {
+            mknod_dev_at(dev, &parent, &name)
+                .with_context(|| format!("Creating container device {:?}", dev))?;
         }
-        op(dev, &path).context(format!("Creating container device {:?}", dev))?;
     }
-    stat::umask(old);
     Ok(())
 }
 
@@ -1063,40 +1091,48 @@ lazy_static! {
     };
 }
 
-fn mknod_dev(dev: &LinuxDevice, relpath: &Path) -> Result<()> {
+fn mknod_dev_at(dev: &LinuxDevice, parent: &PinnedPathBuf, name: &CString) -> Result<()> {
     let f = match LINUXDEVICETYPE.get(dev.r#type.as_str()) {
         Some(v) => v,
         None => return Err(anyhow!("invalid spec".to_string())),
     };
 
-    stat::mknod(
-        relpath,
-        *f,
-        Mode::from_bits_truncate(dev.file_mode.unwrap_or(0)),
-        nix::sys::stat::makedev(dev.major as u64, dev.minor as u64),
-    )?;
+    let permissions = Mode::from_bits_truncate(dev.file_mode.unwrap_or(0)).bits();
+    let mode = f.bits() | permissions;
+    let device = nix::sys::stat::makedev(dev.major as u64, dev.minor as u64);
+    let result = unsafe { libc::mknodat(parent.path_fd(), name.as_ptr(), mode, device) };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
 
-    unistd::chown(
-        relpath,
-        Some(Uid::from_raw(dev.uid.unwrap_or(0) as uid_t)),
-        Some(Gid::from_raw(dev.gid.unwrap_or(0) as uid_t)),
-    )?;
+    let result = unsafe {
+        libc::fchownat(
+            parent.path_fd(),
+            name.as_ptr(),
+            Uid::from_raw(dev.uid.unwrap_or(0) as uid_t).as_raw(),
+            Gid::from_raw(dev.gid.unwrap_or(0) as uid_t).as_raw(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
 
     Ok(())
 }
 
-fn bind_dev(dev: &LinuxDevice, relpath: &Path) -> Result<()> {
-    let fd = fcntl::open(
-        relpath,
-        OFlag::O_RDWR | OFlag::O_CREAT,
-        Mode::from_bits_truncate(0o644),
-    )?;
-
-    unistd::close(fd)?;
+fn bind_dev_at(dev: &LinuxDevice, parent: &PinnedPathBuf, name: &CString) -> Result<()> {
+    let flags = libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+    let fd = unsafe { libc::openat(parent.path_fd(), name.as_ptr(), flags, 0o644) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let target = unsafe { fs::File::from_raw_fd(fd) };
+    let target_path = format!("/proc/self/fd/{}", target.as_raw_fd());
 
     mount(
         Some(&*dev.path),
-        relpath,
+        target_path.as_str(),
         None::<&str>,
         MsFlags::MS_BIND,
         None::<&str>,
@@ -1214,6 +1250,7 @@ mod tests {
     use std::fs::create_dir_all;
     use std::fs::remove_dir_all;
     use std::io;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs;
     use std::os::unix::io::AsRawFd;
     use tempfile::tempdir;
@@ -1440,10 +1477,7 @@ mod tests {
         skip_if_not_root!();
 
         let tempdir = tempdir().unwrap();
-
-        let olddir = unistd::getcwd().unwrap();
-        defer!(let _ = unistd::chdir(&olddir););
-        let _ = unistd::chdir(tempdir.path());
+        let builder = device_dir_builder(tempdir.path()).unwrap();
 
         // A FIFO node needs no CAP_MKNOD, so this exercises mknod_dev's success
         // path (type lookup, mode, chown) even where character/block device-node
@@ -1457,17 +1491,32 @@ mod tests {
             uid: Some(unistd::getuid().as_raw()),
             gid: Some(unistd::getgid().as_raw()),
         };
-        let ret = mknod_dev(&fifo, Path::new("fifo"));
+        let (parent, name) = pinned_device_target(&builder, &fifo.path).unwrap();
+        let ret = mknod_dev_at(&fifo, &parent, &name);
         assert!(ret.is_ok(), "Should pass. Got: {:?}", ret);
-        let st = stat::stat(Path::new("fifo")).unwrap();
+        let st = stat::stat(&tempdir.path().join("fifo")).unwrap();
         assert_eq!(st.st_mode & SFlag::S_IFMT.bits(), SFlag::S_IFIFO.bits());
 
         // An unrecognized device type is rejected regardless of privileges.
         let bad = oci::LinuxDevice {
+            path: "/bad".to_string(),
             r#type: "x".to_string(),
             ..fifo.clone()
         };
-        assert!(mknod_dev(&bad, Path::new("bad")).is_err());
+        let (parent, name) = pinned_device_target(&builder, &bad.path).unwrap();
+        assert!(mknod_dev_at(&bad, &parent, &name).is_err());
+
+        // file_mode is permissions only. Type bits in an untrusted wire value
+        // must not override the separately declared OCI device type.
+        let typed_mode = oci::LinuxDevice {
+            path: "/typed-mode".to_string(),
+            file_mode: Some(SFlag::S_IFBLK.bits() | 0o600),
+            ..fifo.clone()
+        };
+        let (parent, name) = pinned_device_target(&builder, &typed_mode.path).unwrap();
+        mknod_dev_at(&typed_mode, &parent, &name).unwrap();
+        let st = stat::stat(&tempdir.path().join("typed-mode")).unwrap();
+        assert_eq!(st.st_mode & SFlag::S_IFMT.bits(), SFlag::S_IFIFO.bits());
 
         // Character-device creation needs CAP_MKNOD, which is commonly dropped
         // from root in container/CI environments. Gate on the capability up
@@ -1476,10 +1525,12 @@ mod tests {
         // matching an errno after the fact.
         skip_if_no_cap!(caps::Capability::CAP_MKNOD);
         let chr = oci::LinuxDevice {
+            path: "/char".to_string(),
             r#type: "c".to_string(),
             ..fifo
         };
-        let ret = mknod_dev(&chr, Path::new("char"));
+        let (parent, name) = pinned_device_target(&builder, &chr.path).unwrap();
+        let ret = mknod_dev_at(&chr, &parent, &name);
         // Even with CAP_MKNOD in the effective set, mknod(S_IFCHR) can be denied
         // when the target filesystem's superblock is owned by a parent user
         // namespace (e.g. unshare -Ur, or a rootless runtime leaving /tmp
@@ -1489,8 +1540,9 @@ mod tests {
         // resulting EPERM/ENOENT.
         if let Err(ref e) = ret {
             if matches!(
-                e.downcast_ref::<nix::Error>(),
-                Some(&nix::Error::EPERM) | Some(&nix::Error::ENOENT)
+                e.downcast_ref::<std::io::Error>()
+                    .and_then(std::io::Error::raw_os_error),
+                Some(libc::EPERM) | Some(libc::ENOENT)
             ) {
                 println!(
                     "INFO: skipping {} char-device case: mknod denied ({:?})",
@@ -1501,8 +1553,106 @@ mod tests {
             }
         }
         assert!(ret.is_ok(), "Should pass. Got: {:?}", ret);
-        let st = stat::stat(Path::new("char")).unwrap();
+        let st = stat::stat(&tempdir.path().join("char")).unwrap();
         assert_eq!(st.st_mode & SFlag::S_IFMT.bits(), SFlag::S_IFCHR.bits());
+    }
+
+    fn fifo_device(path: &str) -> oci::LinuxDevice {
+        oci::LinuxDevice {
+            path: path.to_string(),
+            r#type: "p".to_string(),
+            major: 0,
+            minor: 0,
+            file_mode: Some(0o600),
+            uid: Some(unistd::getuid().as_raw()),
+            gid: Some(unistd::getgid().as_raw()),
+        }
+    }
+
+    #[test]
+    fn device_parent_symlinks_stay_below_rootfs() {
+        let tempdir = tempdir().unwrap();
+        let rootfs = tempdir.path().join("rootfs");
+        std::fs::create_dir(&rootfs).unwrap();
+        let builder = device_dir_builder(&rootfs).unwrap();
+
+        let escape_name = format!(
+            "cubesandbox-device-{}",
+            tempdir.path().file_name().unwrap().to_string_lossy()
+        );
+        let outside = tempdir.path().parent().unwrap().join(&escape_name);
+        assert!(!outside.exists());
+
+        // A multi-level chain ending in an absolute, dangling target with
+        // parent components is interpreted as if rootfs were chroot(2)'s root.
+        fs::symlink(format!("/../../{}", escape_name), rootfs.join("link2")).unwrap();
+        fs::symlink("link2", rootfs.join("link1")).unwrap();
+        let dev = fifo_device("/link1/fifo");
+        let (parent, name) = pinned_device_target(&builder, &dev.path).unwrap();
+        mknod_dev_at(&dev, &parent, &name).unwrap();
+        assert!(rootfs.join(&escape_name).join("fifo").exists());
+        assert!(!outside.join("fifo").exists());
+
+        // Symlink targets need not be UTF-8. Resolution must remain fd-anchored
+        // without converting either the image path or its target to a String.
+        let non_utf8 = std::ffi::OsString::from_vec(vec![b'/', b'n', 0xff, b'd']);
+        let non_utf8_relative = std::ffi::OsString::from_vec(vec![b'n', 0xff, b'd']);
+        fs::symlink(&non_utf8, rootfs.join("non-utf8-link")).unwrap();
+        let dev = fifo_device("/non-utf8-link/fifo");
+        let (parent, name) = pinned_device_target(&builder, &dev.path).unwrap();
+        mknod_dev_at(&dev, &parent, &name).unwrap();
+        assert!(rootfs.join(&non_utf8_relative).join("fifo").exists());
+    }
+
+    #[test]
+    fn device_final_symlink_is_not_followed() {
+        let tempdir = tempdir().unwrap();
+        let rootfs = tempdir.path().join("rootfs");
+        let outside = tempdir.path().join("outside");
+        std::fs::create_dir(&rootfs).unwrap();
+        let builder = device_dir_builder(&rootfs).unwrap();
+        std::fs::write(&outside, b"unchanged").unwrap();
+        fs::symlink(&outside, rootfs.join("fifo")).unwrap();
+
+        let dev = fifo_device("/fifo");
+        let (parent, name) = pinned_device_target(&builder, &dev.path).unwrap();
+        assert!(mknod_dev_at(&dev, &parent, &name).is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    #[serial(umask)]
+    fn create_devices_restores_umask_on_error() {
+        let tempdir = tempdir().unwrap();
+        std::fs::create_dir(tempdir.path().join("dev")).unwrap();
+        let original = stat::umask(Mode::from_bits_truncate(0o027));
+
+        let bad = fifo_device("/");
+        assert!(create_devices(tempdir.path(), &[bad], true).is_err());
+
+        let observed = stat::umask(original);
+        assert_eq!(observed, Mode::from_bits_truncate(0o027));
+    }
+
+    #[test]
+    #[serial(chdir)]
+    fn init_rootfs_restores_cwd_on_device_error() {
+        let olddir = unistd::getcwd().unwrap();
+        let rootfs = tempdir().unwrap();
+        std::fs::create_dir(rootfs.path().join("dev")).unwrap();
+
+        let mut spec = oci::Spec::default();
+        let mut linux = oci::Linux::default();
+        linux.devices = vec![fifo_device("/")];
+        spec.linux = Some(linux);
+        spec.root = Some(oci::Root {
+            path: rootfs.path().to_string_lossy().into_owned(),
+            readonly: false,
+        });
+
+        let stdout_fd = std::io::stdout().as_raw_fd();
+        assert!(init_rootfs(stdout_fd, &spec, &HashMap::new(), &HashMap::new(), "", true).is_err());
+        assert_eq!(unistd::getcwd().unwrap(), olddir);
     }
 
     #[test]
@@ -1918,53 +2068,35 @@ mod tests {
     }
 
     #[test]
-    fn test_device_rel_path() {
+    fn test_pinned_device_target() {
         let rootfs = tempdir().unwrap();
         create_dir(rootfs.path().join("tmp")).unwrap();
         unix::fs::symlink("tmp", rootfs.path().join("tmp-link")).unwrap();
+        let root = rootfs.path().canonicalize().unwrap();
+        let builder = device_dir_builder(rootfs.path()).unwrap();
+
+        let resolve = |path: &str| {
+            let (parent, name) = pinned_device_target(&builder, path).unwrap();
+            parent
+                .target()
+                .join(std::ffi::OsStr::from_bytes(name.as_bytes()))
+        };
 
         // Valid device paths
-        assert_eq!(
-            device_rel_path(rootfs.path(), "/dev/sda").unwrap(),
-            Path::new("dev/sda")
-        );
-        assert_eq!(
-            device_rel_path(rootfs.path(), "//dev/sda").unwrap(),
-            Path::new("dev/sda")
-        );
-        assert_eq!(
-            device_rel_path(rootfs.path(), "/dev/vfio/99").unwrap(),
-            Path::new("dev/vfio/99")
-        );
-        assert_eq!(
-            device_rel_path(rootfs.path(), "/tmp/CDI-Dev-2").unwrap(),
-            Path::new("tmp/CDI-Dev-2")
-        );
-        assert_eq!(
-            device_rel_path(rootfs.path(), "/etc/device").unwrap(),
-            Path::new("etc/device")
-        );
-        assert_eq!(
-            device_rel_path(rootfs.path(), "/tmp-link/device").unwrap(),
-            Path::new("tmp/device")
-        );
-        assert_eq!(
-            device_rel_path(rootfs.path(), "/dev/...").unwrap(),
-            Path::new("dev/...")
-        );
-        assert_eq!(
-            device_rel_path(rootfs.path(), "/dev/a..b").unwrap(),
-            Path::new("dev/a..b")
-        );
-        assert_eq!(
-            device_rel_path(rootfs.path(), "/dev//foo").unwrap(),
-            Path::new("dev/foo")
-        );
+        assert_eq!(resolve("/dev/sda"), root.join("dev/sda"));
+        assert_eq!(resolve("//dev/sda"), root.join("dev/sda"));
+        assert_eq!(resolve("/dev/vfio/99"), root.join("dev/vfio/99"));
+        assert_eq!(resolve("/tmp/CDI-Dev-2"), root.join("tmp/CDI-Dev-2"));
+        assert_eq!(resolve("/etc/device"), root.join("etc/device"));
+        assert_eq!(resolve("/tmp-link/device"), root.join("tmp/device"));
+        assert_eq!(resolve("/dev/..."), root.join("dev/..."));
+        assert_eq!(resolve("/dev/a..b"), root.join("dev/a..b"));
+        assert_eq!(resolve("/dev//foo"), root.join("dev/foo"));
 
         // Bad device paths
-        assert!(device_rel_path(rootfs.path(), "/dev/../etc/passwd").is_none());
-        assert!(device_rel_path(rootfs.path(), "dev/foo").is_none());
-        assert!(device_rel_path(rootfs.path(), "").is_none());
-        assert!(device_rel_path(rootfs.path(), "/").is_none());
+        assert!(pinned_device_target(&builder, "/dev/../etc/passwd").is_err());
+        assert!(pinned_device_target(&builder, "dev/foo").is_err());
+        assert!(pinned_device_target(&builder, "").is_err());
+        assert!(pinned_device_target(&builder, "/").is_err());
     }
 }

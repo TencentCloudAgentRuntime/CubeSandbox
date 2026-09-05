@@ -11,6 +11,7 @@ serde_derive = "1.0.91"
 oci = { path = "../libs/oci" }
 cube = { path = "../cube" }
 protocols = { path = "../libs/protocols" }
+safe-path = { path = "../libs/safe-path" }
 caps = "0.5.0"
 nix = "0.23.0"
 scopeguard = "1.0.0"
