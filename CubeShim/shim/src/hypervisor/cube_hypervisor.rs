@@ -42,6 +42,20 @@ fn select_vmm_backend(worker_enabled: bool, has_managed_placement: bool) -> VmmB
     }
 }
 
+// VmmInstance::new installs seccomp and blocks signals on its calling thread.
+// A reusable Tokio worker (including spawn_blocking workers) must never inherit
+// those irreversible changes: later CRI operations spawn host helpers there.
+fn vmm_bootstrap<T: Send + 'static>(
+    init: impl FnOnce() -> CResult<T> + Send + 'static,
+) -> CResult<T> {
+    std::thread::Builder::new()
+        .name("cube-vmm-init".into())
+        .spawn(init)
+        .map_err(|error| format!("spawn VMM initializer: {error}"))?
+        .join()
+        .map_err(|_| "VMM initializer panicked".to_string())?
+}
+
 pub(crate) fn runtime_seccomp_syscalls() -> Vec<i64> {
     vec![
         #[cfg(target_arch = "x86_64")]
@@ -51,9 +65,6 @@ pub(crate) fn runtime_seccomp_syscalls() -> Vec<i64> {
         libc::SYS_getsockopt,
         libc::SYS_setsockopt,
         libc::SYS_faccessat2,
-        // PoC trade-off: the embedded VMM applies its Thread::All filter to
-        // the shim process, which must still clean host-side OCI rootfs binds.
-        libc::SYS_umount2,
     ]
 }
 
@@ -146,8 +157,10 @@ impl CubeHypervisor {
         vmm_config.event_notifier = Some(notifier);
         self.ev_receiver = Some(Arc::new(Mutex::new(receiver)));
 
-        let ch: cube_hypervisor::VmmInstance = cube_hypervisor::VmmInstance::new(vmm_config)
-            .map_err(|e| self.status_err(format!("New vmm instance failed:{}", e)))?;
+        let ch = vmm_bootstrap(move || {
+            cube_hypervisor::VmmInstance::new(vmm_config).map_err(|error| error.to_string())
+        })
+        .map_err(|error| self.status_err(format!("New vmm instance failed:{error}")))?;
         self.ch = Some(Arc::new(Mutex::new(ch)));
         self.status = HypStatus::Launched;
         stat.set_ok();
@@ -526,10 +539,65 @@ mod backend_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::runtime_seccomp_syscalls;
+    use super::vmm_bootstrap;
 
-    #[test]
-    fn runtime_seccomp_allows_s0_rootfs_cleanup() {
-        assert!(runtime_seccomp_syscalls().contains(&libc::SYS_umount2));
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn vmm_filter_does_not_leak_into_reused_tokio_worker() {
+        tokio::spawn(async {
+            let parent = unsafe { libc::getppid() };
+            vmm_bootstrap(move || {
+                // Deny getppid only, so the test can observe filter inheritance
+                // without requiring KVM or terminating the test process.
+                let mut filter = [
+                    libc::sock_filter {
+                        code: 0x20,
+                        jt: 0,
+                        jf: 0,
+                        k: 0,
+                    },
+                    libc::sock_filter {
+                        code: 0x15,
+                        jt: 0,
+                        jf: 1,
+                        k: libc::SYS_getppid as u32,
+                    },
+                    libc::sock_filter {
+                        code: 0x06,
+                        jt: 0,
+                        jf: 0,
+                        k: 0x0005_0000 | libc::EPERM as u32,
+                    },
+                    libc::sock_filter {
+                        code: 0x06,
+                        jt: 0,
+                        jf: 0,
+                        k: 0x7fff_0000,
+                    },
+                ];
+                let program = libc::sock_fprog {
+                    len: filter.len() as u16,
+                    filter: filter.as_mut_ptr(),
+                };
+                // SAFETY: the program references the live filter array above;
+                // no_new_privs and seccomp affect only this disposable thread.
+                unsafe {
+                    assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+                    assert_eq!(libc::prctl(libc::PR_SET_SECCOMP, 2, &program), 0);
+                    assert_eq!(libc::syscall(libc::SYS_getppid), -1);
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(unsafe { libc::getppid() }, parent);
+            parent
+        })
+        .await
+        .unwrap();
+        assert!(
+            tokio::spawn(async { unsafe { libc::getppid() } })
+                .await
+                .unwrap()
+                > 0
+        );
     }
 }

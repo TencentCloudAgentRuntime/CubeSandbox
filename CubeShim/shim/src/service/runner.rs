@@ -23,7 +23,7 @@ use tokio::io;
 use tokio::process::Command;
 
 use crate::common::utils::ADDRESS_FILE;
-use crate::service::bootstrap::{BootstrapParams, BootstrapResult};
+use crate::service::bootstrap::{read_start, BootstrapProtocol};
 use crate::service::host_cgroup::{self, BootstrapSession};
 use crate::service::runtime_resource;
 use crate::service::sandbox_srv::SandboxService;
@@ -48,11 +48,35 @@ pub async fn run(runtime_id: &str, flags: Flags) -> Result<(), Error> {
 }
 
 async fn start(flags: Flags) -> Result<(), Error> {
-    let params =
-        BootstrapParams::read_from(std::io::stdin().lock()).map_err(|err| Error::IoError {
-            context: "read containerd bootstrap params".to_string(),
-            err,
-        })?;
+    let (params, mut protocol) = read_start(
+        std::io::stdin().lock(),
+        &flags,
+        env::var(TTRPC_ADDRESS_ENV).unwrap_or_default(),
+    )
+    .map_err(|err| Error::IoError {
+        context: "read containerd bootstrap params".to_string(),
+        err,
+    })?;
+    if matches!(protocol, BootstrapProtocol::Legacy { .. }) {
+        // JSON bootstrap and Task API versions are independent. 2.x needs
+        // Task v3 to attach containers to the existing Sandbox API shim.
+        let version = Command::new(&params.containerd_binary)
+            .arg("--version")
+            .output()
+            .await
+            .map_err(|err| Error::IoError {
+                context: "read legacy containerd version".to_string(),
+                err,
+            })?;
+        if !version.status.success() {
+            return Err(Error::Other("containerd --version failed".to_string()));
+        }
+        protocol = BootstrapProtocol::legacy_for_version(&String::from_utf8_lossy(&version.stdout))
+            .map_err(|err| Error::IoError {
+                context: "select legacy Task API version".to_string(),
+                err,
+            })?;
+    }
     let socket_dir = params.socket_dir.as_deref().unwrap_or(DEFAULT_SOCKET_DIR);
     let address = socket_address(
         socket_dir,
@@ -147,8 +171,8 @@ async fn start(flags: Flags) -> Result<(), Error> {
             }
         })?;
         let mut stdout = std::io::stdout().lock();
-        BootstrapResult::ttrpc(address)
-            .write_to(&mut stdout)
+        protocol
+            .write_result(address, &mut stdout)
             .map_err(|err| Error::IoError {
                 context: "write containerd bootstrap result".to_string(),
                 err,

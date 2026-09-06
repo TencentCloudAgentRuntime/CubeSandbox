@@ -1,0 +1,60 @@
+version: '3'
+vars:
+  BUILD: bash ./deploy/cube-cri/build.sh
+  NODE_TASK: bash ./deploy/cube-cri/node.sh
+  ARGS: '{{.CLI_ARGS | default ""}}'
+tasks:
+  default:
+    desc: 显示可用任务。
+    cmds: [task --list-all]
+  build:
+    aliases: [build:runtime]
+    desc: 构建 Cube CRI 节点服务、Shim 和 Agent。
+    cmds: ['{{.BUILD}} runtime']
+  build:builder:
+    desc: 构建仓库统一 builder 镜像。
+    cmds: ['{{.BUILD}} builder']
+  build:cubelet:
+    desc: 构建仅提供 RuntimeResource 的 cubelet-cri。
+    cmds: ['{{.BUILD}} cubelet']
+  build:shim:
+    desc: 构建 CubeShim 和 VMM worker。
+    cmds: ['{{.BUILD}} shim']
+  build:agent:
+    desc: 构建静态 Guest Agent 和独立 ext4 镜像。
+    cmds: ['{{.BUILD}} agent']
+  build:guest:
+    desc: 构建 cube-init 和 Guest 系统镜像。
+    cmds: ['{{.BUILD}} guest']
+  build:kernel:
+    desc: 构建 PVM Guest 内核。
+    cmds: ['{{.BUILD}} kernel']
+  build:pvm-host:
+    desc: 构建 PVM 宿主机内核安装包。
+    cmds: ['{{.BUILD}} pvm-host']
+  build:all:
+    desc: 构建 Cube 运行时、Guest 系统和内核。
+    cmds: ['{{.BUILD}} all']
+  assets:
+    desc: 从显式指定的路径导入 Guest 和 PVM 基础制品。
+    cmds: [bash ./deploy/cube-cri/assets.sh]
+  package:
+    desc: 校验并打包已有制品。
+    cmds: [bash ./deploy/cube-cri/package.sh]
+  deploy:prepare:
+    desc: 给指定 TS4 节点安装 PVM 内核，必要时重启并等待恢复。
+    cmds: ['{{.NODE_TASK}} prepare {{.ARGS}}']
+  deploy:runtime:
+    desc: 识别并复用节点 containerd 1.7/2.x，安装 Cube 制品并注册 RuntimeClass。
+    cmds: ['{{.NODE_TASK}} install {{.ARGS}}']
+  deploy:all:
+    desc: 构建运行时代码、准备 PVM、安装并验证 Pod（基础制品须已准备）。
+    cmds:
+      - '{{.BUILD}} runtime'
+      - '{{.NODE_TASK}} prepare {{.ARGS}}'
+      - '{{.NODE_TASK}} install {{.ARGS}}'
+      - bash ./deploy/cube-cri/smoke.sh {{.ARGS}}
+  test:cri:
+    aliases: [test]
+    desc: 在指定节点验证 Pod 启动、init、卷、探针、日志和 exec，完成后清理。
+    cmds: ['bash ./deploy/cube-cri/smoke.sh {{.ARGS}}']

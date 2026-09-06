@@ -1,0 +1,63 @@
+# Cube CRI 节点部署
+
+链路：kubelet → 节点现有 containerd CRI → CubeShim → Cubelet RuntimeResource / Guest Agent。
+
+安装节点服务 `cubelet-cri`、Shim、VMM worker（含 Hypervisor/virtiofs）、Agent、Guest 系统与内核、Shim watchdog；containerd 和 ctr 由 TKE 节点提供，不进入构建及部署包。无需 CubeMaster、CubeAPI、Redis、CubeVS、CubeEgress、khaoslet 或 cube-kri。
+
+## 构建
+
+`task --list-all` 查看入口，制品写入 `_output/cube-cri/`。
+
+| 入口 | 产物 / 要求 |
+| --- | --- |
+| `task build` | 节点服务、Shim、Agent |
+| `task build:cubelet` | `bin/cubelet-cri`；Go 版本见 `Cubelet/go.mod` |
+| `task build:shim` | `bin/containerd-shim-cube-rs`、`bin/cube-vmm-worker`；Rust 版本见 `CubeShim/rust-toolchain.toml` |
+| `task build:agent` | `assets/agent`；使用统一 builder 的 musl/libseccomp |
+| `task build:guest` | `assets/guest.img`，内含 cube-init；需要 Docker、e2fsprogs |
+| `task build:kernel` | `assets/kernel`；PVM Guest 内核 |
+| `task build:pvm-host` | `pvm-host.rpm`；PVM 宿主机内核包 |
+| `task build:builder` | 仓库统一 builder；已有镜像可直接使用 |
+| `task build:all` | Cube 运行时、Guest 系统及内核；宿主机内核单独构建 |
+
+可用 `BUILDER_IMAGE` / `BUILDER_HOME` 指定 builder 与缓存；基础制品也可导入：
+
+```bash
+GUEST_KERNEL=/path/to/vmlinux-pvm \
+GUEST_IMAGE=/path/to/cube-guest-image-cpu.img \
+PVM_HOST_RPM=/path/to/kernel-pvm-host.rpm task assets
+```
+
+`task assets` 仅处理已指定的变量；`task package` 校验必需文件，输出带 SHA-256 清单的 `runtime.tar.gz`。
+
+## 安装与测试
+
+默认加载 `local.env` 的 `KUBECONFIG`，可用 `CUBE_CRI_ENV` 指定其他配置；必须显式指定节点：
+
+```bash
+task deploy:all -- --node 10.0.244.89
+
+# 分步执行。
+task deploy:prepare -- --node 10.0.244.89
+task deploy:runtime -- --node 10.0.244.89
+task test:cri -- --node 10.0.244.89
+```
+
+节点要求 TS4 x86_64、Python 3.11+、crictl、可运行的 containerd 1.7.x 或 2.x。PVM 准备会在必要时安装内核并重启，等待 `/dev/kvm` 和 Node Ready；部署前需结束目标节点上的 Cube Pod。
+
+安装器从 `containerd.service` 的 MainPID 读取实际二进制、配置路径和启动参数，保留其 root/state/socket、CNI、镜像源和 runc 配置：
+
+| 节点版本 | 配置动作 |
+| --- | --- |
+| 1.7.x | 使用本机 `config dump`，设置 `sandbox_mode = "shim"`、`ENABLE_CRI_SANDBOXES=1` |
+| 2.x | 使用本机 `config migrate` 生成对应版本格式，设置 `sandboxer = "shim"`，清除 1.7 实验开关 |
+
+Shim 启动响应按版本适配：1.7 使用 JSON / Task v2，2.0–2.2 使用 JSON / Task v3，2.3 使用 protobuf / Task v3；详见 [2.2 兼容说明](../../docs/zh/dev/cube-shim-containerd22-pr.md)。
+
+生成配置为 `/etc/cube-cri/containerd.toml`，检测结果为同目录 `containerd.json`；原配置保留，systemd drop-in 指向原二进制和生成配置。相对 imports 保持原路径含义，并去除 1.7 `config dump` 附带的源文件自导入；生效配置由原二进制再次校验。
+
+Cube 制品位于 `/opt/cube-cri/releases/<校验和>/`，`current` 指向当前版本；状态位于 `/data/cubelet/cri`。安装会重启 containerd、RuntimeResource 和 watchdog，原配置、drop-in 和上一版本路径备份到 `/opt/cube-cri/backups/`；缺少 `tc` 时安装 `iproute-tc`。
+
+安装由临时特权 Pod 提交独立 systemd 任务，无需 SSH 密钥。账号需有创建特权 Pod、exec、RuntimeClass 和节点标签权限；可用 `NODE_SHELL_IMAGE` / `CUBE_CRI_NAMESPACE` 指定安装 Pod 镜像和命名空间。
+
+Pod 测试覆盖 init、EmptyDir、双容器共享网络、HTTP readiness、日志、exec 和 overhead，完成后清理；证据位于 `_output/cube-cri/tests/`。原版 1.7 的实验性 CRI 开关也影响默认 runc，验证范围见 [自动适配验收](../../docs/zh/dev/cube-cri-containerd-auto-pr.md)。

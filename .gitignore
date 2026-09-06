@@ -86,3 +86,4 @@ web/tsconfig.tsbuildinfo
 
 # Local toolchain downloads (e.g. portable protoc)
 .tools/
+local.env
