@@ -39,6 +39,11 @@ SystemdCgroup = true
             result = module.configure(source, major)
             parsed = tomllib.loads(result)
             self.assertEqual(parsed['plugins'][plugin]['containerd']['runtimes']['cube'][key], 'shim')
+            cube = parsed['plugins'][plugin]['containerd']['runtimes']['cube']
+            self.assertTrue(cube['privileged_without_host_devices'])
+            self.assertTrue(cube['privileged_without_host_devices_all_devices_allowed'])
+            if major == '2':
+                self.assertEqual(parsed['plugins'][module.SHIM_MANAGER]['env'], ['CUBE_ALLOW_PRIVILEGED=true'])
             self.assertEqual(parsed['root'], '/custom/root')
             self.assertEqual(parsed['state'], '/custom/state')
             self.assertEqual(parsed['grpc']['address'], '/custom/containerd.sock')
@@ -62,6 +67,18 @@ runtime_type = 'io.containerd.runc.v2'
         self.assertNotIn('options', result['cube'])
         with self.assertRaises(ValueError):
             module.configure(source.replace("runtime_type = 'io.containerd.cube.rs'", "runtime_type = 'io.containerd.other.v2'"), '1.7')
+
+    def test_privileged_switch_replaces_stale_values_and_preserves_shim_settings(self):
+        source = self.source(module.CRI2, 3) + f'''
+[plugins.'{module.SHIM_MANAGER}']
+env = ['CUBE_ALLOW_PRIVILEGED=false', 'OTHER=value', 'CUBE_ALLOW_PRIVILEGED=true']
+socket_dir = '/custom/shim'
+'''
+        result = module.configure(source, '2')
+        manager = tomllib.loads(result)['plugins'][module.SHIM_MANAGER]
+        self.assertEqual(manager['env'], ['OTHER=value', 'CUBE_ALLOW_PRIVILEGED=true'])
+        self.assertEqual(manager['socket_dir'], '/custom/shim')
+        self.assertEqual(module.configure(result, '2'), result)
 
     def test_preserves_launch_overrides(self):
         for args in [['-c', '/old/config', '--root', '/custom/root', '--state=/custom/state'], ['--config=/old/config', '-a', '/custom/socket']]:

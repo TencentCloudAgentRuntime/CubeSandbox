@@ -56,6 +56,8 @@ Shim 启动响应按版本适配：1.7 使用 JSON / Task v2，2.0–2.2 使用 
 
 生成配置为 `/etc/cube-cri/containerd.toml`，检测结果为同目录 `containerd.json`；原配置保留，systemd drop-in 指向原二进制和生成配置。相对 imports 保持原路径含义，并去除 1.7 `config dump` 附带的源文件自导入；生效配置由原二进制再次校验。
 
+部署默认给 shim 设置 `CUBE_ALLOW_PRIVILEGED=true`（1.7 通过 systemd 环境变量，2.x 通过 shim manager），同时开启 Cube handler 的两个 `privileged_without_host_devices*` 选项，允许 Guest 内 privileged，保留 Host 设备隔离。
+
 Cube 制品位于 `/opt/cube-cri/releases/<校验和>/`，`current` 指向当前版本；状态位于 `/data/cubelet/cri`。安装会重启 containerd、RuntimeResource 和 watchdog，原配置、drop-in 和上一版本路径备份到 `/opt/cube-cri/backups/`；缺少 `tc` 时安装 `iproute-tc`。
 
 安装由临时特权 Pod 提交独立 systemd 任务，无需 SSH 密钥。账号需有创建特权 Pod、exec、RuntimeClass 和节点标签权限；可用 `NODE_SHELL_IMAGE` / `CUBE_CRI_NAMESPACE` 指定安装 Pod 镜像和命名空间。

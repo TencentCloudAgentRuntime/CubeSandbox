@@ -10,6 +10,7 @@ import tomllib
 
 CRI17 = "io.containerd.grpc.v1.cri"
 CRI2 = "io.containerd.cri.v1.runtime"
+SHIM_MANAGER = "io.containerd.shim.v1.manager"
 
 
 def command(*args, **kwargs):
@@ -71,8 +72,14 @@ def configure(text, major):
         "runtime_type": "io.containerd.cube.rs",
         "runtime_path": "/opt/cube-cri/current/bin/containerd-shim-cube-rs",
         "sandbox_mode" if major == "1.7" else "sandboxer": "shim",
+        "privileged_without_host_devices": True,
+        "privileged_without_host_devices_all_devices_allowed": True,
     }
     expected["plugins"][plugin]["containerd"]["runtimes"]["cube"] = handler
+    if major == "2":
+        manager = expected["plugins"].setdefault(SHIM_MANAGER, {})
+        manager["env"] = [value for value in manager.get("env", [])
+                          if not value.startswith("CUBE_ALLOW_PRIVILEGED=")] + ["CUBE_ALLOW_PRIVILEGED=true"]
     # config migrate may retain the old required-plugin ID even after migration.
     required = []
     for name in data.get("required_plugins", []):
@@ -84,19 +91,30 @@ def configure(text, major):
     # the quote style used by a particular containerd/TOML library version.
     lines = []
     skip = False
+    in_manager = False
+    manager_seen = False
     for line in text.splitlines():
         if line.lstrip().startswith("["):
             section = tomllib.loads(line)
             skip = "cube" in section.get("plugins", {}).get(plugin, {}).get("containerd", {}).get("runtimes", {})
+            in_manager = major == "2" and SHIM_MANAGER in section.get("plugins", {})
+            if in_manager:
+                manager_seen = True
+                lines.extend([line, "  env = " + json.dumps(manager["env"])])
+                continue
+        if in_manager and re.match(r"\s*env\s*=", line):
+            continue
         if not skip:
             lines.append(line)
     while lines and not lines[-1].strip():
         lines.pop()
+    if major == "2" and not manager_seen:
+        lines.extend([f'\n[plugins."{SHIM_MANAGER}"]', "  env = " + json.dumps(manager["env"])])
     lines.append(f'\n[plugins."{plugin}".containerd.runtimes.cube]')
     lines.extend(f"  {key} = {json.dumps(value)}" for key, value in handler.items())
     result = "\n".join(lines) + "\n"
     if tomllib.loads(result) != expected:
-        raise ValueError("生成配置意外修改了 Cube handler 以外的内容")
+        raise ValueError("生成配置意外修改了 Cube handler 或 shim 环境变量以外的内容")
     return result
 
 
@@ -135,6 +153,8 @@ def prepare(pid, output, config_path):
     effective_handler = tomllib.loads(resolved)["plugins"][plugin]["containerd"]["runtimes"]["cube"]
     if any(effective_handler.get(k) != v for k, v in expected_handler.items()):
         raise ValueError("节点 imports 或启动参数覆盖了 Cube handler")
+    if major == "2" and tomllib.loads(resolved)["plugins"][SHIM_MANAGER]["env"] != tomllib.loads(rendered)["plugins"][SHIM_MANAGER]["env"]:
+        raise ValueError("节点 imports 覆盖了 shim 环境变量")
     (output / "containerd.resolved.toml").write_text(resolved + "\n")
     final_args = [binary, *with_config(args, config_path)]
     unit = """[Unit]
@@ -147,7 +167,7 @@ Environment=CUBE_RUNTIME_RESOURCE_ENDPOINT=/run/cube-cri/runtime-resource.sock
 Environment=CUBE_RUNTIME_RESOURCE_REAPER_DIR=/data/cubelet/runtime-resource-reaper
 Environment=CUBE_VMM_WORKER_PATH=/opt/cube-cri/current/bin/cube-vmm-worker
 """
-    unit += "Environment=ENABLE_CRI_SANDBOXES=1\n" if major == "1.7" else "UnsetEnvironment=ENABLE_CRI_SANDBOXES\n"
+    unit += "Environment=ENABLE_CRI_SANDBOXES=1\nEnvironment=CUBE_ALLOW_PRIVILEGED=true\n" if major == "1.7" else "UnsetEnvironment=ENABLE_CRI_SANDBOXES\n"
     (output / "containerd.service.conf").write_text(unit)
     metadata = {"binary": binary, "version": version, "family": major, "source_config": str(source), "exec_argv": final_args,
                 "address": option(args, ("--address", "-a"), parsed.get("grpc", {}).get("address", "/run/containerd/containerd.sock"))}
