@@ -35,6 +35,7 @@ PVM_HOST_RPM=/path/to/kernel-pvm-host.rpm task assets
 默认加载 `local.env` 的 `KUBECONFIG`，可用 `CUBE_CRI_ENV` 指定其他配置；必须显式指定节点：
 
 ```bash
+export CUBE_CRI_IMAGE_REPOSITORY=<仓库地址>/cube-cri-installer
 task deploy:all -- --node 10.0.244.89
 
 # 分步执行。
@@ -60,6 +61,10 @@ Shim 启动响应按版本适配：1.7 使用 JSON / Task v2，2.0–2.2 使用 
 
 Cube 制品位于 `/opt/cube-cri/releases/<校验和>/`，`current` 指向当前版本；状态位于 `/data/cubelet/cri`。安装会重启 containerd、RuntimeResource 和 watchdog，原配置、drop-in 和上一版本路径备份到 `/opt/cube-cri/backups/`；缺少 `tc` 时安装 `iproute-tc`。
 
-安装由临时特权 Pod 提交独立 systemd 任务，无需 SSH 密钥。账号需有创建特权 Pod、exec、RuntimeClass 和节点标签权限；可用 `NODE_SHELL_IMAGE` / `CUBE_CRI_NAMESPACE` 指定安装 Pod 镜像和命名空间。
+运行时通过原生 `apps/v1` DaemonSet 部署：打包制品、构建并推送安装镜像，按 digest 部署到指定节点，等待安装及服务就绪。每个节点对应独立 DaemonSet，多次部署更新同一对象；Pod 被删除后自动重建，同版本跳过安装，避免重启 containerd。宿主机服务仍由 systemd 管理，安装任务不受 Pod / containerd 重启影响；删除 DaemonSet 不卸载运行时。
+
+`CUBE_CRI_IMAGE_REPOSITORY` 指定可推送且节点可拉取的仓库；`CUBE_CRI_IMAGE` 可直接使用已有安装镜像（建议 digest）。`CUBE_CRI_NAMESPACE` 指定命名空间，`CUBE_CRI_IMAGE_PULL_SECRET` 指定同命名空间已有的拉取凭据。实际清单保存到 `_output/cube-cri/cube-cri-<节点哈希>.json`，安装失败可查看 DaemonSet Pod 日志及宿主机 `/var/lib/cube-cri/installer/<Pod UID>/install.log`。
+
+账号需有 DaemonSet、特权 Pod、RuntimeClass 和节点标签权限；PVM 准备仍使用临时特权 Pod，需要 exec 权限，可用 `NODE_SHELL_IMAGE` 指定其镜像。无需 SSH 密钥。
 
 Pod 测试覆盖 init、EmptyDir、双容器共享网络、HTTP readiness、日志、exec 和 overhead，完成后清理；证据位于 `_output/cube-cri/tests/`。原版 1.7 的实验性 CRI 开关也影响默认 runc，验证范围见 [自动适配验收](../../docs/zh/dev/cube-cri-containerd-auto-pr.md)。

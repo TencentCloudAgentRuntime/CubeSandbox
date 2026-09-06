@@ -8,4 +8,4 @@ for file in "${files[@]}"; do
 done
 cp deploy/cube-cri/{install.sh,containerd.py} "$out/"
 cp deploy/kubernetes/runtimeclass/{install-watchdog.sh,cubesandbox-shim-watchdog.service,runtimeclass-overhead.json} "$out/"
-(cd "$out"; sha256sum "${files[@]}" > SHA256SUMS; tar -czf runtime.tar.gz "${files[@]}" SHA256SUMS install.sh containerd.py install-watchdog.sh cubesandbox-shim-watchdog.service runtimeclass-overhead.json)
+(cd "$out"; sha256sum "${files[@]}" > SHA256SUMS; tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - "${files[@]}" SHA256SUMS install.sh containerd.py install-watchdog.sh cubesandbox-shim-watchdog.service runtimeclass-overhead.json | gzip -n > runtime.tar.gz)

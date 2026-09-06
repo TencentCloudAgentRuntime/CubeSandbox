@@ -46,7 +46,7 @@ tasks:
     cmds: ['{{.NODE_TASK}} prepare {{.ARGS}}']
   deploy:runtime:
     aliases: [deploy]
-    desc: 复用节点 containerd 1.7/2.x，安装 Cube 运行时，默认支持 Guest 特权容器。
+    desc: 通过 DaemonSet 安装 Cube 运行时，复用节点 containerd 1.7/2.x。
     cmds: ['{{.NODE_TASK}} install {{.ARGS}}']
   deploy:all:
     desc: 构建运行时代码、准备 PVM、部署并验证 Pod，默认支持 Guest 特权容器（基础制品须已准备）。

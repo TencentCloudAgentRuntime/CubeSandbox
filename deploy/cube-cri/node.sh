@@ -11,6 +11,9 @@ while (($#)); do
 done
 : "${node:?指定 NODE 或 --node；只操作该节点}"
 [[ $node =~ ^[a-z0-9][a-z0-9.-]*$ ]] || exit 2
+if [[ $action == install ]]; then
+  exec bash deploy/cube-cri/daemonset.sh --node "$node"
+fi
 out=$root/_output/cube-cri
 ns=${CUBE_CRI_NAMESPACE:-default}
 run=$(date -u +%Y%m%d%H%M%S)-$$
@@ -74,25 +77,6 @@ HOST
     done
     ((ready)) || { echo 'PVM 重启后未恢复，请检查节点控制台' >&2; exit 1; }
     k wait --for=condition=Ready "node/$node" --timeout=180s
-    host rm -rf -- "$remote"
-    ;;
-  install)
-    bash deploy/cube-cri/package.sh
-    host tar -xzf - -C "$remote" < "$out/runtime.tar.gz"
-    host systemd-run --unit "$pod" --property=Type=oneshot --property=TimeoutStartSec=10min /bin/bash -c '
-      bash "$1/install.sh" "$1" > "$1/install.log" 2>&1
-      rc=$?; printf "%s\n" "$rc" > "$1/install.exit"; exit "$rc"
-    ' bash "$remote"
-    result=
-    for ((i=0;i<120;i++)); do
-      if result=$(host cat "$remote/install.exit" 2>/dev/null); then break; fi
-      sleep 5
-    done
-    host cat "$remote/install.log" || true
-    [[ $result == 0 ]] || { echo "节点安装失败或超时：$remote/install.log" >&2; exit 1; }
-    k wait --for=condition=Ready "node/$node" --timeout=180s
-    k apply -f deploy/kubernetes/runtimeclass/runtimeclass.yaml
-    k label node "$node" cubesandbox.io/runtime=cube --overwrite
     host rm -rf -- "$remote"
     ;;
   *) echo "unknown action: $action" >&2; exit 2;;

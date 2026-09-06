@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs in the host namespaces through node.sh.
+# 由 DaemonSet 提交的宿主机 systemd 任务执行。
 set -euo pipefail
 trap 'echo "安装失败: line=$LINENO command=$BASH_COMMAND" >&2' ERR
 src=${1:?package directory}
