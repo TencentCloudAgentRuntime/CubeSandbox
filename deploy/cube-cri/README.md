@@ -38,10 +38,12 @@ PVM_HOST_RPM=/path/to/kernel-pvm-host.rpm task assets
 export CUBE_CRI_IMAGE_REPOSITORY=<仓库地址>/cube-cri-installer
 task deploy:all -- --node 10.0.244.89
 
-# 分步执行。
-task deploy:prepare -- --node 10.0.244.89
+# 使用已有制品部署；自动准备 PVM，必要时重启节点。
 task deploy:runtime -- --node 10.0.244.89
 task test:cri -- --node 10.0.244.89
+
+# 可选：只准备 PVM 内核，同样通过 DaemonSet 执行。
+task deploy:prepare -- --node 10.0.244.89
 ```
 
 节点要求 TS4 x86_64、Python 3.11+、crictl、可运行的 containerd 1.7.x 或 2.x。PVM 准备会在必要时安装内核并重启，等待 `/dev/kvm` 和 Node Ready；部署前需结束目标节点上的 Cube Pod。
@@ -61,10 +63,12 @@ Shim 启动响应按版本适配：1.7 使用 JSON / Task v2，2.0–2.2 使用 
 
 Cube 制品位于 `/opt/cube-cri/releases/<校验和>/`，`current` 指向当前版本；状态位于 `/data/cubelet/cri`。安装会重启 containerd、RuntimeResource 和 watchdog，原配置、drop-in 和上一版本路径备份到 `/opt/cube-cri/backups/`；缺少 `tc` 时安装 `iproute-tc`。
 
-运行时通过原生 `apps/v1` DaemonSet 部署：打包制品、构建并推送安装镜像，按 digest 部署到指定节点，等待安装及服务就绪。每个节点对应独立 DaemonSet，多次部署更新同一对象；Pod 被删除后自动重建，同版本跳过安装，避免重启 containerd。宿主机服务仍由 systemd 管理，安装任务不受 Pod / containerd 重启影响；删除 DaemonSet 不卸载运行时。
+通过原生 `apps/v1` DaemonSet 部署：镜像携带运行时制品及 PVM 宿主机内核 RPM，先准备内核、必要时重启，恢复后自动继续安装运行时。已有可用 PVM 内核时跳过内核安装；重启后仍未进入 PVM 内核则报错，避免循环重启。每个节点对应独立 DaemonSet，多次部署更新同一对象；Pod 重建时，同版本跳过安装。宿主机服务仍由 systemd 管理；删除 DaemonSet 不卸载运行时或内核。
 
-`CUBE_CRI_IMAGE_REPOSITORY` 指定可推送且节点可拉取的仓库；`CUBE_CRI_IMAGE` 可直接使用已有安装镜像（建议 digest）。`CUBE_CRI_NAMESPACE` 指定命名空间，`CUBE_CRI_IMAGE_PULL_SECRET` 指定同命名空间已有的拉取凭据。实际清单保存到 `_output/cube-cri/cube-cri-<节点哈希>.json`，安装失败可查看 DaemonSet Pod 日志及宿主机 `/var/lib/cube-cri/installer/<Pod UID>/install.log`。
+`CUBE_CRI_IMAGE_REPOSITORY` 指定可推送且节点可拉取的仓库；构建镜像需要 `PVM_HOST_RPM` 指定的内核包，默认 `_output/cube-cri/pvm-host.rpm`。`CUBE_CRI_IMAGE` 可直接使用已有的完整安装镜像（建议 digest），无需本地制品。`CUBE_CRI_NAMESPACE` 指定命名空间，`CUBE_CRI_IMAGE_PULL_SECRET` 指定同命名空间已有的拉取凭据。实际清单保存到 `_output/cube-cri/cube-cri-<节点哈希>.json`，安装失败可查看 Pod 日志及宿主机 `/var/lib/cube-cri/installer/<Pod UID>/install.log`。
 
-账号需有 DaemonSet、特权 Pod、RuntimeClass 和节点标签权限；PVM 准备仍使用临时特权 Pod，需要 exec 权限，可用 `NODE_SHELL_IMAGE` 指定其镜像。无需 SSH 密钥。
+账号需有 DaemonSet、特权 Pod、RuntimeClass 和节点标签权限，无需 exec 或 SSH 密钥。原默认内核保存在 `/var/lib/cube-cri/pvm/previous-default-kernel`；`reboot-request` 记录本次内核包与启动 ID，排查并修复启动配置后可删除该记录重试。
 
 Pod 测试覆盖 init、EmptyDir、双容器共享网络、HTTP readiness、日志、exec 和 overhead，完成后清理；证据位于 `_output/cube-cri/tests/`。原版 1.7 的实验性 CRI 开关也影响默认 runc，验证范围见 [自动适配验收](../../docs/zh/dev/cube-cri-containerd-auto-pr.md)。
+
+`task test:pvm` 使用 builder 容器验证安装、重复执行、重启失败保护及缺包诊断，不修改本机内核。

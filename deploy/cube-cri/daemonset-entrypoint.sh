@@ -3,10 +3,17 @@ set -eu
 host() { nsenter -t 1 -m -u -i -n -p -- "$@"; }
 state=/var/lib/cube-cri/installer
 version=$(cat /installer/version)
+mode=${CUBE_CRI_MODE:-runtime}
+pvm_ready() {
+  host bash -c '[[ $(uname -r) == *cubesandbox.pvm.host* ]] && test -d /sys/module/kvm_pvm && test -c /dev/kvm'
+}
 running() {
   case "$(host systemctl show "$unit" --property=ActiveState --value)" in active|activating|reloading) return 0;; *) return 1;; esac
 }
 ready() {
+  pvm_ready || return 1
+  host test ! -f /var/lib/cube-cri/pvm/reboot-request || return 1
+  [ "$mode" != prepare ] || return 0
   test "$(cat /host-state/installed 2>/dev/null)" = "$version" || return 1
   for service in cube-cri-runtime-resource cubesandbox-shim-watchdog containerd; do
     host systemctl is-active --quiet "$service" || return 1
@@ -14,19 +21,26 @@ ready() {
   host test -S /run/cube-cri/runtime-resource.sock
 }
 if [ "${1:-}" = check ]; then ready; exit; fi
-if [ "$(cat /host-state/installed 2>/dev/null || true)" != "$version" ]; then
-  src=$state/$POD_UID
-  unit=cube-cri-install-$POD_UID
+src=$state/$POD_UID
+unit=cube-cri-install-$POD_UID
+if ! pvm_ready || host test -f /var/lib/cube-cri/pvm/reboot-request || { [ "$mode" != prepare ] && [ "$(cat /host-state/installed 2>/dev/null || true)" != "$version" ]; }; then
   if ! running; then
     mkdir -p "/host-state/$POD_UID"
-    cp /installer/runtime.tar.gz /installer/daemonset-install.sh "/host-state/$POD_UID/"
-    host systemd-run --collect --unit "$unit" --property=Type=oneshot --property=TimeoutStartSec=10min \
-      /bin/bash -c 'bash "$1/daemonset-install.sh" "$1" "$2" > "$1/install.log" 2>&1' bash "$src" "$version"
+    cp /installer/runtime.tar.gz /installer/daemonset-install.sh /installer/daemonset-pvm.sh "/host-state/$POD_UID/"
+    if ! pvm_ready && [ ! -s "/host-state/$POD_UID/pvm-host.rpm" ]; then cp /installer/pvm-host.rpm "/host-state/$POD_UID/"; fi
+    host systemd-run --collect --unit "$unit" --property=Type=oneshot --property=TimeoutStartSec=20min \
+      /bin/bash -c 'bash "$1/daemonset-install.sh" "$1" "$2" "$3" > "$1/install.log" 2>&1; rc=$?; printf "%s\n" "$rc" > "$1/install.exit"; exit "$rc"' bash "$src" "$version" "$mode"
   fi
   while running; do sleep 2; done
   cat "/host-state/$POD_UID/install.log"
-  test "$(cat /host-state/installed)" = "$version"
-  rm -rf "/host-state/$POD_UID"
+  result=$(cat "/host-state/$POD_UID/install.exit")
+  if [ "$result" = 75 ]; then
+    echo 'PVM 内核已安装，等待节点重启；恢复后继续安装。'
+    exec sleep infinity
+  fi
+  test "$result" = 0
+  ready
 fi
+if ! running; then rm -rf "/host-state/$POD_UID"; fi
 echo "Cube CRI DaemonSet installed: $version"
 exec sleep infinity

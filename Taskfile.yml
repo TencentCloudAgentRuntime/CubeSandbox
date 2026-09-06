@@ -42,17 +42,16 @@ tasks:
     desc: 校验并打包已有制品。
     cmds: [bash ./deploy/cube-cri/package.sh]
   deploy:prepare:
-    desc: 给指定 TS4 节点安装 PVM 内核，必要时重启并等待恢复。
+    desc: 通过 DaemonSet 安装 PVM 内核，必要时重启并等待恢复。
     cmds: ['{{.NODE_TASK}} prepare {{.ARGS}}']
   deploy:runtime:
     aliases: [deploy]
-    desc: 通过 DaemonSet 安装 Cube 运行时，复用节点 containerd 1.7/2.x。
+    desc: 通过 DaemonSet 准备 PVM 内核并安装 Cube 运行时。
     cmds: ['{{.NODE_TASK}} install {{.ARGS}}']
   deploy:all:
     desc: 构建运行时代码、准备 PVM、部署并验证 Pod，默认支持 Guest 特权容器（基础制品须已准备）。
     cmds:
       - '{{.BUILD}} runtime'
-      - '{{.NODE_TASK}} prepare {{.ARGS}}'
       - task: deploy:runtime
         vars:
           CLI_ARGS: '{{.CLI_ARGS}}'
@@ -61,6 +60,9 @@ tasks:
     aliases: [test]
     desc: 在指定节点验证 Pod 启动、init、卷、探针、日志和 exec，完成后清理。
     cmds: ['bash ./deploy/cube-cri/smoke.sh {{.ARGS}}']
+  test:pvm:
+    desc: 在隔离容器中验证 PVM 安装及重启保护，不修改本机内核。
+    cmds: [bash ./deploy/cube-cri/test_pvm.sh]
   test:e2e-framework:
     desc: 在测试集群运行探针、并发启动、Pod 语义、混合运行时和 AWV CSI 用例。
     cmds: ['bash ./testsuite/cube-kri-e2e-framework.sh {{.ARGS}}']
