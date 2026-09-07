@@ -81,6 +81,9 @@ __pycache__
 !/tests/perf/
 /tests/perf/*
 !/tests/perf/cubebench.sh
+!/tests/perf/kubernetes-runtime-startup.sh
+!/tests/perf/kubernetes_runtime_trace_analyze.py
+!/tests/perf/test_kubernetes_runtime_trace_analyze.py
 
 web/tsconfig.tsbuildinfo
 

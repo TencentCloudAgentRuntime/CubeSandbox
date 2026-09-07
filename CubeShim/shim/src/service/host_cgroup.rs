@@ -1380,54 +1380,60 @@ impl LifecycleHandle {
         identity: ProcessIdentity,
         expected_nonce_hash: &str,
     ) -> Result<(), String> {
-        self.update_record(|record| {
-            if record.launch_nonce_sha256 != expected_nonce_hash {
-                return Err("server launch nonce does not match lifecycle record".to_string());
+        let _lock = self.record_lock()?;
+        let mut record = self.read_record()?;
+        if record.launch_nonce_sha256 != expected_nonce_hash {
+            return Err("server launch nonce does not match lifecycle record".to_string());
+        }
+        if identity.launch_nonce_sha256.as_deref() != Some(expected_nonce_hash) {
+            return Err("server process environment nonce does not match PREPARED".to_string());
+        }
+        if identity.executable != record.expected_server_executable
+            || identity.command_sha256 != record.expected_server_command_sha256
+            || identity.cwd != record.bundle_identity
+        {
+            return Err(
+                "server executable, argv, or bundle identity changed after PREPARED".to_string(),
+            );
+        }
+        let actual_executable = fs::read_link(format!("/proc/{}/exe", identity.pid))
+            .map_err(|error| format!("read server executable link: {error}"))?;
+        if actual_executable != Path::new(&record.expected_server_path) {
+            return Err(format!(
+                "server executable path {} does not match PREPARED {}",
+                actual_executable.display(),
+                record.expected_server_path
+            ));
+        }
+        if let Some(registered) = &record.server {
+            if immutable_identity_matches(registered, &identity) {
+                // Parent and child deliberately race to publish the same
+                // immutable identity. The loser only verifies it; rewriting
+                // the identical durable record adds an fsync to every Pod.
+                return Ok(());
             }
-            if identity.launch_nonce_sha256.as_deref() != Some(expected_nonce_hash) {
-                return Err("server process environment nonce does not match PREPARED".to_string());
-            }
-            if identity.executable != record.expected_server_executable
-                || identity.command_sha256 != record.expected_server_command_sha256
-                || identity.cwd != record.bundle_identity
-            {
-                return Err(
-                    "server executable, argv, or bundle identity changed after PREPARED"
-                        .to_string(),
-                );
-            }
-            let actual_executable = fs::read_link(format!("/proc/{}/exe", identity.pid))
-                .map_err(|error| format!("read server executable link: {error}"))?;
-            if actual_executable != Path::new(&record.expected_server_path) {
-                return Err(format!(
-                    "server executable path {} does not match PREPARED {}",
-                    actual_executable.display(),
-                    record.expected_server_path
-                ));
-            }
-            if let Some(registered) = &record.server {
-                if immutable_identity_matches(registered, &identity) {
-                    return Ok(());
-                }
-                return Err("a different server identity is already registered".to_string());
-            }
-            if record.phase != LifecyclePhase::Prepared {
-                return Err(format!(
-                    "server registration requires PREPARED, found {:?}",
-                    record.phase
-                ));
-            }
-            if record.target.cgroup() != identity.cgroup {
-                return Err(format!(
-                    "server registered in {}, expected {}",
-                    identity.cgroup,
-                    record.target.cgroup()
-                ));
-            }
-            record.server = Some(identity);
-            record.phase = LifecyclePhase::ServerIdentified;
-            Ok(())
-        })?;
+            return Err("a different server identity is already registered".to_string());
+        }
+        if record.phase != LifecyclePhase::Prepared {
+            return Err(format!(
+                "server registration requires PREPARED, found {:?}",
+                record.phase
+            ));
+        }
+        if record.target.cgroup() != identity.cgroup {
+            return Err(format!(
+                "server registered in {}, expected {}",
+                identity.cgroup,
+                record.target.cgroup()
+            ));
+        }
+        record.server = Some(identity);
+        record.phase = LifecyclePhase::ServerIdentified;
+        record.sequence = record
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| "lifecycle sequence overflow".to_string())?;
+        atomic_write_json(&self.directory.join(RECORD_FILE), &record)?;
         Ok(())
     }
 
@@ -8018,6 +8024,45 @@ mod tests {
         owner.server = None;
         atomic_write_json(&handle.directory.join(HOST_OWNER_FILE), &owner).unwrap();
         handle
+    }
+
+    #[test]
+    fn duplicate_server_identity_registration_does_not_rewrite_record() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-host-cgroup-idempotent-server-register-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let handle = lifecycle_fixture(&root, LifecyclePhase::Prepared);
+        let nonce_hash = sha256_hex(b"idempotent-server-register");
+        let mut identity = process_identity(std::process::id() as i32).unwrap();
+        identity.launch_nonce_sha256 = Some(nonce_hash.clone());
+        let expected_path = fs::read_link("/proc/self/exe").unwrap();
+        handle
+            .update_record(|record| {
+                record.launch_nonce_sha256 = nonce_hash.clone();
+                record.expected_server_path = expected_path.display().to_string();
+                record.expected_server_executable = identity.executable.clone();
+                record.expected_server_command_sha256 = identity.command_sha256.clone();
+                record.bundle_identity = identity.cwd.clone();
+                record.target = HostTarget::Legacy {
+                    cgroup: identity.cgroup.clone(),
+                };
+                Ok(())
+            })
+            .unwrap();
+
+        let before = handle.read_record().unwrap().sequence;
+        handle
+            .register_server_identity(identity.clone(), &nonce_hash)
+            .unwrap();
+        let registered = handle.read_record().unwrap();
+        assert_eq!(registered.sequence, before + 1);
+        handle
+            .register_server_identity(identity, &nonce_hash)
+            .unwrap();
+        assert_eq!(handle.read_record().unwrap().sequence, registered.sequence);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

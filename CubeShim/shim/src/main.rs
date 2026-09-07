@@ -13,10 +13,12 @@ use containerd_shim_protos::{
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::time::Instant;
 use tokio::runtime::Builder;
 //const SHIM_VERSION: &str = env!("GIT_COMMIT_INFO");
 //const CH_VERSION: &str = env!("CH_GIT_COMMIT_INFO");
 fn main() {
+    let process_started = Instant::now();
     if let Err(error) = service::early_server_gate() {
         eprintln!("CubeShim early server gate failed: {error}");
         unsafe { libc::exit(1) };
@@ -37,6 +39,7 @@ fn main() {
         return;
     }
     let flags = parse(&os_args[1..]).expect("Invalid params");
+    let parsed_at = Instant::now();
     if flags.version {
         print_version();
         return;
@@ -46,11 +49,26 @@ fn main() {
         set_process();
     }
 
-    let runtime = Builder::new_multi_thread()
-        .worker_threads(thread_num)
-        .enable_all()
-        .build()
-        .unwrap();
+    let runtime = if flags.action == "start" {
+        // The bootstrap helper is short-lived and performs one linear async
+        // exchange. Avoid creating a scheduler worker thread before it can
+        // launch the long-running Shim server.
+        Builder::new_current_thread().enable_all().build().unwrap()
+    } else {
+        Builder::new_multi_thread()
+            .worker_threads(thread_num)
+            .enable_all()
+            .build()
+            .unwrap()
+    };
+    containerd_shim_cube_rs::cube_perf!(
+        "cube_perf component=bootstrap operation_id={} phase=main-runtime-ready action={} ts_mono_us={} duration_us={} parse_to_runtime_us={}",
+        flags.id,
+        if flags.action.is_empty() { "serve" } else { flags.action.as_str() },
+        common::utils::Utils::monotonic_time_micros(),
+        process_started.elapsed().as_micros(),
+        parsed_at.elapsed().as_micros()
+    );
     if let Err(error) = runtime.block_on(service::run("io.containerd.cube.rs", flags)) {
         eprintln!("io.containerd.cube.rs: {error:?}");
         unsafe { libc::exit(1) };

@@ -44,3 +44,9 @@ Guest Pod cgroup 原生指标，不能继续从当前容器集合合成。
 ## trace 补丁
 
 `containerd-v2.3.4-s34-trace.patch` 只用于 S3.4 诊断，不应进入运行时验收制品。
+
+`containerd-v2.3.4-s55d1-perf-trace.patch` 只用于 S5.5d.1 性能归因。它在
+`CUBE_PERF_TRACE=1` 且 CRI RuntimeHandler 为 `cube` 时，把 containerd
+RunPodSandbox、sandbox controller 和 Shim bootstrap 的 `CLOCK_MONOTONIC` 时间点写入
+containerd 日志；默认完全关闭。该补丁不属于生产制品，完成性能验收后必须恢复无埋点的
+containerd，并以同一 workload 重跑最终门禁。
