@@ -3657,7 +3657,9 @@ pub(crate) fn run_systemd_probe() -> Result<(), String> {
     );
     let binary = fs::canonicalize("/proc/self/exe")
         .map_err(|error| format!("resolve systemd probe executable: {error}"))?;
-    if binary != Path::new(WATCHDOG_BINARY) {
+    let installed_binary = fs::canonicalize(WATCHDOG_BINARY)
+        .map_err(|error| format!("resolve installed watchdog executable: {error}"))?;
+    if binary != installed_binary {
         return Err(format!(
             "systemd probe executable {} does not match installed path {WATCHDOG_BINARY}",
             binary.display()
@@ -3669,7 +3671,7 @@ pub(crate) fn run_systemd_probe() -> Result<(), String> {
         &WatchdogProbeStamp {
             schema_version: SCHEMA_VERSION,
             boot_id: boot.trim().to_string(),
-            binary_path: binary.display().to_string(),
+            binary_path: WATCHDOG_BINARY.to_string(),
             binary_identity: file_identity(&binary)?,
             binary_sha256: sha256_file(&binary)?,
             iterations: 200,
