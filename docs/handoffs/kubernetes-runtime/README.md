@@ -2,15 +2,15 @@
 
 ## 当前 Stage
 
-S5.5b `IN_PROGRESS`。S5.3、S5.3a、S5.3b、S5.3c、S5.4a～S5.4c 与 S5.5a 均为 `DONE`。
+S5.5c `IN_PROGRESS`。S5.3、S5.3a、S5.3b、S5.3c、S5.4a～S5.4c 与 S5.5a～S5.5b 均为 `DONE`。
 用户决定先优化普通 OCI 冷启动，目标是串行 PodScheduled→Ready P95≤1.5s 并消除并发放大；
 S5.5 完成后再进入 S6.1。不得回退已验收的普通 worker 启动路径。
 
 ## 基线
 
-最后验证实现 commit 为 `79f6bcb444447e8442f1893a1963206d3b7024a6`，tree 为
-`3f9ae5ccd1e24eb5dc41fd52286acf8dcc267789`。W2 已恢复最终 Host CubeShim/worker/runtime：
-Shim SHA-256 `4bcc5d53…`、worker `5b0b0d9f…`、RuntimeResource harness `08c9a8f0…`；
+最后验证实现 commit 为 `3e827aaaae776fdbb297b99e69f4f9c61158b12f`，tree 为
+`eedda7e5e00bf1424118104ba80dbd3532cfb1bc`。W2 已恢复最终 Host CubeShim/worker/runtime：
+Shim SHA-256 `4bcc5d53…`、worker `5b0b0d9f…`、RuntimeResource harness `68233e1d…`；
 Agent ext4 为 `3c36bcb9…`。`RuntimeClass/cube` 保留。W1 由 GLM 独立使用，主线未触碰。
 
 ## 已完成
@@ -38,9 +38,16 @@ S5.5a 已完成最终制品基线：worker 串行/5×10 Ready P95 为 1965.379/2
 exact-zero 均通过；同一 reviewer 终审 `PASS`（P0/P1/P2=0）。详见
 [S5.5a 最终基线](./evidence/s5.5/s5.5a-final-baseline.md)。
 
+S5.5b 已把 adapter、Coordinator、Store 和 FD Registry 的跨 sandbox 大锁改为 keyed lock；
+5×10 adapter lock-wait P95 从 232.910ms 降至 0.005ms，RuntimeResource P95 从
+346.823ms 降至 138.400ms，Ready P95 从 2899.045ms 降至 2701.742ms。串行回退小于
+0.4%；RuntimeResource restart、确定性创建中取消、trace-off 恢复和 exact-zero 均通过；
+同一 reviewer 终审 `PASS`（P0/P1/P2=0）。详见
+[S5.5b 最终证据](./evidence/s5.5/s5.5b-cross-sandbox-parallelism.md)。
+
 ## 未完成
 
-- S5.5b～S5.5f：普通冷启动性能优化；退出门禁为串行 P95≤1.5s、5×10 并发 P95≤1.8s，
+- S5.5c～S5.5f：普通冷启动性能优化；退出门禁为串行 P95≤1.5s、5×10 并发 P95≤1.8s，
   冲刺并发 P95≤1.5s。
 - S6.1、S6.2a～c、S6.3～S6.4：模板、快照与暂停恢复设计和实现；S6.2c 负责模板路径密度和
   RuntimeClass overhead 最终标定。
@@ -63,6 +70,9 @@ exact-zero 均通过；同一 reviewer 终审 `PASS`（P0/P1/P2=0）。详见
   `8bcd0b24…`；全部从 COS 反向下载校验，local-tooling-v2 内嵌 37 项 checksum 全部通过。
 - S5.5a 生产恢复 `inv-a8cm3egxjv`；W2 exact-zero `inv-08cm4gg07f`；控制端目标 W2
   Ready 且测试对象归零 `inv-a8cm6pgic4`；reviewer `PASS`（P0/P1/P2=0）。
+- S5.5b W2/控制证据包 SHA-256 为 `c2d802a8…`/`189362f2…`，均已从 COS 反向下载核验；
+  trace-off 恢复 `inv-68cp87gx7f`，最终 exact-zero `inv-88cp8q0ni2`/`inv-08cp8pg2rr`；
+  reviewer `PASS`（P0/P1/P2=0）。
 - `git diff --check`、credential scan、`make handoff-validate` 与 reviewer 终审均通过。
 
 ## 阻塞
@@ -80,9 +90,9 @@ assets 和回滚副本；不得在仓库或 handoff 中记录凭证、token、�
 
 ## 下一步
 
-1. 执行 S5.5b：只保留同 sandbox 线性化，把 adapter、Coordinator 和 Store 改为
-   per-sandbox/分片并发，先将 adapter 跨 sandbox lock-wait P95 收到 10ms 内。
-2. 按 S5.5c～S5.5e 依次关闭外部网络命令、重复持久化/placement 等待和 Guest
+1. 执行 S5.5c：用进程内 netns/netlink 关闭普通启动的 `nsenter/ip/tc/ping` 外部命令；
+   network prepare 串行/并发 P95 目标为 25/50ms，CRI→start-vm 并发 P95≤450ms。
+2. 按 S5.5d～S5.5e 依次关闭重复持久化/placement 等待和 Guest
    cold boot；每个子阶段只在专项、故障与 exact-zero 通过后进入下一阶段。
 3. S5.5f 达到串行 P95≤1.5s、并发 P95≤1.8s，并完成受影响 Node E2E 回归；完整方案见
    [S5.5 性能优化方案](../../zh/dev/kubernetes-runtime-performance-s5.5.md)。

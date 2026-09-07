@@ -126,9 +126,14 @@ P95 保持在 1500 ms 内。分位数不能直接逐项相加，预算只用于�
 验收：
 
 - race/unit 测试证明同 sandbox Prepare/Release/OpenTap 仍线性化，跨 sandbox 操作真实重叠。
-- 10 并发时 adapter 跨 sandbox lock-wait P95≤10 ms，VMM start 展开宽度≤250 ms。
-- 10 并发 `CRI receive→start vm` P95≤650 ms，成功率 100%。
+- 10 并发时 adapter 跨 sandbox lock-wait P95≤10 ms，成功率 100%。
+- 串行 Ready 与 RunPodSandbox 相对 S5.5a 回退均不超过 3%，并发 RuntimeResource P95 明确下降。
 - Cubelet/RuntimeResource restart、创建中取消和重复 Release 后全部资源 exact-zero。
+
+S5.5b 实测证明 keyed lock 已消除，但 absolute VMM start 展开仍受 CNI 和持久化阶段影响。
+经最终 reviewer 确认，`CRI receive→start vm` 并发 P95≤450ms 归入 S5.5c；S5.5d 再收紧到
+300ms，并最迟在 S5.5d 重验每轮 10 Pod 的 absolute VMM start 展开≤250ms。S5.5f 最终
+端到端门禁不变。
 
 ### S5.5c：进程内 netns/netlink 网络快路径
 
@@ -168,6 +173,7 @@ P95 保持在 1500 ms 内。分位数不能直接逐项相加，预算只用于�
 - 全部既有 atomic persistence failpoint、worker/Shim kill、containerd/Cubelet restart 测试通过。
 - 不接受通过关闭 fsync、把状态放入 tmpfs 或删除精确 readback 得到的性能结果。
 - `CRI receive→start vm` 串行 P95≤220 ms、10 并发 P95≤300 ms。
+- 每轮 10 Pod 的 absolute VMM start 展开≤250 ms。
 
 ### S5.5e：Guest 冷启动、内存与 worker/VMM 细化
 
