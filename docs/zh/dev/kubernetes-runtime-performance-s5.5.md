@@ -29,6 +29,14 @@ Pod 串行、外部 `ip/tc/nsenter` 进程和多层同步持久化，`cube-vmm-w
 当前最终代码把无显式资源 Pod 的默认 VM 内存从 256 MiB 调整为 512 MiB。S5.5a 必须先使用
 最终 Host/Guest 制品重新建立基线；上述数字只作为回归参照，不作为当前二进制的性能承诺。
 
+W1 的方向性资源探针显示，5 个缓存 BusyBox Cube Pod（每 Pod request 10m/16Mi、limit
+100m/64Mi）稳定 30 秒后，Host Pod cgroup 为 104.55～104.69MiB/Pod，节点
+`MemAvailable` 差值摊销约 119.4MiB/Pod，worker PSS 约 102MiB、Shim PSS 约 6.1MiB，空闲
+CPU 约 1.7m/Pod，启动累计 CPU 约 1.08 CPU-s/Pod，约 24 PID/Pod。该探针没有完成同节点
+embedded/worker、1/5/20 密度和最终制品 A/B，只用于确定 S5.5a 的测量范围，不作为 overhead
+或优化验收值。历史 Cube PVM RuntimeTemplate 报告的 27～34MB/Sandbox 也只作方向参照，不能
+与当前 Kubernetes 普通冷启动直接相减。
+
 ## 3. 阶段门禁
 
 所有门禁均使用同一观察进程的 `CLOCK_MONOTONIC`、nearest-rank 分位数、缓存固定 digest 的
@@ -89,12 +97,19 @@ P95 保持在 1500 ms 内。分位数不能直接逐项相加，预算只用于�
 - runner 保存每个 Pod 的真实 RunPodSandbox 时延；禁止把轮均值复制为逐 Pod 样本。
 - 并发窗口采集 CPU runqueue、上下文切换、CPU/memory/I/O PSI、块设备延迟和 systemd D-Bus
   延迟。
+- 在同一 W2、同一 Guest/Host artifact、同一 workload 下完成 worker cold 与 embedded cold A/B；
+  若历史 RuntimeTemplate 制品不能在相同环境运行，只保留为“非同口径参考”，不得计算优化率。
+- 对 1/5/20 Pod 分别采集稳定 30 秒后的 Pod/leaf cgroup `memory.current`/`memory.peak`、节点
+  `MemAvailable` 差值、worker/Shim/virtiofs PSS、CPU、PID 和启动累计 CPU；记录 page cache
+  warmup、采样顺序和三轮重复值。
 
 验收：
 
 - 最终 Host/Guest SHA 与测试报告绑定；50 串行和 5×10 并发均 100% 关联到唯一 sandbox。
 - 每个 RunPodSandbox 的阶段顺序单调，已归因区间覆盖总时长至少 95%，未知区间单列。
 - 输出 P50/P95/P99、均值、最大值、lock wait、fsync 次数/耗时和资源压力原始数据。
+- 输出 worker cold/embedded cold 的同口径延迟和资源 A/B，以及 1/5/20 Pod 的总量、边际量和
+  置信区间；能区分 Guest private dirty、共享文件页、Shim/worker/virtiofs 和 Host kernel。
 - 本子阶段只加观测，不接受端到端 P95 回退超过 3%。
 
 ### S5.5b：移除 RuntimeResource 跨 Pod 串行
@@ -154,7 +169,7 @@ P95 保持在 1500 ms 内。分位数不能直接逐项相加，预算只用于�
 - 不接受通过关闭 fsync、把状态放入 tmpfs 或删除精确 readback 得到的性能结果。
 - `CRI receive→start vm` 串行 P95≤220 ms、10 并发 P95≤300 ms。
 
-### S5.5e：Guest 冷启动与 worker/VMM 细化
+### S5.5e：Guest 冷启动、内存与 worker/VMM 细化
 
 目标：在不使用模板和快照的情况下，把 Guest 冷启动 P95 压到预算内。
 
@@ -164,12 +179,18 @@ P95 保持在 1500 ms 内。分位数不能直接逐项相加，预算只用于�
 - 让 Agent/vsock readiness 位于 Guest 启动关键路径最前，非启动必需初始化转到 ready 之后。
 - 清理 Guest kernel/initrd 中本 PoC 路径不需要的启动项，评估 initrd 压缩、页面预热和共享只读
   asset page cache；不得删除已通过 Node E2E 所需的模块和能力。
+- 逐页归因 Guest kernel/Agent/virtiofs/VMM 的 private dirty 与匿名内存，移除重复 buffer、过大的
+  预分配和非启动必需常驻页；保持 OCI lower layer、kernel/initrd 和只读 asset 的 Host page cache
+  可共享，不以降低 VM 可用内存或规避工作负载 limit 伪造收益。
 - worker 只优化已测量的 fork/Hello/FD gate/placement；不以重写 worker 边界替代主要优化。
 
 验收：
 
 - `start vm→vsock ready` 串行 P95≤950 ms、10 并发 P95≤1050 ms。
 - LaunchVmm 串行 P95≤20 ms、10 并发 P95≤40 ms。
+- 同 S5.5a 口径的 20 Pod 稳态 Host cgroup 均值≤100MiB/Pod；节点 `MemAvailable` 差值摊销
+  相对 S5.5a 下降≥15%或达到≤100MiB/Pod（二者任一）；启动时 memory peak、CPU 和延迟不得
+  因换取稳态数字出现未解释回退。
 - Guest capability、网络、volume、privileged、device、sysctl、hostname 和多容器冒烟无回归。
 - 新 Guest asset 使用独立 digest，可一条命令切回基线版本。
 
@@ -180,7 +201,8 @@ P95 保持在 1500 ms 内。分位数不能直接逐项相加，预算只用于�
 工作项：
 
 - 优化 Scheduled→CRI dispatch 和 RunPodSandbox return→Ready publish 中已测出的 Cube 可控部分。
-- 执行 50 串行、5×10 并发、100 Pod 密度、创建中取消和连续 create/delete churn。
+- 执行 50 串行、5×10 并发、100 Pod 密度、创建中取消和连续 create/delete churn；100 Pod
+  同时报告启动峰值与稳定 30 秒后的节点/cgroup/PSS/CPU/PID，不能只报告“成功创建”。
 - 重跑受改动影响的 Node E2E 分片，不重跑与启动路径无关且已冻结的分片。
 
 验收：
@@ -204,10 +226,13 @@ P95 保持在 1500 ms 内。分位数不能直接逐项相加，预算只用于�
 每个子阶段先冻结基线和目标，再提交实现，再运行专项、故障和 exact-zero 验收。若某项优化未使其
 负责阶段的 P95 明显下降，回滚该项并记录测量结论，不把复杂度带入下一子阶段。
 
+每个子阶段结束后由独立 reviewer 检查实现范围、原始数据、回归和资源归零。review 仍有 P0/P1
+或验收证据缺口时，当前子阶段保持 `IN_PROGRESS/VALIDATING`，修复并复审；只有 reviewer 明确
+给出 `PASS` 后才更新 stage/handoff、独立提交并进入下一子阶段。
+
 ## 6. S5.5 结束后的决策
 
 - 达到必需门禁且冲刺目标达成：进入 S6.1，同时保留普通冷启动作为可靠 fallback。
 - 达到必需门禁但并发仍高于 1.5 秒：进入 S6.1，RuntimeTemplate 同时负责最终并发和一秒目标。
 - 未达到串行 1.5 秒：只有在证据证明剩余耗时主要是不可继续压缩的 Guest cold boot 时，才进入
   S6.1；否则 S5.5 保持 `VALIDATING`，不能把普通路径问题隐藏到模板路径。
-

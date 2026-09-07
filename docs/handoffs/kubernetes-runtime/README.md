@@ -2,7 +2,7 @@
 
 ## 当前 Stage
 
-S5.5a `NOT_STARTED`。S5.3、S5.3a、S5.3b、S5.3c 与 S5.4a～S5.4c 均为 `DONE`。
+S5.5a `IN_PROGRESS`。S5.3、S5.3a、S5.3b、S5.3c 与 S5.4a～S5.4c 均为 `DONE`。
 用户决定先优化普通 OCI 冷启动，目标是串行 PodScheduled→Ready P95≤1.5s 并消除并发放大；
 S5.5 完成后再进入 S6.1。不得回退已验收的普通 worker 启动路径。
 
@@ -33,11 +33,17 @@ S5.5 性能方案已冻结：依次执行逐 Pod tracing、RuntimeResource 跨 P
 持久化/cgroup 快路径、Guest cold boot 和端到端回归。并发新增 RunPodSandbox 平均 783ms 中
 85.4% 位于 VMM 前；串行 RunPodSandbox 约 72% 位于 Guest 启动到 vsock。
 
+W1 方向性资源探针得到 5 Pod 稳态 Host cgroup 约 104.6MiB/Pod、节点 `MemAvailable` 差值
+摊销约 119.4MiB/Pod、worker/Shim PSS 约 102/6.1MiB；未完成最终制品、embedded/worker 和
+1/5/20 Pod 同口径 A/B，因此只记录为 S5.5a 预基线。详见
+[S5.5a 预基线](./evidence/s5.5/s5.5a-prebaseline.md)。
+
 ## 未完成
 
 - S5.5a～S5.5f：普通冷启动性能优化；退出门禁为串行 P95≤1.5s、5×10 并发 P95≤1.8s，
   冲刺并发 P95≤1.5s。
-- S6.1～S6.4：模板、快照与暂停恢复设计和实现。
+- S6.1、S6.2a～c、S6.3～S6.4：模板、快照与暂停恢复设计和实现；S6.2c 负责模板路径密度和
+  RuntimeClass overhead 最终标定。
 - S4.1～S4.3：状态重连、Reconcile 与可观测性，权威计划中仍为 `NOT_STARTED`。
 - S5.4d：通过 RuntimeTemplate 把预拉取镜像的 PodScheduled→Ready P95 收到 1 秒内，
   并对成为默认路径的改动重跑 Node E2E。
@@ -57,7 +63,9 @@ S5.5 性能方案已冻结：依次执行逐 Pod tracing、RuntimeResource 跨 P
 
 ## 阻塞
 
-无外部阻塞。S5.5a 需要在 W2 用最终 Host/Guest 制品重跑基线，因为既有性能数字来自
+无外部阻塞。GLM 的冻结分支全量 Node E2E 是独立并行验证，不占用主线 Stage，也不阻塞
+S5.5；只有绑定 commit/artifact SHA 且原始结果可复验后才接收入回归证据。S5.5a 需要在 W2
+用最终 Host/Guest 制品重跑基线，因为既有性能数字来自
 `fa278467`，而最终代码已把无显式资源 Pod 的默认 VM 内存从 256MiB 调整为 512MiB。
 
 ## 受保护路径
@@ -69,9 +77,11 @@ assets 和回滚副本；不得在仓库或 handoff 中记录凭证、token、�
 
 ## 下一步
 
-1. 执行 S5.5a：部署最终制品，加入统一 monotonic tracing，重跑 50 串行和 5×10 并发基线。
+1. 执行 S5.5a：在 W2 部署最终制品，加入统一 monotonic tracing，重跑 50 串行、5×10 并发、
+   worker/embedded A/B 和 1/5/20 Pod 资源基线；W1 留给 GLM，避免互相污染。
 2. 按 S5.5b～S5.5e 依次关闭跨 Pod 大锁、外部网络命令、重复持久化/placement 等待和 Guest
    cold boot；每个子阶段只在专项、故障与 exact-zero 通过后进入下一阶段。
 3. S5.5f 达到串行 P95≤1.5s、并发 P95≤1.8s，并完成受影响 Node E2E 回归；完整方案见
    [S5.5 性能优化方案](../../zh/dev/kubernetes-runtime-performance-s5.5.md)。
-4. S5.5 后进入 S6.1，最终由 RuntimeTemplate 和 S5.4d 关闭一秒目标。
+4. S5.5 后进入 S6.1；按 S6.2a 恢复链路、S6.2b 动态身份、S6.2c 性能/密度/overhead 顺序
+   完成 RuntimeTemplate 和 S5.4d 一秒门禁，再进入 S6.3 PodSnapshot。
