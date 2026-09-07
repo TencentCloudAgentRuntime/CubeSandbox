@@ -4,7 +4,6 @@
 //
 
 use std::ffi::CString;
-use std::fmt;
 use std::fs;
 use std::fs::create_dir_all;
 use std::fs::{File, OpenOptions};
@@ -34,7 +33,7 @@ use cube::utils::ANNO_APP_SNAPSHOT_CONTAINER_ID;
 use cube::utils::ANNO_CONTAINER_LOG_FORWARDING;
 use libc::{self, c_char, c_ushort, pid_t, winsize, TIOCSWINSZ};
 use nix::errno::Errno;
-use nix::mount::{MntFlags, MsFlags};
+use nix::mount::MntFlags;
 use nix::sys::{stat, statfs};
 use nix::unistd::{self, Pid};
 use nix::unistd::{Gid, Uid};
@@ -81,7 +80,7 @@ use crate::device::{
 use crate::linux_abi::*;
 use crate::metrics::get_metrics;
 use crate::mount::add_virtiofs_storages;
-use crate::mount::{add_storages, baremount, STORAGE_HANDLER_LIST};
+use crate::mount::{add_storages, STORAGE_HANDLER_LIST};
 use crate::namespace::{NSTYPEIPC, NSTYPEPID, NSTYPEUTS};
 use crate::network::setup_guest_dns;
 use crate::pci;
@@ -2785,12 +2784,6 @@ pub fn setup_bundle(
     let overlay_path = bundle_path.join("overlay");
     let mut work_dir = overlay_path.join("work");
     let mut upper_dir = overlay_path.join("upper");
-    let mut opt = fmt::format(format_args!(
-        "workdir={},upperdir={},lowerdir={}",
-        work_dir.to_str().unwrap(),
-        upper_dir.to_str().unwrap(),
-        lowerdir,
-    ));
 
     fs::create_dir_all(&rootfs_path)?;
     if let Some(wl_path) = spec.annotations.get(ANNOTATION_K_ROOTFS_WL_PATH) {
@@ -2808,33 +2801,13 @@ pub fn setup_bundle(
         }
         fs::create_dir_all(&upper_dir)
             .map_err(|e| anyhow!(e).context("Failed to create upper dir for overlayfs"))?;
-        opt = fmt::format(format_args!(
-            "workdir={},upperdir={},lowerdir={}",
-            work_dir.to_str().unwrap(),
-            upper_dir.to_str().unwrap(),
-            lowerdir,
-        ));
     } else {
         fs::create_dir_all(&work_dir)
             .map_err(|e| anyhow!(e).context("Failed to create work dir for overlayfs"))?;
         fs::create_dir_all(&upper_dir)
             .map_err(|e| anyhow!(e).context("Failed to create upper dir for overlayfs"))?;
     }
-    baremount(
-        Path::new("overlay2"),
-        &rootfs_path,
-        "overlay",
-        MsFlags::empty(),
-        opt.as_str(),
-        &sl!(),
-    )
-    .map_err(|e| {
-        anyhow!(e).context(fmt::format(format_args!(
-            "dst:{} opt:{}",
-            rootfs_path.to_str().unwrap().to_string(),
-            opt
-        )))
-    })?;
+    crate::overlay::mount_rootfs(&rootfs_path, &work_dir, &upper_dir, &lowerdir)?;
     mount_custom_file(cid, spec, cust_files)?;
     let rootfs_path_name = rootfs_path
         .to_str()

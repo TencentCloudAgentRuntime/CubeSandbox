@@ -47,6 +47,7 @@ mod fixes;
 mod linux_abi;
 mod metrics;
 mod mount;
+mod overlay;
 mod namespace;
 mod netlink;
 mod network;

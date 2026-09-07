@@ -15,7 +15,7 @@
 | `task build:shim` | `bin/containerd-shim-cube-rs`、`bin/cube-vmm-worker`；Rust 版本见 `CubeShim/rust-toolchain.toml` |
 | `task build:agent` | `assets/agent`；使用统一 builder 的 musl/libseccomp |
 | `task build:guest` | `assets/guest.img`，内含 cube-init；需要 Docker、e2fsprogs |
-| `task build:kernel` | `assets/kernel`；PVM Guest 内核 |
+| `task build:kernel` | `assets/kernel`；使用 [pvm_guest](../pvm/configs/pvm_guest) 配置，内置 Istio 流量重定向所需的 `xt_owner` |
 | `task build:pvm-host` | `pvm-host.rpm`；PVM 宿主机内核包 |
 | `task build:builder` | 仓库统一 builder；已有镜像可直接使用 |
 | `task build:all` | Cube 运行时、Guest 系统及内核；宿主机内核单独构建 |
