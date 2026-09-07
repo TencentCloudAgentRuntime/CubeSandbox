@@ -1,0 +1,213 @@
+# S5.5 Kubernetes 普通冷启动性能优化方案
+
+## 1. 目标与边界
+
+S5.5 在不使用 RuntimeTemplate、VM Snapshot 或预创建 Pod VM 的前提下，优化缓存 OCI 镜像的
+普通冷启动路径。阶段主目标是把单容器、无 probe Pod 的 `PodScheduled→Ready` 串行 P95 从
+约 1.94 秒降到 1.5 秒以内，同时消除 10 Pod 并发时约 1 秒的额外放大。
+
+本阶段不修改“一 Pod 一个 Cube VM、Pod 内容器共享 VM/网络”的架构，不合并 CubeShim 与
+`cube-vmm-worker`，不提前冻结 S6 的模板、PodSnapshot 或 Pause/Resume 制品格式。最终一秒目标
+仍由 S6.2 RuntimeTemplate 和 S5.4d 最终门禁关闭。
+
+## 2. 当前基线与判断
+
+最近一次可复现基准来自 `fa278467` 制品，镜像已经缓存且 `PullImage=0`：
+
+| 场景 | PodScheduled→Ready P50/P95/P99 | RunPodSandbox P50/P95/P99 |
+|---|---|---|
+| 50 次串行 | 1911.587 / 1935.438 / 1949.250 ms | 1553.762 / 1575.632 / 1592.374 ms |
+| 5 轮×10 并发 | 2719.128 / 2907.534 / 2970.607 ms | 2366 / 2564 / 2628 ms |
+
+并发 RunPodSandbox 是用同一节点 containerd 与 CubeShim 日志按 sandbox ID 重建的逐 Pod
+wall-clock 分布；旧报告中的 2236.777～2415.862 ms 是每轮均值，不能代替逐 Pod 分位数。
+
+RunPodSandbox 的平均增量为 783 ms，其中 VMM 启动前增加 669 ms，占 85.4%；Guest 冷启动增加
+111 ms，占 14.1%；Agent ready 之后仅增加约 3 ms。当前首要瓶颈因此是 RuntimeResource 的跨
+Pod 串行、外部 `ip/tc/nsenter` 进程和多层同步持久化，`cube-vmm-worker` 自身不是主瓶颈。
+
+当前最终代码把无显式资源 Pod 的默认 VM 内存从 256 MiB 调整为 512 MiB。S5.5a 必须先使用
+最终 Host/Guest 制品重新建立基线；上述数字只作为回归参照，不作为当前二进制的性能承诺。
+
+## 3. 阶段门禁
+
+所有门禁均使用同一观察进程的 `CLOCK_MONOTONIC`、nearest-rank 分位数、缓存固定 digest 的
+BusyBox 镜像、`imagePullPolicy: Never`、单容器、无 init/sidecar/probe，并要求 kubelet 指标和
+containerd 日志共同证明 `PullImage=0`。
+
+### 3.1 必须达到的 S5.5 退出门禁
+
+| 场景 | PodScheduled→Ready | RunPodSandbox | 其他条件 |
+|---|---:|---:|---|
+| 50 次串行 | P95 ≤ 1500 ms，P99 ≤ 1700 ms | P95 ≤ 1250 ms | 50/50 成功 |
+| 5 轮×10 并发 | P95 ≤ 1800 ms，P99 ≤ 2000 ms | P95 ≤ 1500 ms | 50/50 成功 |
+
+并发 P95 相对串行 P95 的增量不得超过 300 ms。若串行达标但并发未达到上述门禁，S5.5 不能
+标记 `DONE`，必须保留为 `VALIDATING` 并记录剩余阶段归因。
+
+### 3.2 冲刺目标
+
+- 50 次串行和 5×10 并发的 `PodScheduled→Ready P95` 均不超过 1500 ms。
+- 两种场景的 `RunPodSandbox P95` 均不超过 1250 ms。
+- 不通过并发限流、延迟创建或减少样本数量隐藏排队时间。
+
+### 3.3 串行预算
+
+| 阶段 | P95 预算 | 当前参考 P95 |
+|---|---:|---:|
+| CRI receive→`start vm start` | 220 ms | 436 ms |
+| `start vm start`→vsock ready | 950 ms | 1134 ms |
+| vsock ready→RunPodSandbox return | 25 ms | 约 19 ms |
+| RunPodSandbox 外围：Scheduled→CRI + container + Ready 传播 | 250 ms | 约 360 ms |
+
+前三项合计目标约 1195 ms，为 `RunPodSandbox P95≤1250ms` 留出抖动空间；外围预算使端到端
+P95 保持在 1500 ms 内。分位数不能直接逐项相加，预算只用于定位和阻止局部优化掩盖端到端
+回退，最终门禁始终以逐 Pod 端到端样本为准。
+
+### 3.4 10 并发预算
+
+| 阶段 | P95 预算 |
+|---|---:|
+| CRI receive→`start vm start` | 300 ms |
+| `start vm start`→vsock ready | 1050 ms |
+| vsock ready→RunPodSandbox return | 30 ms |
+| RunPodSandbox 外围 | 300 ms |
+
+## 4. 子阶段与验收标准
+
+### S5.5a：最终制品基线与逐 Pod 可观测性
+
+目标：让每个 Pod 的排队、持锁、持久化、网络、worker、Guest 和 kubelet 外围耗时都可独立
+归因，然后在 W2 上重建最终制品的串行/并发基线。
+
+工作项：
+
+- 所有组件记录同一 host `CLOCK_MONOTONIC` 时间、Pod UID、sandbox ID 和 operation ID。
+- 增加 CNI ADD、CubeShim CreateSandbox、Host placement、journal commit、RuntimeResource RPC、
+  Coordinator/Store/adapter lock wait、每个网络步骤、worker fork/Hello/placement、CreateVm、
+  BootVm、vsock、Agent、CreateContainer、StartContainer 和 Ready 传播时间戳。
+- runner 保存每个 Pod 的真实 RunPodSandbox 时延；禁止把轮均值复制为逐 Pod 样本。
+- 并发窗口采集 CPU runqueue、上下文切换、CPU/memory/I/O PSI、块设备延迟和 systemd D-Bus
+  延迟。
+
+验收：
+
+- 最终 Host/Guest SHA 与测试报告绑定；50 串行和 5×10 并发均 100% 关联到唯一 sandbox。
+- 每个 RunPodSandbox 的阶段顺序单调，已归因区间覆盖总时长至少 95%，未知区间单列。
+- 输出 P50/P95/P99、均值、最大值、lock wait、fsync 次数/耗时和资源压力原始数据。
+- 本子阶段只加观测，不接受端到端 P95 回退超过 3%。
+
+### S5.5b：移除 RuntimeResource 跨 Pod 串行
+
+目标：同一 sandbox 保持线性化，不同 sandbox 的 Prepare、Inspect、OpenTap 和 Release 可以并行。
+
+工作项：
+
+- 把 adapter 节点级大锁改为带引用计数的 per-sandbox keyed lock。
+- `tapFiles` 使用独立短临界区；网络操作、文件 I/O、FD duplicate 不持有全局 map 锁。
+- Coordinator 和 Store 改为 per-sandbox 锁或固定分片锁；registry map 锁只保护内存发布。
+- 所有 fsync、RuntimeResource RPC 和网络操作都移出跨 sandbox 临界区。
+
+验收：
+
+- race/unit 测试证明同 sandbox Prepare/Release/OpenTap 仍线性化，跨 sandbox 操作真实重叠。
+- 10 并发时 adapter 跨 sandbox lock-wait P95≤10 ms，VMM start 展开宽度≤250 ms。
+- 10 并发 `CRI receive→start vm` P95≤650 ms，成功率 100%。
+- Cubelet/RuntimeResource restart、创建中取消和重复 Release 后全部资源 exact-zero。
+
+### S5.5c：进程内 netns/netlink 网络快路径
+
+目标：移除热路径中的 `nsenter/ip/tc/ping` 派生进程和重复 JSON 状态发现。
+
+工作项：
+
+- 使用锁定 OS thread 的 netns 切换和 netlink 完成 link/address/route/neighbor 查询。
+- 使用 netlink 创建 multi-queue/vnet_hdr TAP、ingress qdisc 和双向 mirred filter。
+- 邻居未解析时使用受控 netlink/探测逻辑；保留 IPv4、IPv6、MTU、多路由语义。
+- 过渡期间保留旧 command backend 作为节点配置回滚项，验收后默认使用 netlink backend。
+
+验收：
+
+- Cilium 单/双栈、ClusterIP、跨节点 PodIP、NetworkPolicy、DNS 和 MTU 专项无回归。
+- trace 证明普通启动不再 exec `nsenter`、`ip`、`tc` 或 `ping`。
+- RuntimeResource network prepare 串行 P95≤25 ms、10 并发 P95≤50 ms。
+- `CRI receive→start vm` 串行 P95≤300 ms、10 并发 P95≤450 ms。
+- 失败回滚后 TAP、qdisc/filter、netns FD 和 lease 全部归零。
+
+### S5.5d：持久化与 Host cgroup 快路径
+
+目标：保留崩溃恢复能力，同时减少每 Pod 原子文件提交、目录 fsync 和 systemd placement 固定等待。
+
+工作项：
+
+- RuntimeResource adapter 用包含完整 old/target 的 INTENT 加最终 PREPARED，减少中间重复提交。
+- Host controller journal 一次记录四个 controller 的 old/target，完成写入和精确回读后一次提交
+  COMMITTED；恢复时按实际 old/target 继续或回滚。
+- 评估 1～2 ms 有界 group commit，减少并发目录 fsync 尾延迟。
+- 优先使用 pidfd、cgroup inode 和 `/proc/<pid>/cgroup` 的事件/精确回读替代固定 5×采样；验证
+  可行后评估 `clone3(CLONE_INTO_CGROUP)`，保留 systemd D-Bus fallback。
+
+验收：
+
+- 正常路径 `systemctl show=0`，每 Pod journal commit/fsync 数量和累计耗时明确下降。
+- 全部既有 atomic persistence failpoint、worker/Shim kill、containerd/Cubelet restart 测试通过。
+- 不接受通过关闭 fsync、把状态放入 tmpfs 或删除精确 readback 得到的性能结果。
+- `CRI receive→start vm` 串行 P95≤220 ms、10 并发 P95≤300 ms。
+
+### S5.5e：Guest 冷启动与 worker/VMM 细化
+
+目标：在不使用模板和快照的情况下，把 Guest 冷启动 P95 压到预算内。
+
+工作项：
+
+- 采集 kernel boot milestones、initcall、Agent main/vsock listen 的单调时间线。
+- 让 Agent/vsock readiness 位于 Guest 启动关键路径最前，非启动必需初始化转到 ready 之后。
+- 清理 Guest kernel/initrd 中本 PoC 路径不需要的启动项，评估 initrd 压缩、页面预热和共享只读
+  asset page cache；不得删除已通过 Node E2E 所需的模块和能力。
+- worker 只优化已测量的 fork/Hello/FD gate/placement；不以重写 worker 边界替代主要优化。
+
+验收：
+
+- `start vm→vsock ready` 串行 P95≤950 ms、10 并发 P95≤1050 ms。
+- LaunchVmm 串行 P95≤20 ms、10 并发 P95≤40 ms。
+- Guest capability、网络、volume、privileged、device、sysctl、hostname 和多容器冒烟无回归。
+- 新 Guest asset 使用独立 digest，可一条命令切回基线版本。
+
+### S5.5f：端到端门禁与 Kubernetes 回归
+
+目标：确认局部优化真实转化为 kubelet 观察到的 Ready 延迟，并关闭所有资源和功能回归。
+
+工作项：
+
+- 优化 Scheduled→CRI dispatch 和 RunPodSandbox return→Ready publish 中已测出的 Cube 可控部分。
+- 执行 50 串行、5×10 并发、100 Pod 密度、创建中取消和连续 create/delete churn。
+- 重跑受改动影响的 Node E2E 分片，不重跑与启动路径无关且已冻结的分片。
+
+验收：
+
+- 达到 3.1 的全部退出门禁，并报告 3.2 冲刺目标是否达到。
+- 所有性能样本明确使用 `runtimeClassName: cube`，Sandbox/worker/VMM/Agent 日志形成一一对应链。
+- 多容器、emptyDir、ConfigMap/Secret、PVC 冒烟和受影响 Node E2E 支持面零新增失败。
+- 测试结束后 sandbox、worker、VMM、TAP、mount、CNI、active lease 和 reaper exact-zero。
+
+## 5. 代码组织
+
+| 改动 | 主要目录 | 提交边界 |
+|---|---|---|
+| 逐阶段 tracing/metrics | `CubeShim/`、`Cubelet/services/runtime/`、benchmark runner | 单独观测提交 |
+| keyed lock 与 Store 分片 | `Cubelet/services/runtime/`、`Cubelet/plugins/cube/runtime_resource/` | 不混入网络实现 |
+| netlink backend | `Cubelet/plugins/cube/runtime_resource/` | 独立 backend 和回滚开关 |
+| journal/cgroup 快路径 | `CubeShim/shim/src/service/host_cgroup.rs`、Cubelet state | 每种状态机独立提交 |
+| Guest boot | `image/`、`agent/`、Guest config | Host 与 Guest 制品分开 |
+| runner 与门禁 | `tests/e2e/kubernetes-runtime/` | 不与性能实现混合 |
+
+每个子阶段先冻结基线和目标，再提交实现，再运行专项、故障和 exact-zero 验收。若某项优化未使其
+负责阶段的 P95 明显下降，回滚该项并记录测量结论，不把复杂度带入下一子阶段。
+
+## 6. S5.5 结束后的决策
+
+- 达到必需门禁且冲刺目标达成：进入 S6.1，同时保留普通冷启动作为可靠 fallback。
+- 达到必需门禁但并发仍高于 1.5 秒：进入 S6.1，RuntimeTemplate 同时负责最终并发和一秒目标。
+- 未达到串行 1.5 秒：只有在证据证明剩余耗时主要是不可继续压缩的 Guest cold boot 时，才进入
+  S6.1；否则 S5.5 保持 `VALIDATING`，不能把普通路径问题隐藏到模板路径。
+
