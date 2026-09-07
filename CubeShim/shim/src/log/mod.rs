@@ -40,28 +40,25 @@ macro_rules! infof {
     }};
 }
 
-/// Emit a structured startup trace through CubeShim's stderr datagram only
-/// when CUBE_PERF_TRACE=1. `Log::new` redirects stderr into the per-sandbox
-/// asynchronous logger, and the VMM worker inherits that descriptor. This
-/// therefore covers both processes without enabling the containerd-shim
-/// crate's separate logger. Arguments are not evaluated while disabled.
+/// Emit a structured startup trace to the process-level append-only trace file
+/// only when CUBE_PERF_TRACE=1. Arguments are not evaluated while disabled,
+/// and the sink never touches the containerd shim bootstrap protocol.
 #[macro_export]
 macro_rules! cube_perf {
     ($($arg:tt)*) => {{
         if $crate::common::utils::Utils::perf_trace_enabled() {
-            eprintln!($($arg)*);
+            $crate::common::utils::Utils::emit_perf_trace(format_args!($($arg)*));
         }
     }};
 }
 
-/// Emit a structured startup trace through CubeShim's per-sandbox logger only
-/// when CUBE_PERF_TRACE=1. Arguments are not evaluated while disabled.
+/// Compatibility form for call sites that already carry a per-sandbox logger.
+/// All structured records still use the isolated process-level trace file.
 #[macro_export]
 macro_rules! cube_perff {
-    ($log:expr, $($arg:tt)*) => {{
+    ($ignored_log:expr, $($arg:tt)*) => {{
         if $crate::common::utils::Utils::perf_trace_enabled() {
-            let msg = format!($($arg)*);
-            let _ = $log.info(msg);
+            $crate::common::utils::Utils::emit_perf_trace(format_args!($($arg)*));
         }
     }};
 }

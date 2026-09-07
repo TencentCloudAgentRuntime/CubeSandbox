@@ -11,6 +11,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::str::FromStr;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use cube_hypervisor::config::{RateLimiterConfig, TokenBucketConfig};
@@ -49,6 +50,8 @@ const DEV_URANDOM: &str = "/dev/urandom";
 
 const PASSFD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const PASSFD_ACK_MAX_LINE_LEN: usize = 64;
+const PERF_TRACE_PATH: &str = "/data/log/CubeShim/cube-perf.log";
+static PERF_TRACE_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 
 /// Reject OCI exec fields before `oci-spec` deserialization can discard them.
 /// In particular, oci-spec 0.6.8 derives `execCpuAffinity` while the OCI
@@ -172,6 +175,34 @@ impl Utils {
     /// worker process, so no additional synchronization is needed.
     pub fn perf_trace_enabled() -> bool {
         std::env::var_os("CUBE_PERF_TRACE").is_some_and(|value| value == "1")
+    }
+
+    /// Append one structured performance trace without touching the shim
+    /// bootstrap stdout/stderr protocol. Each process opens the file once;
+    /// O_APPEND keeps independent Shim and worker writes from sharing offsets.
+    /// Callers must check `perf_trace_enabled` before formatting arguments.
+    pub fn emit_perf_trace(arguments: std::fmt::Arguments<'_>) {
+        let sink = PERF_TRACE_FILE.get_or_init(|| {
+            let file = (|| {
+                if let Some(parent) = Path::new(PERF_TRACE_PATH).parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(PERF_TRACE_PATH)
+            })()
+            .ok();
+            Mutex::new(file)
+        });
+        let Ok(mut guard) = sink.lock() else {
+            return;
+        };
+        let Some(file) = guard.as_mut() else {
+            return;
+        };
+        let line = format!("{arguments} pid={}\n", process::id());
+        let _ = file.write_all(line.as_bytes());
     }
 
     /// Return the Linux host CLOCK_MONOTONIC value in microseconds.
