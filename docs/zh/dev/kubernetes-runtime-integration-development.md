@@ -459,9 +459,9 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 |---|---|---|---|---|---|
 | S5.1 安装与共存 | `NOT_STARTED` | 待指定 | — | — | 提供安装、卸载和 runc 共存方案 |
 | S5.2 升级与回滚 | `NOT_STARTED` | 待指定 | — | — | 验证版本协商、滚动升级和回滚 |
-| S5.3 兼容性 | `DONE` | Codex | Kubernetes v1.36.4 官方 477 个 NodeConformance `It` 已通过互斥分片完整执行并唯一归并：456 Passed、17 Failed、4 Skipped；支持路径真实缺陷已修复，17 个失败和 4 个 Skip 均有上游名称、责任层、问题 ID 与后续方案；测试环境、普通 kubelet/CNI/系统 workload 已恢复 | 最终 Agent `64381287`；Device/PodResources `inv-389w3ggrk9` 为 10/10 通过、1 个 SR-IOV 条件 Skip；终审重跑后双节点 exact-zero `inv-98a04qgm41`；集群恢复 `inv-a8a04sguer`；同一 reviewer `PASS`（P0/P1/P2=0）；[最终报告](../../handoffs/kubernetes-runtime/evidence/s5.3/s5.3b-nodeconformance.md) | 进入 S5.5a，先建立最终制品的逐 Pod 性能基线 |
+| S5.3 兼容性 | `DONE` | Codex | Kubernetes v1.36.4 官方 477 个 NodeConformance `It` 已通过互斥分片完整执行并唯一归并：456 Passed、17 Failed、4 Skipped；支持路径真实缺陷已修复，17 个失败和 4 个 Skip 均有上游名称、责任层、问题 ID 与后续方案；测试环境、普通 kubelet/CNI/系统 workload 已恢复 | 最终 Agent `64381287`；Device/PodResources `inv-389w3ggrk9` 为 10/10 通过、1 个 SR-IOV 条件 Skip；终审重跑后双节点 exact-zero `inv-98a04qgm41`；集群恢复 `inv-a8a04sguer`；同一 reviewer `PASS`（P0/P1/P2=0）；[最终报告](../../handoffs/kubernetes-runtime/evidence/s5.3/s5.3b-nodeconformance.md) | 兼容性回归输入留到 S5.5f；主线进入 S5.5b |
 | S5.4 启动架构、性能与稳定性 | `IN_PROGRESS` | Codex | S5.4a/b/c 已完成：worker 拆分后以单次 D-Bus placement + inode/`/proc` 轻量门禁取代正常启动的重复 `systemctl show`；50 次串行和 5×10 并发均 100% 成功且无 PullImage，串行入口 P95 达标；生命周期矩阵和 exact-zero 无回退 | 实现 `7a4d5554 → 26d3ca74 → c949d6d4 → 94c01e21 → fa278467`；[S5.4b 证据](../../handoffs/kubernetes-runtime/evidence/s5.4/s5.4b-worker-split.md)；[S5.4c 证据](../../handoffs/kubernetes-runtime/evidence/s5.4/s5.4c-startup-fastpath.md)；同一 reviewer `PASS`，P0/P1/P2=0/0/1 | 先执行 S5.5 普通冷启动优化；最终一秒目标仍在 S6.2/S5.4d 关闭 |
-| S5.5 普通冷启动性能优化 | `IN_PROGRESS` | Codex | 已完成瓶颈归因、实施设计和 W1 方向性资源探针：并发新增 RunPodSandbox 平均 783ms 中 85.4% 位于 VMM 前；串行主要成本为 Guest cold boot；当前 worker 路径 5 Pod 稳态 Host cgroup 约 104.6MiB/Pod、节点 MemAvailable 差值摊销约 119.4MiB/Pod，尚不是最终门禁基线 | [S5.5 性能方案](./kubernetes-runtime-performance-s5.5.md)；[S5.5a 预基线](../../handoffs/kubernetes-runtime/evidence/s5.5/s5.5a-prebaseline.md) | 正在执行 S5.5a：在 W2 绑定最终制品，完成逐 Pod tracing、50 串行/5×10 并发和 1/5/20 Pod 同口径资源基线；退出目标为串行 P95≤1.5s、10 并发 P95≤1.8s，冲刺并发≤1.5s |
+| S5.5 普通冷启动性能优化 | `IN_PROGRESS` | Codex | S5.5a 已完成最终制品基线：worker 串行/5×10 Ready P95=1965.379/2899.045ms；trace 覆盖最低 99.77%、开销低于 0.05%；worker 20 Pod 稳态 cgroup 104.664MiB/Pod，embedded 99.989MiB/Pod；跨 Pod lock wait 与 Guest cold boot 已定量分离 | [S5.5 性能方案](./kubernetes-runtime-performance-s5.5.md)；[S5.5a 最终基线](../../handoffs/kubernetes-runtime/evidence/s5.5/s5.5a-final-baseline.md)；独立 reviewer `PASS`（P0/P1/P2=0） | 正在执行 S5.5b：把 adapter、Coordinator、Store 的跨 sandbox 大锁改为 per-sandbox/分片并发；退出目标为 lock-wait P95≤10ms、10 并发 VMM start 展开≤250ms并通过故障清理 |
 
 ### S5.3～S5.5 剩余实现单元与执行顺序
 
@@ -489,8 +489,8 @@ S6.1 讨论 RuntimeTemplate、PodSnapshot 和 Pause/Resume；不回退已经验�
 
 | Work Stage | 状态 | Owner | 目标 | 验收标准/下一步 |
 |---|---|---|---|---|
-| S5.5a 最终制品基线与可观测性 | `IN_PROGRESS` | Codex | 为每个 Pod 建立跨 kubelet/containerd/CubeShim/Cubelet/worker/Guest 的统一时间线；冻结 worker/embedded A/B 和 1/5/20 Pod 资源口径 | 最终制品 50 串行和 5×10 并发均 100% 关联；阶段覆盖≥95%；输出 cgroup、MemAvailable、PSS、CPU、PID 和启动峰值；观测开销导致 P95 回退≤3% |
-| S5.5b 移除跨 Pod 串行 | `NOT_STARTED` | Codex | adapter、Coordinator、Store 改为 per-sandbox/分片并发 | adapter 跨 sandbox lock-wait P95≤10ms；10 并发 VMM start 展开≤250ms；取消/restart 后 exact-zero |
+| S5.5a 最终制品基线与可观测性 | `DONE` | Codex | 已建立 kubelet/containerd/CubeShim/Cubelet/worker/Guest 的逐 Pod 单调时间线，并冻结 worker/embedded、1/5/20 Pod、PSS/cgroup 双账本和 virtiofs 0/1/2 resident 增量口径 | 串行和 5×10 各 50/50 唯一关联，覆盖最低 99.77%，trace 回退<0.05%；18 轮资源矩阵、9 轮 virtiofs 配对、生产恢复和 exact-zero 通过；[最终基线](../../handoffs/kubernetes-runtime/evidence/s5.5/s5.5a-final-baseline.md)；reviewer `PASS`（P0/P1/P2=0） |
+| S5.5b 移除跨 Pod 串行 | `IN_PROGRESS` | Codex | adapter、Coordinator、Store 改为 per-sandbox/分片并发 | adapter 跨 sandbox lock-wait P95≤10ms；10 并发 VMM start 展开≤250ms；取消/restart 后 exact-zero |
 | S5.5c netlink 网络快路径 | `NOT_STARTED` | Codex | 以进程内 netns/netlink 取代热路径 `nsenter/ip/tc/ping` | network prepare 串行 P95≤25ms、并发≤50ms；网络专项通过；exec trace 为 0；回滚后无残留 |
 | S5.5d 持久化与 Host cgroup 快路径 | `NOT_STARTED` | Codex | 合并可恢复 journal 阶段并移除固定 placement 等待 | 不关闭 fsync/精确回读；原子故障矩阵通过；CRI→VMM 串行 P95≤220ms、并发≤300ms |
 | S5.5e Guest 冷启动与普通路径内存优化 | `NOT_STARTED` | Codex | 把 Agent/vsock 提前并缩短 kernel/init 关键路径；删除无收益的 Guest/worker 私有常驻页 | VMM→vsock 串行 P95≤950ms、并发≤1050ms；同口径 20 Pod 稳态 Host cgroup 均值≤100MiB/Pod，且节点 MemAvailable 差值摊销相对 S5.5a 下降≥15%或≤100MiB/Pod；能力冒烟零回退 |

@@ -2,17 +2,16 @@
 
 ## 当前 Stage
 
-S5.5a `IN_PROGRESS`。S5.3、S5.3a、S5.3b、S5.3c 与 S5.4a～S5.4c 均为 `DONE`。
+S5.5b `IN_PROGRESS`。S5.3、S5.3a、S5.3b、S5.3c、S5.4a～S5.4c 与 S5.5a 均为 `DONE`。
 用户决定先优化普通 OCI 冷启动，目标是串行 PodScheduled→Ready P95≤1.5s 并消除并发放大；
 S5.5 完成后再进入 S6.1。不得回退已验收的普通 worker 启动路径。
 
 ## 基线
 
-最后验证实现 commit 为 `643812879228e513a20e3a29499af7b9cfe57480`，tree 为
-`41297a0a1ed1eb88ff39ab0e34245278fad67ecc`；S5.3 收口与分类证据最新 commit 为
-`c6921b17`（最终结果基线 `3a0b7873`）。
-W1/W2 已部署最终 Host CubeShim/worker/runtime（SHA-256 前缀 `410d1799`、`3ff0b7d9`、
-`ea6df43e`）和 Agent ext4 `3c36bcb9…`。`RuntimeClass/cube` 保留。
+最后验证实现 commit 为 `79f6bcb444447e8442f1893a1963206d3b7024a6`，tree 为
+`3f9ae5ccd1e24eb5dc41fd52286acf8dcc267789`。W2 已恢复最终 Host CubeShim/worker/runtime：
+Shim SHA-256 `4bcc5d53…`、worker `5b0b0d9f…`、RuntimeResource harness `08c9a8f0…`；
+Agent ext4 为 `3c36bcb9…`。`RuntimeClass/cube` 保留。W1 由 GLM 独立使用，主线未触碰。
 
 ## 已完成
 
@@ -33,14 +32,15 @@ S5.5 性能方案已冻结：依次执行逐 Pod tracing、RuntimeResource 跨 P
 持久化/cgroup 快路径、Guest cold boot 和端到端回归。并发新增 RunPodSandbox 平均 783ms 中
 85.4% 位于 VMM 前；串行 RunPodSandbox 约 72% 位于 Guest 启动到 vsock。
 
-W1 方向性资源探针得到 5 Pod 稳态 Host cgroup 约 104.6MiB/Pod、节点 `MemAvailable` 差值
-摊销约 119.4MiB/Pod、worker/Shim PSS 约 102/6.1MiB；未完成最终制品、embedded/worker 和
-1/5/20 Pod 同口径 A/B，因此只记录为 S5.5a 预基线。详见
-[S5.5a 预基线](./evidence/s5.5/s5.5a-prebaseline.md)。
+S5.5a 已完成最终制品基线：worker 串行/5×10 Ready P95 为 1965.379/2899.045ms，trace
+覆盖最低 99.77% 且开销低于 0.05%；worker/embedded 的 1/5/20 Pod×3 轮资源矩阵完成，
+20 Pod 稳态 cgroup 为 104.664/99.989MiB/Pod。virtiofs 0/1/2 配对估计、生产制品恢复与
+exact-zero 均通过；同一 reviewer 终审 `PASS`（P0/P1/P2=0）。详见
+[S5.5a 最终基线](./evidence/s5.5/s5.5a-final-baseline.md)。
 
 ## 未完成
 
-- S5.5a～S5.5f：普通冷启动性能优化；退出门禁为串行 P95≤1.5s、5×10 并发 P95≤1.8s，
+- S5.5b～S5.5f：普通冷启动性能优化；退出门禁为串行 P95≤1.5s、5×10 并发 P95≤1.8s，
   冲刺并发 P95≤1.5s。
 - S6.1、S6.2a～c、S6.3～S6.4：模板、快照与暂停恢复设计和实现；S6.2c 负责模板路径密度和
   RuntimeClass overhead 最终标定。
@@ -59,14 +59,17 @@ W1 方向性资源探针得到 5 Pod 稳态 Host cgroup 约 104.6MiB/Pod、节�
 - Device/PodResources：`inv-389w3ggrk9`；privileged 定向终审：`inv-689xwbgpag`。
 - 双 Worker exact-zero：`inv-98a04qgm41`。
 - W1/W2 Ready、kube-system 非 Ready=0、e2e namespace/policy=0：`inv-a8a04sguer`。
+- S5.5a W2/控制/本地工具权威证据包 SHA-256 分别为 `38841b44…`、`00cf570e…`、
+  `8bcd0b24…`；全部从 COS 反向下载校验，local-tooling-v2 内嵌 37 项 checksum 全部通过。
+- S5.5a 生产恢复 `inv-a8cm3egxjv`；W2 exact-zero `inv-08cm4gg07f`；控制端目标 W2
+  Ready 且测试对象归零 `inv-a8cm6pgic4`；reviewer `PASS`（P0/P1/P2=0）。
 - `git diff --check`、credential scan、`make handoff-validate` 与 reviewer 终审均通过。
 
 ## 阻塞
 
 无外部阻塞。GLM 的冻结分支全量 Node E2E 是独立并行验证，不占用主线 Stage，也不阻塞
-S5.5；只有绑定 commit/artifact SHA 且原始结果可复验后才接收入回归证据。S5.5a 需要在 W2
-用最终 Host/Guest 制品重跑基线，因为既有性能数字来自
-`fa278467`，而最终代码已把无显式资源 Pod 的默认 VM 内存从 256MiB 调整为 512MiB。
+S5.5；只有绑定 commit/artifact SHA 且原始结果可复验后才接收入回归证据。GLM 当前使用的
+W1 可处于 NotReady；S5.5 只门禁 W2 `vm-200-13-ubuntu`，不得为主线恢复或修改 W1。
 
 ## 受保护路径
 
@@ -77,9 +80,9 @@ assets 和回滚副本；不得在仓库或 handoff 中记录凭证、token、�
 
 ## 下一步
 
-1. 执行 S5.5a：在 W2 部署最终制品，加入统一 monotonic tracing，重跑 50 串行、5×10 并发、
-   worker/embedded A/B 和 1/5/20 Pod 资源基线；W1 留给 GLM，避免互相污染。
-2. 按 S5.5b～S5.5e 依次关闭跨 Pod 大锁、外部网络命令、重复持久化/placement 等待和 Guest
+1. 执行 S5.5b：只保留同 sandbox 线性化，把 adapter、Coordinator 和 Store 改为
+   per-sandbox/分片并发，先将 adapter 跨 sandbox lock-wait P95 收到 10ms 内。
+2. 按 S5.5c～S5.5e 依次关闭外部网络命令、重复持久化/placement 等待和 Guest
    cold boot；每个子阶段只在专项、故障与 exact-zero 通过后进入下一阶段。
 3. S5.5f 达到串行 P95≤1.5s、并发 P95≤1.8s，并完成受影响 Node E2E 回归；完整方案见
    [S5.5 性能优化方案](../../zh/dev/kubernetes-runtime-performance-s5.5.md)。
