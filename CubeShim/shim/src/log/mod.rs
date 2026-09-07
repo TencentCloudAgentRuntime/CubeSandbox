@@ -40,13 +40,16 @@ macro_rules! infof {
     }};
 }
 
-/// Emit a structured startup trace through the Rust `log` facade only when
-/// CUBE_PERF_TRACE=1. Arguments are not evaluated while tracing is disabled.
+/// Emit a structured startup trace through CubeShim's stderr datagram only
+/// when CUBE_PERF_TRACE=1. `Log::new` redirects stderr into the per-sandbox
+/// asynchronous logger, and the VMM worker inherits that descriptor. This
+/// therefore covers both processes without enabling the containerd-shim
+/// crate's separate logger. Arguments are not evaluated while disabled.
 #[macro_export]
 macro_rules! cube_perf {
     ($($arg:tt)*) => {{
         if $crate::common::utils::Utils::perf_trace_enabled() {
-            log::info!($($arg)*);
+            eprintln!($($arg)*);
         }
     }};
 }
