@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -151,47 +150,7 @@ func TestLatency(t *testing.T) {
 
 	feature := features.New("cube-kri latency").
 		WithLabel("scope", "latency").
-		Assess("latency-20-concurrent-cube-pods", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
-			client := clientset(t, cfg)
-			pods := make([]*corev1.Pod, 0, *latencyConcurrency)
-			start := time.Now()
-			for i := 1; i <= *latencyConcurrency; i++ {
-				pod := cubePod(t, ctx, cfg, client, fmt.Sprintf("lat-%02d", i), corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
-					Containers:    []corev1.Container{pauseContainer("main")},
-				})
-				pods = append(pods, pod)
-			}
-			defer cleanupPods(ctx, t, client, pods)
-			createPodsConcurrently(ctx, t, client, pods)
-
-			deadline := time.Now().Add(*latencyTimeout)
-			ready := 0
-			var last []*corev1.Pod
-			err := wait.PollUntilContextTimeout(ctx, time.Second, *latencyTimeout, true, func(ctx context.Context) (bool, error) {
-				ready = 0
-				last = last[:0]
-				for _, pod := range pods {
-					got, err := client.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-					if err != nil {
-						if apierrors.IsNotFound(err) {
-							continue
-						}
-						return false, err
-					}
-					last = append(last, got)
-					if podPhase(got) == corev1.PodRunning && allContainersReady(got) {
-						ready++
-					}
-				}
-				return ready == len(pods), nil
-			})
-			if err != nil {
-				t.Fatalf("expected %d/%d pods ready before %s; ready=%d; remaining=%s", len(pods), len(pods), deadline.Format(time.RFC3339), ready, notReadySummary(last))
-			}
-			t.Logf("latency-20-concurrent-cube-pods: ready=%d/%d wall=%s", ready, len(pods), time.Since(start).Round(time.Millisecond))
-			return ctx
-		}).
+		Assess("latency-concurrent-cube-pods", assessConcurrentLatency).
 		Feature()
 
 	testEnv.Test(t, feature)
@@ -767,30 +726,6 @@ func createPod(ctx context.Context, t *testing.T, client *kubernetes.Clientset, 
 	t.Helper()
 	if err := createPodErr(ctx, client, pod); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func createPodsConcurrently(ctx context.Context, t *testing.T, client *kubernetes.Clientset, pods []*corev1.Pod) {
-	t.Helper()
-	var wg sync.WaitGroup
-	errs := make(chan error, len(pods))
-	for _, pod := range pods {
-		pod := pod
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := createPodErr(ctx, client, pod); err != nil {
-				errs <- err
-			}
-		}()
-	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		t.Error(err)
-	}
-	if t.Failed() {
-		t.FailNow()
 	}
 }
 

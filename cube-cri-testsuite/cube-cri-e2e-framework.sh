@@ -29,7 +29,10 @@ Options:
   --namespace NAME        Namespace to run in. Default: ${NAMESPACE}
   --feature REGEX         e2e-framework feature regex.
   --assess REGEX          e2e-framework assessment regex.
-  --latency-concurrency N Concurrent cube pause pods for latency test.
+  --latency-count N       Total cube pause pods; defaults to concurrency.
+  --latency-concurrency N Maximum simultaneous Create requests (default: 20).
+  --latency-output-dir DIR
+                           Write summary JSON and per-pod JSON to DIR.
   --latency-timeout DUR   Latency test timeout.
   --awv-csi-storage-class NAME
                            StorageClass used by awv-csi PVC tests.
@@ -50,6 +53,8 @@ while [[ $# -gt 0 ]]; do
     --namespace) NAMESPACE="$2"; shift 2 ;;
     --feature) extra_args+=("-feature=$2"); shift 2 ;;
     --assess) extra_args+=("-assess=$2"); shift 2 ;;
+    --latency-count) extra_args+=("-latency-count=$2"); shift 2 ;;
+    --latency-output-dir) extra_args+=("-latency-output-dir=$2"); shift 2 ;;
     --latency-concurrency) extra_args+=("-latency-concurrency=$2"); shift 2 ;;
     --latency-timeout) extra_args+=("-latency-timeout=$2"); shift 2 ;;
     --awv-csi-storage-class) extra_args+=("-awv-csi-storage-class=$2"); shift 2 ;;
