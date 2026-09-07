@@ -1738,7 +1738,7 @@ impl LifecycleHandle {
             Classification::LegacyTask
         };
         let owner_path = self.directory.join(HOST_OWNER_FILE);
-        let (registered, claim_epoch, target) = {
+        let (registered, claim_epoch, target, trace_sandbox_id) = {
             // Keep record.lock only around validation and the durable Host
             // INTENT. The scanner must be able to revoke this epoch while a
             // systemd/cgroupfs placement call is stuck.
@@ -1850,12 +1850,13 @@ impl LifecycleHandle {
                 registered,
                 record.operation_owner.epoch,
                 record.target.clone(),
+                record.instance_id.clone(),
             )
         };
 
         let mut server = current_claim_server_identity()?;
         if server.cgroup != target.cgroup() {
-            create_and_join_target(&target, server.pid)?;
+            create_and_join_target(&target, server.pid, Some(&trace_sandbox_id))?;
         }
         server = current_claim_server_identity()?;
         if !immutable_identity_matches(&registered, &server) {
@@ -3346,7 +3347,9 @@ impl BootstrapSession {
     pub(crate) fn place_helper(&mut self) -> Result<(), String> {
         if self.target.managed() {
             let operation = self.handle.begin_helper_host_operation()?;
-            if let Err(error) = create_and_join_target(&self.target, std::process::id() as i32) {
+            if let Err(error) =
+                create_and_join_target(&self.target, std::process::id() as i32, None)
+            {
                 self.helper_moved = current_process_cgroup(std::process::id() as i32)
                     .map(|actual| actual == self.target.cgroup())
                     .unwrap_or(false);
@@ -3600,7 +3603,7 @@ pub(crate) fn run_systemd_probe() -> Result<(), String> {
             leaf_identity: None,
         };
         let pid = child.id() as i32;
-        if let Err(error) = create_and_join_target(&target, pid) {
+        if let Err(error) = create_and_join_target(&target, pid, None) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!("systemd probe iteration {iteration}: {error}"));
@@ -5862,22 +5865,51 @@ fn validate_cgroup_parent(cgroup: &str) -> Result<FileIdentity, String> {
     file_identity(&canonical)
 }
 
-fn create_and_join_target(target: &HostTarget, pid: i32) -> Result<(), String> {
+fn create_and_join_target(
+    target: &HostTarget,
+    pid: i32,
+    trace_sandbox_id: Option<&str>,
+) -> Result<(), String> {
     match target {
         HostTarget::Systemd { slice, unit, .. } => {
+            let sandbox_id = trace_sandbox_id.unwrap_or("host-probe");
             let mut properties = PropertiesBuilder::default_cgroup(slice, unit)
                 .pids(vec![pid as u32])
                 .build();
             properties.push(("CollectMode", ZbusValue::Str("inactive-or-failed".into())));
             let client = SystemdClient::new(unit, properties)
                 .map_err(|error| format!("construct systemd scope {unit}: {error}"))?;
-            if client.exists() {
+            let phase_started = Instant::now();
+            let exists = client.exists();
+            crate::cube_perf!(
+                "cube_perf component=shim operation=create phase=systemd-exists sandbox_id={} operation_id={} unit={} target_pid={} ts_mono_us={} duration_us={} exists={}",
+                sandbox_id,
+                sandbox_id,
+                unit,
+                pid,
+                Utils::monotonic_time_micros(),
+                phase_started.elapsed().as_micros(),
+                exists
+            );
+            if exists {
                 return Err(format!("refuse to reuse existing systemd scope {unit}"));
             }
-            client
+            let phase_started = Instant::now();
+            let result = client
                 .start()
-                .map_err(|error| format!("start systemd scope {unit}: {error}"))?;
-            verify_systemd_placement(target, pid)
+                .map_err(|error| format!("start systemd scope {unit}: {error}"));
+            crate::cube_perf!(
+                "cube_perf component=shim operation=create phase=systemd-start-transient sandbox_id={} operation_id={} unit={} target_pid={} ts_mono_us={} duration_us={} success={}",
+                sandbox_id,
+                sandbox_id,
+                unit,
+                pid,
+                Utils::monotonic_time_micros(),
+                phase_started.elapsed().as_micros(),
+                result.is_ok()
+            );
+            result?;
+            verify_systemd_placement(target, pid, trace_sandbox_id)
         }
         HostTarget::Cgroupfs { cgroup, .. } => {
             let path = Path::new("/sys/fs/cgroup").join(cgroup.trim_start_matches('/'));
@@ -5934,7 +5966,11 @@ fn verify_live_target_identity(target: &HostTarget) -> Result<(), String> {
     Ok(())
 }
 
-fn verify_systemd_placement(target: &HostTarget, pid: i32) -> Result<(), String> {
+fn verify_systemd_placement(
+    target: &HostTarget,
+    pid: i32,
+    trace_sandbox_id: Option<&str>,
+) -> Result<(), String> {
     let HostTarget::Systemd { cgroup, .. } = target else {
         return Err("systemd verification called for non-systemd target".to_string());
     };
@@ -5945,9 +5981,11 @@ fn verify_systemd_placement(target: &HostTarget, pid: i32) -> Result<(), String>
     let expected_parent = target
         .parent_identity()
         .ok_or_else(|| "systemd target has no durable parent identity".to_string())?;
+    let sandbox_id = trace_sandbox_id.unwrap_or("host-probe");
     // StartTransientUnit returns after systemd has accepted the job.  Wait for
     // the kernel-visible cgroup placement, then prove that the same parent,
     // leaf, and process membership remain stable before persisting the leaf.
+    let readiness_started = Instant::now();
     let mut leaf_identity = None;
     for _ in 0..200 {
         if path.exists()
@@ -5965,7 +6003,16 @@ fn verify_systemd_placement(target: &HostTarget, pid: i32) -> Result<(), String>
             path.display()
         )
     })?;
+    crate::cube_perf!(
+        "cube_perf component=shim operation=create phase=systemd-placement-ready sandbox_id={} operation_id={} target_pid={} ts_mono_us={} duration_us={} success=true",
+        sandbox_id,
+        sandbox_id,
+        pid,
+        Utils::monotonic_time_micros(),
+        readiness_started.elapsed().as_micros()
+    );
     const STABLE_SAMPLES: usize = 5;
+    let stability_started = Instant::now();
     for sample in 0..STABLE_SAMPLES {
         let actual = current_process_cgroup(pid)?;
         if file_identity(parent)? != *expected_parent
@@ -5980,6 +6027,15 @@ fn verify_systemd_placement(target: &HostTarget, pid: i32) -> Result<(), String>
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+    crate::cube_perf!(
+        "cube_perf component=shim operation=create phase=systemd-stability-gate sandbox_id={} operation_id={} target_pid={} samples={} ts_mono_us={} duration_us={} success=true",
+        sandbox_id,
+        sandbox_id,
+        pid,
+        STABLE_SAMPLES,
+        Utils::monotonic_time_micros(),
+        stability_started.elapsed().as_micros()
+    );
     Ok(())
 }
 

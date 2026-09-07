@@ -5,7 +5,6 @@
 package state
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -21,7 +20,6 @@ import (
 	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/monotime"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -46,6 +44,8 @@ type PrepareRequest struct {
 	Generation     uint64
 	IdempotencyKey string
 	PayloadDigest  string
+	PodUID         string
+	Trace          *monotime.TraceBuffer
 }
 
 type ReleaseRequest struct {
@@ -64,6 +64,7 @@ type Lease struct {
 	NetworkHandle string `json:"networkHandle,omitempty"`
 	ReleaseKey    string `json:"releaseKey,omitempty"`
 	Phase         Phase  `json:"phase"`
+	PodUID        string `json:"podUID,omitempty"`
 }
 
 type Tombstone struct {
@@ -254,6 +255,7 @@ func (s *Store) Prepare(request PrepareRequest) (*PrepareResult, error) {
 		PayloadDigest: request.PayloadDigest,
 		HandoffToken:  token,
 		Phase:         PhasePreparing,
+		PodUID:        request.PodUID,
 	}
 	record.HighWatermark = request.Generation
 	record.Active = lease
@@ -263,7 +265,7 @@ func (s *Store) Prepare(request PrepareRequest) (*PrepareResult, error) {
 		LeaseID:       leaseID,
 		PayloadDigest: request.PayloadDigest,
 	}
-	if err := s.persist(record); err != nil {
+	if err := s.persist(record, request.Trace); err != nil {
 		return nil, err
 	}
 	return &PrepareResult{Lease: *lease}, nil
@@ -271,7 +273,7 @@ func (s *Store) Prepare(request PrepareRequest) (*PrepareResult, error) {
 
 // MarkReady binds the network handle to the exact current lease. It is
 // idempotent for an identical READY record.
-func (s *Store) MarkReady(sandboxID string, generation uint64, leaseID, networkHandle string) (*Lease, error) {
+func (s *Store) MarkReady(sandboxID string, generation uint64, leaseID, networkHandle string, trace *monotime.TraceBuffer) (*Lease, error) {
 	if sandboxID == "" || generation == 0 || leaseID == "" || networkHandle == "" {
 		return nil, status.Error(codes.InvalidArgument, "ready fields must be non-zero")
 	}
@@ -296,7 +298,7 @@ func (s *Store) MarkReady(sandboxID string, generation uint64, leaseID, networkH
 	default:
 		return nil, status.Error(codes.FailedPrecondition, "releasing lease cannot become ready")
 	}
-	if err := s.persist(record); err != nil {
+	if err := s.persist(record, trace); err != nil {
 		return nil, err
 	}
 	return cloneLease(record.Active), nil
@@ -320,14 +322,14 @@ func (s *Store) BeginRelease(request ReleaseRequest) (*ReleaseResult, error) {
 		}
 		if record.Active != nil && record.Active.Generation == request.Generation &&
 			record.Active.LeaseID == request.LeaseID && record.Active.ReleaseKey == request.IdempotencyKey {
-			if err := s.syncParent("confirm-release-retry"); err != nil {
+			if err := s.syncParent("confirm-release-retry", nil, record); err != nil {
 				return nil, err
 			}
 			return &ReleaseResult{Lease: *record.Active, Reused: true}, nil
 		}
 		if tombstone, ok := record.Tombstones[generationKey(request.Generation)]; ok &&
 			tombstone.LeaseID == request.LeaseID && tombstone.ReleaseKey == request.IdempotencyKey {
-			if err := s.syncParent("confirm-tombstone-retry"); err != nil {
+			if err := s.syncParent("confirm-tombstone-retry", nil, record); err != nil {
 				return nil, err
 			}
 			return &ReleaseResult{Lease: leaseFromTombstone(tombstone), Reused: true}, nil
@@ -348,7 +350,7 @@ func (s *Store) BeginRelease(request ReleaseRequest) (*ReleaseResult, error) {
 			record.IdempotencyKeys[request.IdempotencyKey] = KeyUse{
 				Operation: OperationRelease, Generation: request.Generation, LeaseID: request.LeaseID,
 			}
-			if err := s.persist(record); err != nil {
+			if err := s.persist(record, nil); err != nil {
 				return nil, err
 			}
 			return &ReleaseResult{Lease: leaseFromTombstone(tombstone)}, nil
@@ -368,7 +370,7 @@ func (s *Store) BeginRelease(request ReleaseRequest) (*ReleaseResult, error) {
 		Generation: request.Generation,
 		LeaseID:    request.LeaseID,
 	}
-	if err := s.persist(record); err != nil {
+	if err := s.persist(record, nil); err != nil {
 		return nil, err
 	}
 	return &ReleaseResult{Lease: *record.Active}, nil
@@ -390,14 +392,14 @@ func (s *Store) ConfirmReleaseDurable(request ReleaseRequest) (*ReleaseResult, e
 	if record.Active != nil && record.Active.Phase == PhaseReleasing &&
 		record.Active.Generation == request.Generation && record.Active.LeaseID == request.LeaseID &&
 		record.Active.ReleaseKey == request.IdempotencyKey {
-		if err := s.syncParent("confirm-release"); err != nil {
+		if err := s.syncParent("confirm-release", nil, record); err != nil {
 			return nil, err
 		}
 		return &ReleaseResult{Lease: *record.Active, Reused: true}, nil
 	}
 	if tombstone, ok := record.Tombstones[generationKey(request.Generation)]; ok &&
 		tombstone.LeaseID == request.LeaseID && tombstone.ReleaseKey == request.IdempotencyKey {
-		if err := s.syncParent("confirm-tombstone"); err != nil {
+		if err := s.syncParent("confirm-tombstone", nil, record); err != nil {
 			return nil, err
 		}
 		return &ReleaseResult{Lease: leaseFromTombstone(tombstone), Reused: true}, nil
@@ -436,7 +438,7 @@ func (s *Store) CompleteRelease(request ReleaseRequest) error {
 		ReleaseKey:    record.Active.ReleaseKey,
 	}
 	record.Active = nil
-	if err := s.persist(record); err != nil {
+	if err := s.persist(record, nil); err != nil {
 		return err
 	}
 	return nil
@@ -465,7 +467,7 @@ func (s *Store) AbandonPrepare(sandboxID string, generation uint64, leaseID stri
 		PayloadDigest: record.Active.PayloadDigest,
 	}
 	record.Active = nil
-	if err := s.persist(record); err != nil {
+	if err := s.persist(record, nil); err != nil {
 		return err
 	}
 	return nil
@@ -555,17 +557,18 @@ func (s *Store) load(sandboxID string) (*Record, error) {
 	return record, nil
 }
 
-func (s *Store) persist(record *Record) (err error) {
+func (s *Store) persist(record *Record, trace *monotime.TraceBuffer) (err error) {
 	totalStart := time.Now()
 	stageStart := totalStart
 	var encodeTime, createTime, writeTime, fileSyncTime, renameTime, parentSyncTime time.Duration
 	defer func() {
-		if !monotime.TraceEnabled() {
-			return
+		podUID := ""
+		if record.Active != nil {
+			podUID = record.Active.PodUID
 		}
-		CubeLog.WithContext(context.Background()).Infof(
-			"cube_perf component=cubelet operation=persist phase=runtime-store sandbox_id=%s ts_mono_us=%d duration_us=%d success=%t encode_us=%d create_us=%d write_us=%d file_fsync_us=%d rename_us=%d parent_fsync_us=%d fsync_count=2",
-			record.SandboxID, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
+		trace.Addf(
+			"cube_perf component=cubelet operation=persist phase=runtime-store sandbox_id=%s pod_uid=%s operation_id=%s ts_mono_us=%d duration_us=%d success=%t encode_us=%d create_us=%d write_us=%d file_fsync_us=%d rename_us=%d parent_fsync_us=%d fsync_count=2",
+			record.SandboxID, podUID, record.SandboxID, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
 			encodeTime.Microseconds(), createTime.Microseconds(), writeTime.Microseconds(), fileSyncTime.Microseconds(),
 			renameTime.Microseconds(), parentSyncTime.Microseconds(),
 		)
@@ -613,20 +616,24 @@ func (s *Store) persist(record *Record) (err error) {
 	}
 	renameTime = time.Since(stageStart)
 	stageStart = time.Now()
-	err = s.syncParent("commit")
+	err = s.syncParent("commit", trace, record)
 	parentSyncTime = time.Since(stageStart)
 	return err
 }
 
-func (s *Store) syncParent(operation string) (err error) {
+func (s *Store) syncParent(operation string, trace *monotime.TraceBuffer, record *Record) (err error) {
 	started := time.Now()
 	defer func() {
-		if !monotime.TraceEnabled() {
-			return
+		sandboxID, podUID := "", ""
+		if record != nil {
+			sandboxID = record.SandboxID
+			if record.Active != nil {
+				podUID = record.Active.PodUID
+			}
 		}
-		CubeLog.WithContext(context.Background()).Infof(
-			"cube_perf component=cubelet operation=persist phase=runtime-parent-fsync persist_operation=%s ts_mono_us=%d duration_us=%d success=%t fsync_count=1",
-			operation, monotime.Micros(), time.Since(started).Microseconds(), err == nil,
+		trace.Addf(
+			"cube_perf component=cubelet operation=persist phase=runtime-parent-fsync persist_operation=%s sandbox_id=%s pod_uid=%s operation_id=%s ts_mono_us=%d duration_us=%d success=%t fsync_count=1",
+			operation, sandboxID, podUID, sandboxID, monotime.Micros(), time.Since(started).Microseconds(), err == nil,
 		)
 	}()
 	if s.hooks.BeforeParentSync != nil {

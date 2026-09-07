@@ -20,7 +20,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/monotime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -162,22 +161,24 @@ func (s *Service) PrepareSandbox(ctx context.Context, request *runtimev1.Prepare
 	totalStart := time.Now()
 	stageStart := totalStart
 	var timings prepareTimings
+	trace := monotime.NewTraceBuffer()
+	ctx = monotime.WithTraceBuffer(ctx, trace)
 	sandboxID := ""
 	generation := uint64(0)
+	podUID := ""
 	if request != nil {
 		sandboxID = request.GetSandboxId()
 		generation = request.GetGeneration()
+		podUID = request.GetPod().GetUid()
 	}
 	defer func() {
-		if !monotime.TraceEnabled() {
-			return
-		}
-		CubeLog.WithContext(ctx).Infof(
-			"cube_perf component=cubelet operation=create phase=prepare-sandbox sandbox_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t operation_lock_us=%d digest_us=%d coordinator_us=%d adapter_us=%d validate_us=%d mark_ready_us=%d",
-			sandboxID, generation, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
+		trace.Addf(
+			"cube_perf component=cubelet operation=create phase=prepare-sandbox sandbox_id=%s pod_uid=%s operation_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t operation_lock_us=%d digest_us=%d coordinator_us=%d adapter_us=%d validate_us=%d mark_ready_us=%d",
+			sandboxID, podUID, sandboxID, generation, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
 			timings.operationLock.Microseconds(), timings.digest.Microseconds(), timings.coordinator.Microseconds(),
 			timings.adapter.Microseconds(), timings.validate.Microseconds(), timings.markReady.Microseconds(),
 		)
+		trace.Flush()
 	}()
 	if err := validatePrepare(request); err != nil {
 		return nil, err
@@ -197,6 +198,7 @@ func (s *Service) PrepareSandbox(ctx context.Context, request *runtimev1.Prepare
 	result, err := s.coordinator.Prepare(state.PrepareRequest{
 		SandboxID: request.GetSandboxId(), Generation: request.GetGeneration(),
 		IdempotencyKey: request.GetIdempotencyKey(), PayloadDigest: digest,
+		PodUID: request.GetPod().GetUid(), Trace: trace,
 	})
 	if err != nil {
 		return nil, err
@@ -221,7 +223,7 @@ func (s *Service) PrepareSandbox(ctx context.Context, request *runtimev1.Prepare
 	}
 	timings.validate = time.Since(stageStart)
 	stageStart = time.Now()
-	lease, err := s.coordinator.MarkReadyAndPublish(request.GetSandboxId(), request.GetGeneration(), result.Lease.LeaseID, prepared.GetNetwork().GetNetworkHandle())
+	lease, err := s.coordinator.MarkReadyAndPublish(request.GetSandboxId(), request.GetGeneration(), result.Lease.LeaseID, prepared.GetNetwork().GetNetworkHandle(), trace)
 	if err != nil {
 		if rollbackErr := s.cleanupFailedPrepare(request, result.Lease); rollbackErr != nil {
 			return nil, status.Errorf(codes.Internal, "mark RuntimeResource ready: %v; rollback: %v", err, rollbackErr)

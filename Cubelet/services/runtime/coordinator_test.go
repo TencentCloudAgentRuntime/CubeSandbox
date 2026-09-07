@@ -59,7 +59,7 @@ func readyCoordinator(t *testing.T, opener handoff.TapOpener, options ...state.O
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, err := coordinator.MarkReadyAndPublish("sandbox-a", 1, prepared.Lease.LeaseID, "network-1")
+	lease, err := coordinator.MarkReadyAndPublish("sandbox-a", 1, prepared.Lease.LeaseID, "network-1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func TestCoordinatorRestartKeepsReleasingFencedAndReplacementStale(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease2, err := restarted.MarkReadyAndPublish("sandbox-a", 2, prepared2.Lease.LeaseID, "network-2")
+	lease2, err := restarted.MarkReadyAndPublish("sandbox-a", 2, prepared2.Lease.LeaseID, "network-2", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

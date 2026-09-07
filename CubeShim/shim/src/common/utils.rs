@@ -201,7 +201,20 @@ impl Utils {
         let Some(file) = guard.as_mut() else {
             return;
         };
-        let line = format!("{arguments} pid={}\n", process::id());
+        let message = arguments.to_string();
+        let operation = if message
+            .split_whitespace()
+            .any(|field| field.starts_with("operation_id="))
+        {
+            String::new()
+        } else {
+            message
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("sandbox_id="))
+                .map(|sandbox_id| format!(" operation_id={sandbox_id}"))
+                .unwrap_or_default()
+        };
+        let line = format!("{message}{operation} emitter_pid={}\n", process::id());
         let _ = file.write_all(line.as_bytes());
     }
 

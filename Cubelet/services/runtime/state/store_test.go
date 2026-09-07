@@ -118,7 +118,7 @@ func TestReleaseRequiresExactLeaseAndStableOperationKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	lease := prepared.Lease.LeaseID
-	if _, err := store.MarkReady("sandbox-a", 4, lease, "network-4"); err != nil {
+	if _, err := store.MarkReady("sandbox-a", 4, lease, "network-4", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -154,7 +154,7 @@ func TestRestartRecoveryTombstoneAndStaleOperationFencing(t *testing.T) {
 		t.Fatal(err)
 	}
 	lease1 := prepared.Lease.LeaseID
-	if _, err := firstStore.MarkReady("sandbox-a", 1, lease1, "network-1"); err != nil {
+	if _, err := firstStore.MarkReady("sandbox-a", 1, lease1, "network-1", nil); err != nil {
 		t.Fatal(err)
 	}
 	release1 := releaseRequest(1, lease1, "release-1")
@@ -182,7 +182,7 @@ func TestRestartRecoveryTombstoneAndStaleOperationFencing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := restarted.MarkReady("sandbox-a", 2, prepared2.Lease.LeaseID, "network-2"); err != nil {
+	if _, err := restarted.MarkReady("sandbox-a", 2, prepared2.Lease.LeaseID, "network-2", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := restarted.BeginRelease(release1); err != nil {
@@ -261,7 +261,7 @@ func TestCompleteReleaseRetryAndOperationKeyRemainFencedAfterReplacement(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.MarkReady("sandbox-a", 1, prepared1.Lease.LeaseID, "network-1"); err != nil {
+	if _, err := store.MarkReady("sandbox-a", 1, prepared1.Lease.LeaseID, "network-1", nil); err != nil {
 		t.Fatal(err)
 	}
 	release1 := releaseRequest(1, prepared1.Lease.LeaseID, "release-1")

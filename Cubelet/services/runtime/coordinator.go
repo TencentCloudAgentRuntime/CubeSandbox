@@ -4,7 +4,6 @@
 package runtime
 
 import (
-	"context"
 	"errors"
 	"sync"
 	"time"
@@ -12,7 +11,6 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/monotime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -20,7 +18,7 @@ import (
 // LifecycleStore is the durable half of the RuntimeResource lifecycle.
 type LifecycleStore interface {
 	Prepare(state.PrepareRequest) (*state.PrepareResult, error)
-	MarkReady(string, uint64, string, string) (*state.Lease, error)
+	MarkReady(string, uint64, string, string, *monotime.TraceBuffer) (*state.Lease, error)
 	AbandonPrepare(string, uint64, string) error
 	BeginRelease(state.ReleaseRequest) (*state.ReleaseResult, error)
 	ConfirmReleaseDurable(state.ReleaseRequest) (*state.ReleaseResult, error)
@@ -61,12 +59,9 @@ func (c *Coordinator) Prepare(request state.PrepareRequest) (result *state.Prepa
 	lockWait := time.Since(lockStart)
 	storeStart := time.Now()
 	defer func() {
-		if !monotime.TraceEnabled() {
-			return
-		}
-		CubeLog.WithContext(context.Background()).Infof(
-			"cube_perf component=cubelet operation=create phase=coordinator-prepare sandbox_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d store_us=%d",
-			request.SandboxID, request.Generation, monotime.Micros(), time.Since(totalStart).Microseconds(),
+		request.Trace.Addf(
+			"cube_perf component=cubelet operation=create phase=coordinator-prepare sandbox_id=%s pod_uid=%s operation_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d store_us=%d",
+			request.SandboxID, request.PodUID, request.SandboxID, request.Generation, monotime.Micros(), time.Since(totalStart).Microseconds(),
 			err == nil, lockWait.Microseconds(), time.Since(storeStart).Microseconds(),
 		)
 	}()
@@ -86,7 +81,7 @@ func (c *Coordinator) AbandonPrepare(sandboxID string, generation uint64, leaseI
 // MarkReadyAndPublish persists READY before publishing its exact FD binding.
 // A publication failure is fail-closed: the caller must retry or recover before
 // serving the sandbox.
-func (c *Coordinator) MarkReadyAndPublish(sandboxID string, generation uint64, leaseID, networkHandle string) (lease *state.Lease, err error) {
+func (c *Coordinator) MarkReadyAndPublish(sandboxID string, generation uint64, leaseID, networkHandle string, trace *monotime.TraceBuffer) (lease *state.Lease, err error) {
 	totalStart := time.Now()
 	lockStart := totalStart
 	c.mu.Lock()
@@ -94,16 +89,17 @@ func (c *Coordinator) MarkReadyAndPublish(sandboxID string, generation uint64, l
 	lockWait := time.Since(lockStart)
 	storeStart := time.Now()
 	defer func() {
-		if !monotime.TraceEnabled() {
-			return
+		podUID := ""
+		if lease != nil {
+			podUID = lease.PodUID
 		}
-		CubeLog.WithContext(context.Background()).Infof(
-			"cube_perf component=cubelet operation=create phase=coordinator-ready sandbox_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d store_publish_us=%d",
-			sandboxID, generation, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
+		trace.Addf(
+			"cube_perf component=cubelet operation=create phase=coordinator-ready sandbox_id=%s pod_uid=%s operation_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d store_publish_us=%d",
+			sandboxID, podUID, sandboxID, generation, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
 			lockWait.Microseconds(), time.Since(storeStart).Microseconds(),
 		)
 	}()
-	lease, err = c.store.MarkReady(sandboxID, generation, leaseID, networkHandle)
+	lease, err = c.store.MarkReady(sandboxID, generation, leaseID, networkHandle, trace)
 	if err != nil {
 		return nil, err
 	}

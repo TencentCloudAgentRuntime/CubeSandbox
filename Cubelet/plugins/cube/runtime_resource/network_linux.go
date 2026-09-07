@@ -20,7 +20,6 @@ import (
 
 	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/monotime"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 )
@@ -35,13 +34,12 @@ type nsenterRunner struct{}
 
 func (nsenterRunner) Run(ctx context.Context, netnsPath string, command ...string) (output []byte, err error) {
 	started := time.Now()
+	trace := monotime.TraceBufferFromContext(ctx)
+	identity := startupTraceIdentityFromContext(ctx)
 	defer func() {
-		if !monotime.TraceEnabled() {
-			return
-		}
-		CubeLog.WithContext(ctx).Infof(
-			"cube_perf component=cubelet operation=create phase=network-exec netns=%s command=%q ts_mono_us=%d duration_us=%d success=%t",
-			netnsPath, strings.Join(command, " "), monotime.Micros(), time.Since(started).Microseconds(), err == nil,
+		trace.Addf(
+			"cube_perf component=cubelet operation=create phase=network-exec sandbox_id=%s pod_uid=%s operation_id=%s netns=%s command=%q ts_mono_us=%d duration_us=%d success=%t",
+			identity.sandboxID, identity.podUID, identity.operationID, netnsPath, strings.Join(command, " "), monotime.Micros(), time.Since(started).Microseconds(), err == nil,
 		)
 	}()
 	args := append([]string{"--net=" + netnsPath, "--"}, command...)
@@ -94,13 +92,12 @@ func newLinuxNetwork() *linuxNetwork { return &linuxNetwork{runner: nsenterRunne
 
 func (n *linuxNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, tapName string) (attachment *runtimev1.NetworkAttachment, err error) {
 	started := time.Now()
+	trace := monotime.TraceBufferFromContext(ctx)
+	identity := startupTraceIdentityFromContext(ctx)
 	defer func() {
-		if !monotime.TraceEnabled() {
-			return
-		}
-		CubeLog.WithContext(ctx).Infof(
-			"cube_perf component=cubelet operation=create phase=network-prepare netns=%s interface=%s tap=%s ts_mono_us=%d duration_us=%d success=%t",
-			netnsPath, interfaceName, tapName, monotime.Micros(), time.Since(started).Microseconds(), err == nil,
+		trace.Addf(
+			"cube_perf component=cubelet operation=create phase=network-prepare sandbox_id=%s pod_uid=%s operation_id=%s netns=%s interface=%s tap=%s ts_mono_us=%d duration_us=%d success=%t",
+			identity.sandboxID, identity.podUID, identity.operationID, netnsPath, interfaceName, tapName, monotime.Micros(), time.Since(started).Microseconds(), err == nil,
 		)
 	}()
 	if _, err := os.Stat(netnsPath); err != nil {

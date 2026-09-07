@@ -246,7 +246,8 @@ impl WorkerClient {
 
         let pid = child.id();
         crate::cube_perf!(
-            "cube_perf component=vmm-worker operation=start phase=fork-exec sandbox_id={} pid={} ts_mono_us={} duration_us={}",
+            "cube_perf component=vmm-worker operation=start phase=fork-exec sandbox_id={} operation_id={} worker_pid={} ts_mono_us={} duration_us={}",
+            sandbox_id,
             sandbox_id,
             pid,
             Utils::monotonic_time_micros(),
@@ -339,7 +340,8 @@ impl WorkerClient {
             return Err(client.terminate_after_error(error));
         }
         crate::cube_perf!(
-            "cube_perf component=vmm-worker operation=start phase=hello sandbox_id={} pid={} ts_mono_us={} duration_us={}",
+            "cube_perf component=vmm-worker operation=start phase=hello sandbox_id={} operation_id={} worker_pid={} ts_mono_us={} duration_us={}",
+            sandbox_id,
             sandbox_id,
             pid,
             Utils::monotonic_time_micros(),
@@ -356,7 +358,8 @@ impl WorkerClient {
             return Err(client.terminate_after_error(error));
         }
         crate::cube_perf!(
-            "cube_perf component=vmm-worker operation=start phase=fd-gate sandbox_id={} pid={} ts_mono_us={} duration_us={}",
+            "cube_perf component=vmm-worker operation=start phase=fd-gate sandbox_id={} operation_id={} worker_pid={} ts_mono_us={} duration_us={}",
+            sandbox_id,
             sandbox_id,
             pid,
             Utils::monotonic_time_micros(),
@@ -377,7 +380,8 @@ impl WorkerClient {
                 )));
             }
             crate::cube_perf!(
-                "cube_perf component=vmm-worker operation=start phase=placement sandbox_id={} pid={} ts_mono_us={} duration_us={}",
+                "cube_perf component=vmm-worker operation=start phase=placement sandbox_id={} operation_id={} worker_pid={} ts_mono_us={} duration_us={}",
+                sandbox_id,
                 sandbox_id,
                 pid,
                 Utils::monotonic_time_micros(),
@@ -390,7 +394,8 @@ impl WorkerClient {
                 return Err(client.terminate_after_error(error));
             }
             crate::cube_perf!(
-                "cube_perf component=vmm-worker operation=start phase=launch sandbox_id={} pid={} ts_mono_us={} duration_us={} total_us={}",
+                "cube_perf component=vmm-worker operation=start phase=launch sandbox_id={} operation_id={} worker_pid={} ts_mono_us={} duration_us={} total_us={}",
+                sandbox_id,
                 sandbox_id,
                 pid,
                 Utils::monotonic_time_micros(),
