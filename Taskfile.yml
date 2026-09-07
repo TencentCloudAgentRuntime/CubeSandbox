@@ -65,4 +65,4 @@ tasks:
     cmds: [bash ./deploy/cube-cri/test_pvm.sh]
   test:e2e-framework:
     desc: 在测试集群运行探针、并发启动、Pod 语义、混合运行时和 AWV CSI 用例。
-    cmds: ['bash ./testsuite/cube-kri-e2e-framework.sh {{.ARGS}}']
+    cmds: ['bash ./cube-cri-testsuite/cube-cri-e2e-framework.sh {{.ARGS}}']
