@@ -5,6 +5,7 @@
 package state
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -17,7 +18,10 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"time"
 
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/monotime"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -551,29 +555,47 @@ func (s *Store) load(sandboxID string) (*Record, error) {
 	return record, nil
 }
 
-func (s *Store) persist(record *Record) error {
+func (s *Store) persist(record *Record) (err error) {
+	totalStart := time.Now()
+	stageStart := totalStart
+	var encodeTime, createTime, writeTime, fileSyncTime, renameTime, parentSyncTime time.Duration
+	defer func() {
+		CubeLog.WithContext(context.Background()).Infof(
+			"cube_perf component=cubelet operation=persist phase=runtime-store sandbox_id=%s ts_mono_us=%d duration_us=%d success=%t encode_us=%d create_us=%d write_us=%d file_fsync_us=%d rename_us=%d parent_fsync_us=%d fsync_count=2",
+			record.SandboxID, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
+			encodeTime.Microseconds(), createTime.Microseconds(), writeTime.Microseconds(), fileSyncTime.Microseconds(),
+			renameTime.Microseconds(), parentSyncTime.Microseconds(),
+		)
+	}()
 	data, err := json.Marshal(record)
 	if err != nil {
 		return persistenceFailure("encode", false, err)
 	}
+	encodeTime = time.Since(stageStart)
+	stageStart = time.Now()
 	temp, err := os.CreateTemp(s.dir, ".runtime-state-*")
 	if err != nil {
 		return persistenceFailure("create-temp", false, err)
 	}
+	createTime = time.Since(stageStart)
 	tempName := temp.Name()
 	defer os.Remove(tempName)
 	if err := temp.Chmod(0o600); err != nil {
 		temp.Close()
 		return persistenceFailure("chmod-temp", false, err)
 	}
+	stageStart = time.Now()
 	if _, err := temp.Write(data); err != nil {
 		temp.Close()
 		return persistenceFailure("write-temp", false, err)
 	}
+	writeTime = time.Since(stageStart)
+	stageStart = time.Now()
 	if err := temp.Sync(); err != nil {
 		temp.Close()
 		return persistenceFailure("sync-temp", false, err)
 	}
+	fileSyncTime = time.Since(stageStart)
 	if err := temp.Close(); err != nil {
 		return persistenceFailure("close-temp", false, err)
 	}
@@ -582,13 +604,25 @@ func (s *Store) persist(record *Record) error {
 			return persistenceFailure("before-rename", false, err)
 		}
 	}
+	stageStart = time.Now()
 	if err := os.Rename(tempName, s.recordPath(record.SandboxID)); err != nil {
 		return persistenceFailure("rename", false, err)
 	}
-	return s.syncParent("commit")
+	renameTime = time.Since(stageStart)
+	stageStart = time.Now()
+	err = s.syncParent("commit")
+	parentSyncTime = time.Since(stageStart)
+	return err
 }
 
-func (s *Store) syncParent(operation string) error {
+func (s *Store) syncParent(operation string) (err error) {
+	started := time.Now()
+	defer func() {
+		CubeLog.WithContext(context.Background()).Infof(
+			"cube_perf component=cubelet operation=persist phase=runtime-parent-fsync persist_operation=%s ts_mono_us=%d duration_us=%d success=%t fsync_count=1",
+			operation, monotime.Micros(), time.Since(started).Microseconds(), err == nil,
+		)
+	}()
 	if s.hooks.BeforeParentSync != nil {
 		if err := s.hooks.BeforeParentSync(); err != nil {
 			return persistenceFailure(operation+"-before-parent-sync", true, err)

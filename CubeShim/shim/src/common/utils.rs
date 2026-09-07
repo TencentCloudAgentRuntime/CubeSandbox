@@ -164,6 +164,25 @@ const IVSHMEM_PREFIX: &str = "ivshmem-";
 pub struct Utils {}
 pub struct AsyncUtils {}
 impl Utils {
+    /// Return the Linux host CLOCK_MONOTONIC value in microseconds.
+    ///
+    /// Unlike `Instant`, this value can be correlated across CubeShim and the
+    /// per-Pod VMM worker. It is emitted only as a local performance trace
+    /// coordinate and is not persisted as lifecycle state.
+    pub fn monotonic_time_micros() -> u128 {
+        let mut value = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `value` is a valid writable timespec and CLOCK_MONOTONIC
+        // requires no additional lifetime or ownership guarantees.
+        let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) };
+        if result != 0 || value.tv_sec < 0 || value.tv_nsec < 0 {
+            return 0;
+        }
+        (value.tv_sec as u128) * 1_000_000 + (value.tv_nsec as u128) / 1_000
+    }
+
     /// Validate sandbox_id before using it in filesystem paths.
     fn validate_sandbox_id(id: &str) -> CResult<()> {
         if id.is_empty() || id.len() > 255 {
@@ -1170,6 +1189,14 @@ mod tests {
     fn utils_vsock_path() {
         let p = Utils::vsock_path("123");
         assert_eq!(p, PathBuf::from(format!("{}/{}/cube.sock", VM_PATH, "123")));
+    }
+
+    #[test]
+    fn monotonic_time_is_available_and_ordered() {
+        let first = Utils::monotonic_time_micros();
+        let second = Utils::monotonic_time_micros();
+        assert!(first > 0);
+        assert!(second >= first);
     }
 
     #[test]

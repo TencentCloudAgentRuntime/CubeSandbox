@@ -4,11 +4,15 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"sync"
+	"time"
 
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/monotime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -49,9 +53,20 @@ func NewCoordinator(store LifecycleStore, registry *handoff.Registry) (*Coordina
 	}, nil
 }
 
-func (c *Coordinator) Prepare(request state.PrepareRequest) (*state.PrepareResult, error) {
+func (c *Coordinator) Prepare(request state.PrepareRequest) (result *state.PrepareResult, err error) {
+	totalStart := time.Now()
+	lockStart := totalStart
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	lockWait := time.Since(lockStart)
+	storeStart := time.Now()
+	defer func() {
+		CubeLog.WithContext(context.Background()).Infof(
+			"cube_perf component=cubelet operation=create phase=coordinator-prepare sandbox_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d store_us=%d",
+			request.SandboxID, request.Generation, monotime.Micros(), time.Since(totalStart).Microseconds(),
+			err == nil, lockWait.Microseconds(), time.Since(storeStart).Microseconds(),
+		)
+	}()
 	return c.store.Prepare(request)
 }
 
@@ -68,10 +83,21 @@ func (c *Coordinator) AbandonPrepare(sandboxID string, generation uint64, leaseI
 // MarkReadyAndPublish persists READY before publishing its exact FD binding.
 // A publication failure is fail-closed: the caller must retry or recover before
 // serving the sandbox.
-func (c *Coordinator) MarkReadyAndPublish(sandboxID string, generation uint64, leaseID, networkHandle string) (*state.Lease, error) {
+func (c *Coordinator) MarkReadyAndPublish(sandboxID string, generation uint64, leaseID, networkHandle string) (lease *state.Lease, err error) {
+	totalStart := time.Now()
+	lockStart := totalStart
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	lease, err := c.store.MarkReady(sandboxID, generation, leaseID, networkHandle)
+	lockWait := time.Since(lockStart)
+	storeStart := time.Now()
+	defer func() {
+		CubeLog.WithContext(context.Background()).Infof(
+			"cube_perf component=cubelet operation=create phase=coordinator-ready sandbox_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d store_publish_us=%d",
+			sandboxID, generation, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
+			lockWait.Microseconds(), time.Since(storeStart).Microseconds(),
+		)
+	}()
+	lease, err = c.store.MarkReady(sandboxID, generation, leaseID, networkHandle)
 	if err != nil {
 		return nil, err
 	}

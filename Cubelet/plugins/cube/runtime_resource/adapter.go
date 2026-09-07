@@ -15,12 +15,15 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/moby/sys/mountinfo"
 	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/monotime"
 	runtimeservice "github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"golang.org/x/sys/unix"
 )
 
@@ -119,9 +122,19 @@ func newAdapter(stateDir string, assets Assets, network NetworkOps) (*adapter, e
 	}, nil
 }
 
-func (a *adapter) Prepare(ctx context.Context, request *runtimev1.PrepareSandboxRequest, lease state.Lease) (*runtimev1.PreparedSandbox, error) {
+func (a *adapter) Prepare(ctx context.Context, request *runtimev1.PrepareSandboxRequest, lease state.Lease) (prepared *runtimev1.PreparedSandbox, err error) {
+	totalStart := time.Now()
+	lockStart := totalStart
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	lockWait := time.Since(lockStart)
+	defer func() {
+		CubeLog.WithContext(ctx).Infof(
+			"cube_perf component=cubelet operation=create phase=adapter-prepare sandbox_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d",
+			request.GetSandboxId(), request.GetGeneration(), monotime.Micros(), time.Since(totalStart).Microseconds(),
+			err == nil, lockWait.Microseconds(),
+		)
+	}()
 
 	if record, err := a.load(request.GetSandboxId()); err == nil {
 		if record.Generation != request.GetGeneration() || record.LeaseID != lease.LeaseID {
@@ -147,7 +160,19 @@ func (a *adapter) Prepare(ctx context.Context, request *runtimev1.PrepareSandbox
 	return a.resumePrepare(ctx, record)
 }
 
-func (a *adapter) resumePrepare(ctx context.Context, record *diskRecord) (*runtimev1.PreparedSandbox, error) {
+func (a *adapter) resumePrepare(ctx context.Context, record *diskRecord) (prepared *runtimev1.PreparedSandbox, err error) {
+	totalStart := time.Now()
+	stageStart := totalStart
+	initialStage := record.Stage
+	var validateRoot, persistShared, networkPrepare, persistPrepared time.Duration
+	defer func() {
+		CubeLog.WithContext(ctx).Infof(
+			"cube_perf component=cubelet operation=create phase=adapter-resume sandbox_id=%s generation=%d initial_stage=%s final_stage=%s ts_mono_us=%d duration_us=%d success=%t validate_root_us=%d persist_shared_us=%d network_us=%d persist_prepared_us=%d",
+			record.SandboxID, record.Generation, initialStage, record.Stage, monotime.Micros(),
+			time.Since(totalStart).Microseconds(), err == nil, validateRoot.Microseconds(), persistShared.Microseconds(),
+			networkPrepare.Microseconds(), persistPrepared.Microseconds(),
+		)
+	}()
 	switch record.Stage {
 	case stageIntent:
 		root := record.Assets.GetSharedRoot()
@@ -159,16 +184,22 @@ func (a *adapter) resumePrepare(ctx context.Context, record *diskRecord) (*runti
 			return nil, a.discardIntent(record, err)
 		}
 		record.Assets.SharedRoot = validated
+		validateRoot += time.Since(stageStart)
+		stageStart = time.Now()
 		if err := a.persistStage(record, stageSharedRoot); err != nil {
 			return nil, err
 		}
+		persistShared += time.Since(stageStart)
 		fallthrough
 	case stageSharedRoot:
+		stageStart = time.Now()
 		validated, err := a.validateSharedRoot(record.Assets.GetSharedRoot())
 		if err != nil {
 			return nil, err
 		}
 		record.Assets.SharedRoot = validated
+		validateRoot += time.Since(stageStart)
+		stageStart = time.Now()
 		network, err := a.network.Prepare(ctx, record.NetNSPath, record.InterfaceName, record.TapName)
 		if err != nil {
 			if rollbackErr := a.rollbackPreparing(ctx, record); rollbackErr != nil {
@@ -176,6 +207,7 @@ func (a *adapter) resumePrepare(ctx context.Context, record *diskRecord) (*runti
 			}
 			return nil, err
 		}
+		networkPrepare += time.Since(stageStart)
 		if network == nil {
 			err := errors.New("network adapter returned no attachment")
 			if rollbackErr := a.rollbackPreparing(ctx, record); rollbackErr != nil {
@@ -189,19 +221,24 @@ func (a *adapter) resumePrepare(ctx context.Context, record *diskRecord) (*runti
 			network.GuestInterfaceName = "eth0"
 		}
 		record.Network = network
+		stageStart = time.Now()
 		if err := a.persistStage(record, stagePrepared); err != nil {
 			return nil, err
 		}
+		persistPrepared += time.Since(stageStart)
 	case stagePrepared:
+		stageStart = time.Now()
 		validated, err := a.validateSharedRoot(record.Assets.GetSharedRoot())
 		if err != nil {
 			return nil, err
 		}
 		record.Assets.SharedRoot = validated
+		validateRoot += time.Since(stageStart)
 	default:
 		return nil, fmt.Errorf("unsupported runtime resource prepare stage %q", record.Stage)
 	}
-	return preparedFromRecord(record), nil
+	prepared = preparedFromRecord(record)
+	return prepared, nil
 }
 
 func (a *adapter) discardIntent(record *diskRecord, cause error) error {
@@ -432,9 +469,21 @@ func (a *adapter) Inspect(_ context.Context, sandboxID string, lease state.Lease
 	return preparedFromRecord(record), nil
 }
 
-func (a *adapter) OpenTap(binding handoff.Binding) (*os.File, error) {
+func (a *adapter) OpenTap(binding handoff.Binding) (descriptorFile *os.File, err error) {
+	totalStart := time.Now()
+	stageStart := totalStart
+	var lockWait, loadTime, openTime, duplicateTime time.Duration
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	lockWait = time.Since(stageStart)
+	stageStart = time.Now()
+	defer func() {
+		CubeLog.WithContext(context.Background()).Infof(
+			"cube_perf component=cubelet operation=start phase=adapter-open-tap sandbox_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d load_us=%d open_us=%d duplicate_us=%d",
+			binding.SandboxID, binding.Generation, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
+			lockWait.Microseconds(), loadTime.Microseconds(), openTime.Microseconds(), duplicateTime.Microseconds(),
+		)
+	}()
 	record, err := a.load(binding.SandboxID)
 	if err != nil {
 		return nil, err
@@ -442,6 +491,8 @@ func (a *adapter) OpenTap(binding handoff.Binding) (*os.File, error) {
 	if record.Stage != stagePrepared || record.Generation != binding.Generation || record.LeaseID != binding.LeaseID || record.NetworkHandle != binding.NetworkHandle {
 		return nil, handoff.ErrStaleLease
 	}
+	loadTime = time.Since(stageStart)
+	stageStart = time.Now()
 	file := a.tapFiles[binding.SandboxID]
 	if file == nil {
 		file, err = a.network.Open(record.NetNSPath, record.TapName)
@@ -450,6 +501,8 @@ func (a *adapter) OpenTap(binding handoff.Binding) (*os.File, error) {
 		}
 		a.tapFiles[binding.SandboxID] = file
 	}
+	openTime = time.Since(stageStart)
+	stageStart = time.Now()
 	descriptor, err := unix.FcntlInt(file.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
 		if a.tapFiles[binding.SandboxID] == file {
@@ -458,7 +511,9 @@ func (a *adapter) OpenTap(binding handoff.Binding) (*os.File, error) {
 		}
 		return nil, err
 	}
-	return os.NewFile(uintptr(descriptor), file.Name()), nil
+	duplicateTime = time.Since(stageStart)
+	descriptorFile = os.NewFile(uintptr(descriptor), file.Name())
+	return descriptorFile, nil
 }
 
 func (a *adapter) load(sandboxID string) (*diskRecord, error) {
@@ -480,36 +535,59 @@ func (a *adapter) load(sandboxID string) (*diskRecord, error) {
 	return record, nil
 }
 
-func (a *adapter) persist(record *diskRecord) error {
+func (a *adapter) persist(record *diskRecord) (err error) {
+	totalStart := time.Now()
+	stageStart := totalStart
+	var encodeTime, createTime, writeTime, fileSyncTime, renameTime, parentSyncTime time.Duration
+	defer func() {
+		CubeLog.WithContext(context.Background()).Infof(
+			"cube_perf component=cubelet operation=persist phase=adapter-store sandbox_id=%s record_stage=%s ts_mono_us=%d duration_us=%d success=%t encode_us=%d create_us=%d write_us=%d file_fsync_us=%d rename_us=%d parent_fsync_us=%d fsync_count=2",
+			record.SandboxID, record.Stage, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
+			encodeTime.Microseconds(), createTime.Microseconds(), writeTime.Microseconds(), fileSyncTime.Microseconds(),
+			renameTime.Microseconds(), parentSyncTime.Microseconds(),
+		)
+	}()
 	data, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
+	encodeTime = time.Since(stageStart)
+	stageStart = time.Now()
 	temp, err := os.CreateTemp(a.stateDir, ".runtime-resource-*")
 	if err != nil {
 		return err
 	}
+	createTime = time.Since(stageStart)
 	name := temp.Name()
 	defer os.Remove(name)
 	if err := temp.Chmod(0o600); err != nil {
 		temp.Close()
 		return err
 	}
+	stageStart = time.Now()
 	if _, err := temp.Write(data); err != nil {
 		temp.Close()
 		return err
 	}
+	writeTime = time.Since(stageStart)
+	stageStart = time.Now()
 	if err := temp.Sync(); err != nil {
 		temp.Close()
 		return err
 	}
+	fileSyncTime = time.Since(stageStart)
 	if err := temp.Close(); err != nil {
 		return err
 	}
+	stageStart = time.Now()
 	if err := os.Rename(name, a.path(record.SandboxID)); err != nil {
 		return err
 	}
-	return syncDir(a.stateDir)
+	renameTime = time.Since(stageStart)
+	stageStart = time.Now()
+	err = syncDir(a.stateDir)
+	parentSyncTime = time.Since(stageStart)
+	return err
 }
 
 func (a *adapter) path(sandboxID string) string {

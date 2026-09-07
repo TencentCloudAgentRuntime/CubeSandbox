@@ -22,9 +22,10 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zbus::zvariant::Value as ZbusValue;
 
+use crate::common::utils::Utils;
 use crate::service::bootstrap::BootstrapParams;
 use crate::service::runtime_resource::{self, HostResourceCeiling};
 
@@ -6351,12 +6352,22 @@ fn ensure_directory(path: &Path) -> Result<(), String> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), String> {
-    File::open(path)
+    let started = Instant::now();
+    let result = File::open(path)
         .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("sync directory {}: {error}", path.display()))
+        .map_err(|error| format!("sync directory {}: {error}", path.display()));
+    log::info!(
+        "cube_perf component=shim operation=persist phase=directory-fsync target={} ts_mono_us={} duration_us={} success={}",
+        path.display(),
+        Utils::monotonic_time_micros(),
+        started.elapsed().as_micros(),
+        result.is_ok()
+    );
+    result
 }
 
 fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    let started = Instant::now();
     let parent = path
         .parent()
         .ok_or_else(|| format!("record has no parent: {}", path.display()))?;
@@ -6412,7 +6423,15 @@ fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<(), String> 
             path.display()
         ));
     }
-    sync_directory(parent)
+    let result = sync_directory(parent);
+    log::info!(
+        "cube_perf component=shim operation=persist phase=atomic-write-json target={} ts_mono_us={} duration_us={} success={}",
+        path.display(),
+        Utils::monotonic_time_micros(),
+        started.elapsed().as_micros(),
+        result.is_ok()
+    );
+    result
 }
 
 #[cfg(test)]
@@ -6434,6 +6453,7 @@ fn take_atomic_write_failpoint(_path: &Path, _stage: &str) -> bool {
 }
 
 fn atomic_write_bytes(path: &Path, data: &[u8]) -> Result<(), String> {
+    let started = Instant::now();
     let parent = path
         .parent()
         .ok_or_else(|| format!("record has no parent: {}", path.display()))?;
@@ -6457,7 +6477,15 @@ fn atomic_write_bytes(path: &Path, data: &[u8]) -> Result<(), String> {
         let _ = fs::remove_file(&temporary);
         return Err(format!("commit record {}: {error}", path.display()));
     }
-    sync_directory(parent)
+    let result = sync_directory(parent);
+    log::info!(
+        "cube_perf component=shim operation=persist phase=atomic-write-bytes target={} ts_mono_us={} duration_us={} success={}",
+        path.display(),
+        Utils::monotonic_time_micros(),
+        started.elapsed().as_micros(),
+        result.is_ok()
+    );
+    result
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {

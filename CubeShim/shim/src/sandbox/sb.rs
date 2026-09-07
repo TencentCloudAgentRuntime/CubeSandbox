@@ -613,7 +613,17 @@ impl SandBox {
         &mut self,
         worker_placement: Option<&dyn crate::hypervisor::worker::WorkerPlacement>,
     ) -> CResult<()> {
+        let total_started = Instant::now();
+        let phase_started = Instant::now();
         let snapshot = self.start_vm(worker_placement).await?;
+        infof!(
+            self.log,
+            "cube_perf component=shim operation=start phase=vm-ready sandbox_id={} ts_mono_us={} duration_us={} restored={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros(),
+            snapshot
+        );
 
         //todo: app snapshot
         if self.conf.notify_snapshot_ret {
@@ -622,18 +632,33 @@ impl SandBox {
             }
         }
 
+        let phase_started = Instant::now();
         self.connect_agent().await?;
 
-        infof!(self.log, "agent is ready");
+        infof!(
+            self.log,
+            "cube_perf component=shim operation=start phase=agent-connect sandbox_id={} ts_mono_us={} duration_us={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros()
+        );
 
         if snapshot {
             self.reset_guest().await?;
         }
 
         //add vfio device
+        let phase_started = Instant::now();
         if !self.app_snapshot_restore() {
             self.add_device().await?;
         }
+        infof!(
+            self.log,
+            "cube_perf component=shim operation=start phase=guest-devices sandbox_id={} ts_mono_us={} duration_us={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros()
+        );
 
         let storages = self.get_storages()?;
         let dns = self.get_dns()?;
@@ -670,6 +695,7 @@ impl SandBox {
             req.start_mode = protoc::agent::StartMode::RESTORE;
         }
 
+        let phase_started = Instant::now();
         {
             if self.client.is_none() {
                 errf!(self.log, "client is None in create_sandbox");
@@ -682,7 +708,15 @@ impl SandBox {
                 .await
                 .map_err(|e| format!("create sandbox failed:{}", e))?;
         }
+        infof!(
+            self.log,
+            "cube_perf component=shim operation=start phase=agent-create-sandbox sandbox_id={} ts_mono_us={} duration_us={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros()
+        );
 
+        let phase_started = Instant::now();
         if !self.conf.app_snapshot_create {
             //watch oom
             let (sender, handle) = self.watch_oom().await?;
@@ -694,6 +728,14 @@ impl SandBox {
             self.tx_monitor_exited = Some(sender);
             self.monitor_handle = Some(Arc::new(handle));
         }
+        infof!(
+            self.log,
+            "cube_perf component=shim operation=start phase=monitor-setup sandbox_id={} ts_mono_us={} duration_us={} total_us={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros(),
+            total_started.elapsed().as_micros()
+        );
         stat.set_ok();
         Ok(())
     }
@@ -1029,8 +1071,15 @@ impl SandBox {
         &mut self,
         worker_placement: Option<&dyn crate::hypervisor::worker::WorkerPlacement>,
     ) -> CResult<bool> {
-        infof!(self.log, "start vm start");
+        let total_started = Instant::now();
+        infof!(
+            self.log,
+            "cube_perf component=shim operation=start phase=start-vm-begin sandbox_id={} ts_mono_us={}",
+            self.id,
+            Utils::monotonic_time_micros()
+        );
         let by_snapshot = self.by_snapshot();
+        let phase_started = Instant::now();
         let runtime_prepared_boot = if self.runtime_tap.is_some() {
             if by_snapshot {
                 return Err("RuntimeResource network does not support snapshot restore".to_string());
@@ -1067,10 +1116,26 @@ impl SandBox {
         } else {
             None
         };
+        infof!(
+            self.log,
+            "cube_perf component=shim operation=start phase=vm-config sandbox_id={} ts_mono_us={} duration_us={} snapshot={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros(),
+            by_snapshot
+        );
+        let phase_started = Instant::now();
         {
             let mut ch = self.ch.as_mut().unwrap().lock().await;
             ch.launch_vmm(worker_placement).await?;
         }
+        infof!(
+            self.log,
+            "cube_perf component=shim operation=start phase=launch-vmm sandbox_id={} ts_mono_us={} duration_us={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros()
+        );
         let mut snapshot = false;
 
         if by_snapshot {
@@ -1090,6 +1155,7 @@ impl SandBox {
             }
         }
 
+        let phase_started = Instant::now();
         if !snapshot {
             if let Some(config) = runtime_prepared_boot.as_ref() {
                 self.boot_vm_with_config(config).await?;
@@ -1099,6 +1165,14 @@ impl SandBox {
                 self.boot_vm().await?;
             }
         }
+        infof!(
+            self.log,
+            "cube_perf component=shim operation=start phase=boot-or-restore sandbox_id={} ts_mono_us={} duration_us={} restored={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros(),
+            snapshot
+        );
 
         {
             let ch = self.ch.as_mut().unwrap().lock().await;
@@ -1115,7 +1189,15 @@ impl SandBox {
                 ));
             }
             let duration = start.elapsed().as_millis();
-            infof!(self.log, "vm ready, vsock is listening, cost:{}", duration);
+            infof!(
+                self.log,
+                "cube_perf component=shim operation=start phase=vsock-ready sandbox_id={} ts_mono_us={} duration_us={} total_us={} legacy_cost_ms={}",
+                self.id,
+                Utils::monotonic_time_micros(),
+                start.elapsed().as_micros(),
+                total_started.elapsed().as_micros(),
+                duration
+            );
         }
         Ok(snapshot)
     }

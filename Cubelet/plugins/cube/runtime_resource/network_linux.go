@@ -16,8 +16,11 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/monotime"
+	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 )
@@ -30,9 +33,16 @@ type commandRunner interface {
 
 type nsenterRunner struct{}
 
-func (nsenterRunner) Run(ctx context.Context, netnsPath string, command ...string) ([]byte, error) {
+func (nsenterRunner) Run(ctx context.Context, netnsPath string, command ...string) (output []byte, err error) {
+	started := time.Now()
+	defer func() {
+		CubeLog.WithContext(ctx).Infof(
+			"cube_perf component=cubelet operation=create phase=network-exec netns=%s command=%q ts_mono_us=%d duration_us=%d success=%t",
+			netnsPath, strings.Join(command, " "), monotime.Micros(), time.Since(started).Microseconds(), err == nil,
+		)
+	}()
 	args := append([]string{"--net=" + netnsPath, "--"}, command...)
-	output, err := commandContext(ctx, "nsenter", args...).CombinedOutput()
+	output, err = commandContext(ctx, "nsenter", args...).CombinedOutput()
 	if err != nil {
 		return output, fmt.Errorf("netns command %q: %w: %s", strings.Join(command, " "), err, strings.TrimSpace(string(output)))
 	}
@@ -79,7 +89,14 @@ type linuxNetwork struct{ runner commandRunner }
 
 func newLinuxNetwork() *linuxNetwork { return &linuxNetwork{runner: nsenterRunner{}} }
 
-func (n *linuxNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, tapName string) (*runtimev1.NetworkAttachment, error) {
+func (n *linuxNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, tapName string) (attachment *runtimev1.NetworkAttachment, err error) {
+	started := time.Now()
+	defer func() {
+		CubeLog.WithContext(ctx).Infof(
+			"cube_perf component=cubelet operation=create phase=network-prepare netns=%s interface=%s tap=%s ts_mono_us=%d duration_us=%d success=%t",
+			netnsPath, interfaceName, tapName, monotime.Micros(), time.Since(started).Microseconds(), err == nil,
+		)
+	}()
 	if _, err := os.Stat(netnsPath); err != nil {
 		return nil, err
 	}
@@ -134,7 +151,8 @@ func (n *linuxNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, ta
 			return nil, err
 		}
 	}
-	return &runtimev1.NetworkAttachment{TapName: tapName, GuestInterfaceName: "eth0", Mac: links[0].Address, Mtu: links[0].MTU, Ips: ips, Routes: routes, Neighbors: neighbors}, nil
+	attachment = &runtimev1.NetworkAttachment{TapName: tapName, GuestInterfaceName: "eth0", Mac: links[0].Address, Mtu: links[0].MTU, Ips: ips, Routes: routes, Neighbors: neighbors}
+	return attachment, nil
 }
 
 func (n *linuxNetwork) ensureIngress(ctx context.Context, netnsPath, device string) error {
