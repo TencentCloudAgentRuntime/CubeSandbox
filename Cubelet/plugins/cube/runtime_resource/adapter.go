@@ -110,7 +110,11 @@ var _ runtimeservice.Adapter = (*adapter)(nil)
 // the implementation details private while allowing a standalone service to
 // exercise the exact asset, network, TAP, and cleanup path.
 func NewNodeAdapter(stateDir string, assets Assets) (runtimeservice.Adapter, error) {
-	return newAdapter(stateDir, assets, newLinuxNetwork())
+	network, err := newNodeNetwork()
+	if err != nil {
+		return nil, err
+	}
+	return newAdapter(stateDir, assets, network)
 }
 
 func newAdapter(stateDir string, assets Assets, network NetworkOps) (*adapter, error) {

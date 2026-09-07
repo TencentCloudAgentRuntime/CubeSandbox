@@ -97,6 +97,7 @@ type scriptedRunner struct {
 	ipv6Only         bool
 	dualStack        bool
 	gatewayHostRoute bool
+	clsact           bool
 }
 
 func (r *scriptedRunner) Run(_ context.Context, _ string, command ...string) ([]byte, error) {
@@ -139,6 +140,11 @@ func (r *scriptedRunner) Run(_ context.Context, _ string, command ...string) ([]
 			return []byte(`[{"dst":"10.0.0.1","lladdr":"02:00:00:00:00:02","dev":"eth0"},{"dst":"fe80::1","lladdr":"02:00:00:00:00:06","dev":"eth0"}]`), nil
 		}
 		return []byte(`[{"dst":"10.0.0.1","lladdr":"02:00:00:00:00:02","dev":"eth0"}]`), nil
+	case "tc qdisc show dev eth0", "tc qdisc show dev cb123":
+		if r.clsact {
+			return []byte("qdisc clsact ffff: parent ffff:fff1"), nil
+		}
+		return nil, nil
 	default:
 		return nil, nil
 	}
@@ -243,6 +249,28 @@ func TestLinuxNetworkReleaseDeletesOnlyReservedPreferenceAndTap(t *testing.T) {
 		"tc filter del dev eth0 parent ffff: pref " + tcPreference,
 		"tc filter del dev cb123 parent ffff: pref " + tcPreference,
 		"ip tuntap del dev cb123 mode tap multi_queue",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("missing %q in commands:\n%s", expected, joined)
+		}
+	}
+}
+
+func TestLinuxCommandNetworkUsesClsactIngressParent(t *testing.T) {
+	runner := &scriptedRunner{clsact: true}
+	network := &linuxNetwork{runner: runner}
+	if _, err := network.Prepare(context.Background(), t.TempDir(), "eth0", "cb123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := network.Release(context.Background(), t.TempDir(), "eth0", "cb123"); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	for _, expected := range []string{
+		"tc filter replace dev eth0 parent ffff:fff2",
+		"tc filter replace dev cb123 parent ffff:fff2",
+		"tc filter del dev eth0 parent ffff:fff2 pref " + tcPreference,
+		"tc filter del dev cb123 parent ffff:fff2 pref " + tcPreference,
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("missing %q in commands:\n%s", expected, joined)

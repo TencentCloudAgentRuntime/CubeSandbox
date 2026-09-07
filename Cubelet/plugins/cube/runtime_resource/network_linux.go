@@ -102,7 +102,7 @@ func (n *linuxNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, ta
 			return
 		}
 		trace.Addf(
-			"cube_perf component=cubelet operation=create phase=network-prepare sandbox_id=%s pod_uid=%s operation_id=%s netns=%s interface=%s tap=%s ts_mono_us=%d duration_us=%d success=%t",
+			"cube_perf component=cubelet operation=create phase=network-prepare backend=command sandbox_id=%s pod_uid=%s operation_id=%s netns=%s interface=%s tap=%s ts_mono_us=%d duration_us=%d success=%t",
 			identity.sandboxID, identity.podUID, identity.operationID, netnsPath, interfaceName, tapName, monotime.Micros(), time.Since(started).Microseconds(), err == nil,
 		)
 	}()
@@ -149,14 +149,18 @@ func (n *linuxNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, ta
 	// Once the catch-all tc filter is installed, ARP/NDP replies are delivered
 	// to the guest instead of the host network stack and cannot populate the
 	// namespace neighbor table used to construct the guest attachment.
-	if err := n.ensureIngress(ctx, netnsPath, interfaceName); err != nil {
+	interfaceParent, err := n.ensureIngress(ctx, netnsPath, interfaceName)
+	if err != nil {
 		return nil, err
 	}
-	if err := n.ensureIngress(ctx, netnsPath, tapName); err != nil {
+	tapParent, err := n.ensureIngress(ctx, netnsPath, tapName)
+	if err != nil {
 		return nil, err
 	}
-	for _, pair := range [][2]string{{interfaceName, tapName}, {tapName, interfaceName}} {
-		if _, err := n.runner.Run(ctx, netnsPath, "tc", "filter", "replace", "dev", pair[0], "parent", "ffff:", "protocol", "all", "pref", tcPreference, "u32", "match", "u8", "0", "0", "action", "mirred", "egress", "redirect", "dev", pair[1]); err != nil {
+	for _, redirect := range []struct{ source, target, parent string }{
+		{interfaceName, tapName, interfaceParent}, {tapName, interfaceName, tapParent},
+	} {
+		if _, err := n.runner.Run(ctx, netnsPath, "tc", "filter", "replace", "dev", redirect.source, "parent", redirect.parent, "protocol", "all", "pref", tcPreference, "u32", "match", "u8", "0", "0", "action", "mirred", "egress", "redirect", "dev", redirect.target); err != nil {
 			return nil, err
 		}
 	}
@@ -164,13 +168,16 @@ func (n *linuxNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, ta
 	return attachment, nil
 }
 
-func (n *linuxNetwork) ensureIngress(ctx context.Context, netnsPath, device string) error {
+func (n *linuxNetwork) ensureIngress(ctx context.Context, netnsPath, device string) (string, error) {
 	output, _ := n.runner.Run(ctx, netnsPath, "tc", "qdisc", "show", "dev", device)
-	if strings.Contains(string(output), "ingress ffff:") || strings.Contains(string(output), "clsact ffff:") {
-		return nil
+	if strings.Contains(string(output), "clsact ffff:") {
+		return "ffff:fff2", nil
+	}
+	if strings.Contains(string(output), "ingress ffff:") {
+		return "ffff:", nil
 	}
 	_, err := n.runner.Run(ctx, netnsPath, "tc", "qdisc", "add", "dev", device, "ingress")
-	return err
+	return "ffff:", err
 }
 
 func (n *linuxNetwork) addresses(ctx context.Context, netnsPath, device string) ([]string, error) {
@@ -367,8 +374,13 @@ func (n *linuxNetwork) Release(ctx context.Context, netnsPath, interfaceName, ta
 	} else if err != nil {
 		return err
 	}
-	_, _ = n.runner.Run(ctx, netnsPath, "tc", "filter", "del", "dev", interfaceName, "parent", "ffff:", "pref", tcPreference)
-	_, _ = n.runner.Run(ctx, netnsPath, "tc", "filter", "del", "dev", tapName, "parent", "ffff:", "pref", tcPreference)
+	for _, device := range []string{interfaceName, tapName} {
+		parent := "ffff:"
+		if output, _ := n.runner.Run(ctx, netnsPath, "tc", "qdisc", "show", "dev", device); strings.Contains(string(output), "clsact ffff:") {
+			parent = "ffff:fff2"
+		}
+		_, _ = n.runner.Run(ctx, netnsPath, "tc", "filter", "del", "dev", device, "parent", parent, "pref", tcPreference)
+	}
 	_, err := n.runner.Run(ctx, netnsPath, "ip", "tuntap", "del", "dev", tapName, "mode", "tap", "multi_queue")
 	if err != nil && !strings.Contains(err.Error(), "Cannot find device") {
 		return err
@@ -382,6 +394,10 @@ type tapOpenResult struct {
 }
 
 func (n *linuxNetwork) Open(netnsPath, tapName string) (*os.File, error) {
+	return openTapInNetworkNamespace(netnsPath, tapName)
+}
+
+func openTapInNetworkNamespace(netnsPath, tapName string) (*os.File, error) {
 	result := make(chan tapOpenResult, 1)
 	go func() {
 		goruntime.LockOSThread()
