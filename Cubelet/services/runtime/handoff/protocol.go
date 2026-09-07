@@ -6,6 +6,7 @@
 package handoff
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"syscall"
 
 	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/kmutex"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -44,12 +46,13 @@ type Binding struct {
 type TapOpener func(binding Binding) (*os.File, error)
 
 // Registry atomically fences FD acquisition against release and replacement.
-// The mutex is intentionally held through TapOpener so invalidation cannot race
-// between identity validation and FD duplication.
+// A keyed lock is held through TapOpener for one sandbox; the map lock protects
+// only lookup/publication so unrelated sandbox FD handoffs can overlap.
 type Registry struct {
-	mu      sync.Mutex
-	current map[string]Binding
-	opener  TapOpener
+	operations kmutex.KeyedLocker
+	mu         sync.RWMutex
+	current    map[string]Binding
+	opener     TapOpener
 }
 
 func NewRegistry(opener TapOpener) (*Registry, error) {
@@ -57,8 +60,9 @@ func NewRegistry(opener TapOpener) (*Registry, error) {
 		return nil, errors.New("fd handoff tap opener is nil")
 	}
 	return &Registry{
-		current: make(map[string]Binding),
-		opener:  opener,
+		operations: kmutex.New(),
+		current:    make(map[string]Binding),
+		opener:     opener,
 	}, nil
 }
 
@@ -68,6 +72,10 @@ func (r *Registry) Publish(binding Binding) error {
 	if err := validateBinding(binding); err != nil {
 		return err
 	}
+	if err := r.operations.Lock(context.Background(), binding.SandboxID); err != nil {
+		return err
+	}
+	defer r.operations.Unlock(binding.SandboxID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if current, ok := r.current[binding.SandboxID]; ok && current != binding {
@@ -80,6 +88,10 @@ func (r *Registry) Publish(binding Binding) error {
 
 // Invalidate removes exactly the matching current binding before cleanup.
 func (r *Registry) Invalidate(binding Binding) bool {
+	if err := r.operations.Lock(context.Background(), binding.SandboxID); err != nil {
+		return false
+	}
+	defer r.operations.Unlock(binding.SandboxID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	current, ok := r.current[binding.SandboxID]
@@ -97,10 +109,14 @@ func (r *Registry) Acquire(request *runtimev1.FDHandoffRequestV1) (*os.File, run
 		return nil, runtimev1.FDHandoffCode_FD_HANDOFF_CODE_MALFORMED, err
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	if err := r.operations.Lock(context.Background(), request.GetSandboxId()); err != nil {
+		return nil, runtimev1.FDHandoffCode_FD_HANDOFF_CODE_INTERNAL, err
+	}
+	defer r.operations.Unlock(request.GetSandboxId())
 
+	r.mu.RLock()
 	current, ok := r.current[request.GetSandboxId()]
+	r.mu.RUnlock()
 	if !ok ||
 		current.Generation != request.GetGeneration() ||
 		current.LeaseID != request.GetLeaseId() ||
@@ -219,7 +235,9 @@ func SendResponse(conn *net.UnixConn, response *runtimev1.FDHandoffResponseV1, f
 }
 
 // FenceCurrent serializes a durable lifecycle transition with FD acquisition.
-// Lock order is Registry.mu followed by the durable store lock taken by persist.
+// Lock order is Registry.operations[sandbox] followed by the durable Store
+// operation lock for that sandbox. The registry map lock is never held while
+// persist performs filesystem I/O.
 // A definitely-uncommitted failure leaves READY published. A commit-unknown
 // failure removes it fail-closed; success also removes it before blocked Acquire continues.
 func (r *Registry) FenceCurrent(binding Binding, persist func() error) error {
@@ -229,20 +247,28 @@ func (r *Registry) FenceCurrent(binding Binding, persist func() error) error {
 	if persist == nil {
 		return errors.New("fd handoff durable fence callback is nil")
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	if err := r.operations.Lock(context.Background(), binding.SandboxID); err != nil {
+		return err
+	}
+	defer r.operations.Unlock(binding.SandboxID)
+	r.mu.RLock()
 	current, ok := r.current[binding.SandboxID]
+	r.mu.RUnlock()
 	if !ok || current != binding {
 		return ErrStaleLease
 	}
 	if err := persist(); err != nil {
 		var outcome interface{ CommitUnknown() bool }
 		if errors.As(err, &outcome) && outcome.CommitUnknown() {
+			r.mu.Lock()
 			delete(r.current, binding.SandboxID)
+			r.mu.Unlock()
 		}
 		return err
 	}
+	r.mu.Lock()
 	delete(r.current, binding.SandboxID)
+	r.mu.Unlock()
 	return nil
 }
 
@@ -252,8 +278,12 @@ func (r *Registry) EnsureAbsent(sandboxID string) error {
 	if sandboxID == "" {
 		return fmt.Errorf("%w: sandbox id is empty", ErrMalformedRequest)
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	if err := r.operations.Lock(context.Background(), sandboxID); err != nil {
+		return err
+	}
+	defer r.operations.Unlock(sandboxID)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if _, ok := r.current[sandboxID]; ok {
 		return fmt.Errorf("sandbox %q unexpectedly has a published FD binding", sandboxID)
 	}

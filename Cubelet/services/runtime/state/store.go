@@ -5,6 +5,7 @@
 package state
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -19,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/kmutex"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/monotime"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -148,10 +150,11 @@ func persistenceFailure(stage string, commitUnknown bool, err error) error {
 }
 
 type Store struct {
-	dir      string
-	generate ValueGenerator
-	hooks    PersistenceHooks
-	mu       sync.Mutex
+	dir        string
+	generate   ValueGenerator
+	hooks      PersistenceHooks
+	operations kmutex.KeyedLocker
+	generateMu sync.Mutex
 }
 
 func Open(dir string, generator ValueGenerator, options ...OpenOption) (*Store, error) {
@@ -164,7 +167,7 @@ func Open(dir string, generator ValueGenerator, options ...OpenOption) (*Store, 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	store := &Store{dir: dir, generate: generator}
+	store := &Store{dir: dir, generate: generator, operations: kmutex.New()}
 	for _, option := range options {
 		if option != nil {
 			option(store)
@@ -209,8 +212,8 @@ func (s *Store) Prepare(request PrepareRequest) (*PrepareResult, error) {
 		return nil, status.Error(codes.InvalidArgument, "prepare fields must be non-zero")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockSandbox(request.SandboxID)
+	defer unlock()
 
 	record, err := s.loadOrNew(request.SandboxID)
 	if err != nil {
@@ -244,7 +247,9 @@ func (s *Store) Prepare(request PrepareRequest) (*PrepareResult, error) {
 	}
 
 	leaseID := ExpectedLeaseIDForPrepare(request)
+	s.generateMu.Lock()
 	token, err := s.generate()
+	s.generateMu.Unlock()
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
@@ -277,8 +282,8 @@ func (s *Store) MarkReady(sandboxID string, generation uint64, leaseID, networkH
 	if sandboxID == "" || generation == 0 || leaseID == "" || networkHandle == "" {
 		return nil, status.Error(codes.InvalidArgument, "ready fields must be non-zero")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockSandbox(sandboxID)
+	defer unlock()
 	record, err := s.load(sandboxID)
 	if err != nil {
 		return nil, stateLoadError(err)
@@ -310,8 +315,8 @@ func (s *Store) BeginRelease(request ReleaseRequest) (*ReleaseResult, error) {
 	if request.SandboxID == "" || request.Generation == 0 || request.LeaseID == "" || request.IdempotencyKey == "" {
 		return nil, status.Error(codes.InvalidArgument, "release fields must be non-zero")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockSandbox(request.SandboxID)
+	defer unlock()
 	record, err := s.loadOrNew(request.SandboxID)
 	if err != nil {
 		return nil, stateLoadError(err)
@@ -383,8 +388,8 @@ func (s *Store) ConfirmReleaseDurable(request ReleaseRequest) (*ReleaseResult, e
 	if request.SandboxID == "" || request.Generation == 0 || request.LeaseID == "" || request.IdempotencyKey == "" {
 		return nil, status.Error(codes.InvalidArgument, "release confirmation fields must be non-zero")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockSandbox(request.SandboxID)
+	defer unlock()
 	record, err := s.load(request.SandboxID)
 	if err != nil {
 		return nil, stateLoadError(err)
@@ -413,8 +418,8 @@ func (s *Store) CompleteRelease(request ReleaseRequest) error {
 	if request.SandboxID == "" || request.Generation == 0 || request.LeaseID == "" || request.IdempotencyKey == "" {
 		return status.Error(codes.InvalidArgument, "complete release fields must be non-zero")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockSandbox(request.SandboxID)
+	defer unlock()
 	record, err := s.load(request.SandboxID)
 	if err != nil {
 		return stateLoadError(err)
@@ -450,8 +455,8 @@ func (s *Store) AbandonPrepare(sandboxID string, generation uint64, leaseID stri
 	if sandboxID == "" || generation == 0 || leaseID == "" {
 		return status.Error(codes.InvalidArgument, "abandon fields must be non-zero")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockSandbox(sandboxID)
+	defer unlock()
 	record, err := s.load(sandboxID)
 	if err != nil {
 		return stateLoadError(err)
@@ -474,8 +479,6 @@ func (s *Store) AbandonPrepare(sandboxID string, generation uint64, leaseID stri
 }
 
 func (s *Store) ListSandboxIDs() ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
@@ -506,8 +509,8 @@ func (s *Store) Inspect(sandboxID string) (*Record, error) {
 	if sandboxID == "" {
 		return nil, status.Error(codes.InvalidArgument, "sandbox id is empty")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockSandbox(sandboxID)
+	defer unlock()
 	record, err := s.load(sandboxID)
 	if err != nil {
 		return nil, stateLoadError(err)
@@ -519,6 +522,16 @@ func (s *Store) Inspect(sandboxID string) (*Record, error) {
 	copy.Tombstones = cloneTombstones(record.Tombstones)
 	copy.IdempotencyKeys = cloneKeys(record.IdempotencyKeys)
 	return &copy, nil
+}
+
+// lockSandbox keeps one sandbox's read-modify-write sequence linearizable.
+// context.Background cannot cancel, so Lock cannot fail; keeping this helper
+// non-error-returning makes it difficult for callers to forget the unlock.
+func (s *Store) lockSandbox(sandboxID string) func() {
+	if err := s.operations.Lock(context.Background(), sandboxID); err != nil {
+		panic(fmt.Sprintf("lock runtime state for sandbox %q: %v", sandboxID, err))
+	}
+	return func() { s.operations.Unlock(sandboxID) }
 }
 
 func (s *Store) loadOrNew(sandboxID string) (*Record, error) {

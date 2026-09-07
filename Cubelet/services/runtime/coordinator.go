@@ -4,10 +4,12 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
 
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/kmutex"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/monotime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
@@ -27,17 +29,18 @@ type LifecycleStore interface {
 	ListSandboxIDs() ([]string, error)
 }
 
-// Coordinator freezes lifecycle lock order as:
+// Coordinator freezes per-sandbox lifecycle lock order as:
 //
-//	Coordinator.mu -> handoff.Registry.mu -> state.Store.mu
+//	Coordinator.operations[sandbox] -> handoff.Registry.operations[sandbox] -> state.Store.operations[sandbox]
 //
-// Acquire takes only Registry.mu. Store methods never call back into Registry.
+// Registry and Store map locks protect only in-memory bookkeeping and are never
+// held across callbacks or filesystem I/O. Store methods never call Registry.
 type Coordinator struct {
-	mu        sync.Mutex
-	store     LifecycleStore
-	handoff   *handoff.Registry
-	uncertain map[string]state.ReleaseRequest
-	confirmed map[string]state.ReleaseRequest
+	operations kmutex.KeyedLocker
+	store      LifecycleStore
+	handoff    *handoff.Registry
+	uncertain  sync.Map
+	confirmed  sync.Map
 }
 
 func NewCoordinator(store LifecycleStore, registry *handoff.Registry) (*Coordinator, error) {
@@ -45,17 +48,17 @@ func NewCoordinator(store LifecycleStore, registry *handoff.Registry) (*Coordina
 		return nil, errors.New("runtime lifecycle store/registry is nil")
 	}
 	return &Coordinator{
-		store: store, handoff: registry,
-		uncertain: make(map[string]state.ReleaseRequest),
-		confirmed: make(map[string]state.ReleaseRequest),
+		operations: kmutex.New(), store: store, handoff: registry,
 	}, nil
 }
 
 func (c *Coordinator) Prepare(request state.PrepareRequest) (result *state.PrepareResult, err error) {
 	totalStart := time.Now()
 	lockStart := totalStart
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := c.operations.Lock(context.Background(), request.SandboxID); err != nil {
+		return nil, err
+	}
+	defer c.operations.Unlock(request.SandboxID)
 	lockWait := time.Since(lockStart)
 	storeStart := time.Now()
 	defer func() {
@@ -73,8 +76,10 @@ func (c *Coordinator) Prepare(request state.PrepareRequest) (result *state.Prepa
 
 // AbandonPrepare is called only after every PREPARING side effect is rolled back.
 func (c *Coordinator) AbandonPrepare(sandboxID string, generation uint64, leaseID string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := c.operations.Lock(context.Background(), sandboxID); err != nil {
+		return err
+	}
+	defer c.operations.Unlock(sandboxID)
 	if err := c.handoff.EnsureAbsent(sandboxID); err != nil {
 		return err
 	}
@@ -87,8 +92,10 @@ func (c *Coordinator) AbandonPrepare(sandboxID string, generation uint64, leaseI
 func (c *Coordinator) MarkReadyAndPublish(sandboxID string, generation uint64, leaseID, networkHandle string, trace *monotime.TraceBuffer) (lease *state.Lease, err error) {
 	totalStart := time.Now()
 	lockStart := totalStart
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := c.operations.Lock(context.Background(), sandboxID); err != nil {
+		return nil, err
+	}
+	defer c.operations.Unlock(sandboxID)
 	lockWait := time.Since(lockStart)
 	storeStart := time.Now()
 	defer func() {
@@ -116,21 +123,24 @@ func (c *Coordinator) MarkReadyAndPublish(sandboxID string, generation uint64, l
 }
 
 // BeginReleaseAndFence is the single Release linearization boundary. For the
-// current READY lease it holds Registry.mu while Store.BeginRelease fsyncs the
-// RELEASING record, then removes the binding before unlocking. Thus a duplicate
-// already in progress completes first; after this method returns no new one can.
+// current READY lease it holds the Registry's sandbox lock while
+// Store.BeginRelease fsyncs the RELEASING record, then removes the binding
+// before unlocking. Thus a duplicate already in progress completes first;
+// after this method returns no new one can.
 func (c *Coordinator) BeginReleaseAndFence(request state.ReleaseRequest) (*state.ReleaseResult, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := c.operations.Lock(context.Background(), request.SandboxID); err != nil {
+		return nil, err
+	}
+	defer c.operations.Unlock(request.SandboxID)
 	record, err := c.store.Inspect(request.SandboxID)
 	if status.Code(err) == codes.NotFound {
 		result, beginErr := c.store.BeginRelease(request)
 		if state.IsCommitUnknown(beginErr) {
-			c.uncertain[request.SandboxID] = request
-			delete(c.confirmed, request.SandboxID)
+			c.uncertain.Store(request.SandboxID, request)
+			c.confirmed.Delete(request.SandboxID)
 		} else if beginErr == nil {
-			delete(c.uncertain, request.SandboxID)
-			delete(c.confirmed, request.SandboxID)
+			c.uncertain.Delete(request.SandboxID)
+			c.confirmed.Delete(request.SandboxID)
 		}
 		return result, beginErr
 	}
@@ -152,13 +162,13 @@ func (c *Coordinator) BeginReleaseAndFence(request state.ReleaseRequest) (*state
 			return persistErr
 		}); err != nil {
 			if state.IsCommitUnknown(err) {
-				c.uncertain[request.SandboxID] = request
-				delete(c.confirmed, request.SandboxID)
+				c.uncertain.Store(request.SandboxID, request)
+				c.confirmed.Delete(request.SandboxID)
 			}
 			return nil, err
 		}
-		delete(c.uncertain, request.SandboxID)
-		c.confirmed[request.SandboxID] = request
+		c.uncertain.Delete(request.SandboxID)
+		c.confirmed.Store(request.SandboxID, request)
 		return result, nil
 	}
 	// PREPARING has never been published. RELEASING and tombstone retries are
@@ -166,35 +176,39 @@ func (c *Coordinator) BeginReleaseAndFence(request state.ReleaseRequest) (*state
 	result, err := c.store.BeginRelease(request)
 	if err != nil {
 		if state.IsCommitUnknown(err) {
-			c.uncertain[request.SandboxID] = request
-			delete(c.confirmed, request.SandboxID)
+			c.uncertain.Store(request.SandboxID, request)
+			c.confirmed.Delete(request.SandboxID)
 		}
 		return nil, err
 	}
 	if record.Active != nil && record.Active.Generation == request.Generation &&
 		record.Active.LeaseID == request.LeaseID {
-		delete(c.uncertain, request.SandboxID)
-		c.confirmed[request.SandboxID] = request
+		c.uncertain.Delete(request.SandboxID)
+		c.confirmed.Store(request.SandboxID, request)
 	} else {
-		delete(c.uncertain, request.SandboxID)
-		delete(c.confirmed, request.SandboxID)
+		c.uncertain.Delete(request.SandboxID)
+		c.confirmed.Delete(request.SandboxID)
 	}
 	return result, nil
 }
 
 func (c *Coordinator) CompleteRelease(request state.ReleaseRequest) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, ok := c.uncertain[request.SandboxID]; ok {
+	if err := c.operations.Lock(context.Background(), request.SandboxID); err != nil {
+		return err
+	}
+	defer c.operations.Unlock(request.SandboxID)
+	if _, ok := c.uncertain.Load(request.SandboxID); ok {
 		return status.Error(codes.FailedPrecondition, "release durability is commit-unknown; resynchronize before cleanup")
 	}
-	if confirmed, ok := c.confirmed[request.SandboxID]; !ok || confirmed != request {
+	confirmedValue, ok := c.confirmed.Load(request.SandboxID)
+	confirmed, valid := confirmedValue.(state.ReleaseRequest)
+	if !ok || !valid || confirmed != request {
 		return status.Error(codes.FailedPrecondition, "release durability is not confirmed; recover before cleanup")
 	}
 	if err := c.store.CompleteRelease(request); err != nil {
 		return err
 	}
-	delete(c.confirmed, request.SandboxID)
+	c.confirmed.Delete(request.SandboxID)
 	return nil
 }
 
@@ -202,8 +216,10 @@ func (c *Coordinator) CompleteRelease(request state.ReleaseRequest) error {
 // is republished from durable identity; PREPARING/RELEASING/released remain
 // absent, so a crash between persist and invalidate cannot reopen a lease.
 func (c *Coordinator) RecoverSandbox(sandboxID string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := c.operations.Lock(context.Background(), sandboxID); err != nil {
+		return err
+	}
+	defer c.operations.Unlock(sandboxID)
 	record, err := c.store.Inspect(sandboxID)
 	if err != nil {
 		return err
@@ -212,8 +228,8 @@ func (c *Coordinator) RecoverSandbox(sandboxID string) error {
 		if err := c.handoff.Publish(bindingFromLease(sandboxID, record.Active)); err != nil {
 			return err
 		}
-		delete(c.uncertain, sandboxID)
-		delete(c.confirmed, sandboxID)
+		c.uncertain.Delete(sandboxID)
+		c.confirmed.Delete(sandboxID)
 		return nil
 	}
 	if err := c.handoff.EnsureAbsent(sandboxID); err != nil {
@@ -227,8 +243,8 @@ func (c *Coordinator) RecoverSandbox(sandboxID string) error {
 		_, err := c.confirmReleaseDurable(request)
 		return err
 	}
-	delete(c.uncertain, sandboxID)
-	delete(c.confirmed, sandboxID)
+	c.uncertain.Delete(sandboxID)
+	c.confirmed.Delete(sandboxID)
 	return nil
 }
 
@@ -236,13 +252,13 @@ func (c *Coordinator) confirmReleaseDurable(request state.ReleaseRequest) (*stat
 	result, err := c.store.ConfirmReleaseDurable(request)
 	if err != nil {
 		if state.IsCommitUnknown(err) {
-			c.uncertain[request.SandboxID] = request
-			delete(c.confirmed, request.SandboxID)
+			c.uncertain.Store(request.SandboxID, request)
+			c.confirmed.Delete(request.SandboxID)
 		}
 		return nil, err
 	}
-	delete(c.uncertain, request.SandboxID)
-	c.confirmed[request.SandboxID] = request
+	c.uncertain.Delete(request.SandboxID)
+	c.confirmed.Store(request.SandboxID, request)
 	return result, nil
 }
 

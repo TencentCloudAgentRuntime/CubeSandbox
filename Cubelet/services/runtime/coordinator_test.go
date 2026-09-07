@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -71,6 +72,161 @@ func readyCoordinator(t *testing.T, opener handoff.TapOpener, options ...state.O
 		IdempotencyKey: "release-1",
 	}
 	return coordinator, store, registry, binding, release
+}
+
+func TestCoordinatorDifferentSandboxesPrepareConcurrently(t *testing.T) {
+	entered := make(chan struct{}, 2)
+	proceed := make(chan struct{})
+	store, err := state.Open(t.TempDir(), coordinatorGenerator(), state.WithPersistenceHooks(state.PersistenceHooks{
+		BeforeRename: func() error {
+			entered <- struct{}{}
+			<-proceed
+			return nil
+		},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := handoff.NewRegistry(func(handoff.Binding) (*os.File, error) { return os.Open("/dev/null") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := NewCoordinator(store, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results := make(chan error, 2)
+	for _, sandboxID := range []string{"sandbox-a", "sandbox-b"} {
+		sandboxID := sandboxID
+		go func() {
+			_, err := coordinator.Prepare(state.PrepareRequest{
+				SandboxID: sandboxID, Generation: 1,
+				IdempotencyKey: "prepare-" + sandboxID, PayloadDigest: "digest-" + sandboxID,
+			})
+			results <- err
+		}()
+	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			close(proceed)
+			t.Fatal("different sandbox Coordinator operations did not overlap")
+		}
+	}
+	close(proceed)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestCoordinatorConcurrentReleaseCommitUnknownIsSandboxScoped(t *testing.T) {
+	armed := false
+	var parentSyncCalls atomic.Int32
+	parentSyncEntered := make(chan int32, 2)
+	allowParentSync := make(chan struct{})
+	store, err := state.Open(t.TempDir(), coordinatorGenerator(), state.WithPersistenceHooks(state.PersistenceHooks{
+		BeforeParentSync: func() error {
+			if armed {
+				sequence := parentSyncCalls.Add(1)
+				if sequence <= 2 {
+					parentSyncEntered <- sequence
+					<-allowParentSync
+				}
+				if sequence == 1 {
+					return errors.New("injected first-sandbox commit-unknown")
+				}
+			}
+			return nil
+		},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := handoff.NewRegistry(func(handoff.Binding) (*os.File, error) { return os.Open("/dev/null") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := NewCoordinator(store, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	releases := make(map[string]state.ReleaseRequest)
+	for _, sandboxID := range []string{"sandbox-a", "sandbox-b"} {
+		prepared, err := coordinator.Prepare(state.PrepareRequest{
+			SandboxID: sandboxID, Generation: 1,
+			IdempotencyKey: "prepare-" + sandboxID, PayloadDigest: "digest-" + sandboxID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lease, err := coordinator.MarkReadyAndPublish(sandboxID, 1, prepared.Lease.LeaseID, "network-"+sandboxID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases[sandboxID] = state.ReleaseRequest{
+			SandboxID: sandboxID, Generation: 1, LeaseID: lease.LeaseID,
+			IdempotencyKey: "release-" + sandboxID,
+		}
+	}
+	armed = true
+	type releaseResult struct {
+		sandboxID string
+		err       error
+	}
+	results := make(chan releaseResult, 2)
+	for sandboxID, release := range releases {
+		sandboxID, release := sandboxID, release
+		go func() {
+			_, err := coordinator.BeginReleaseAndFence(release)
+			results <- releaseResult{sandboxID: sandboxID, err: err}
+		}()
+	}
+	seenSequences := make(map[int32]bool)
+	for range 2 {
+		select {
+		case sequence := <-parentSyncEntered:
+			seenSequences[sequence] = true
+		case <-time.After(5 * time.Second):
+			close(allowParentSync)
+			t.Fatal("different sandbox release fences did not overlap in parent sync")
+		}
+	}
+	if !seenSequences[1] || !seenSequences[2] {
+		t.Fatalf("parent sync sequences=%v", seenSequences)
+	}
+	close(allowParentSync)
+	var failed, succeeded string
+	for range 2 {
+		result := <-results
+		if result.err == nil {
+			succeeded = result.sandboxID
+		} else if state.IsCommitUnknown(result.err) {
+			failed = result.sandboxID
+		} else {
+			t.Fatalf("release %s: %v", result.sandboxID, result.err)
+		}
+	}
+	if failed == "" || succeeded == "" || failed == succeeded {
+		t.Fatalf("failed=%q succeeded=%q", failed, succeeded)
+	}
+	if err := coordinator.CompleteRelease(releases[succeeded]); err != nil {
+		t.Fatalf("complete unaffected sandbox %s: %v", succeeded, err)
+	}
+	if err := coordinator.CompleteRelease(releases[failed]); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("commit-unknown sandbox %s complete error=%v code=%s", failed, err, status.Code(err))
+	}
+	successRecord, err := store.Inspect(succeeded)
+	if err != nil || successRecord.Active != nil {
+		t.Fatalf("successful sandbox record=%+v err=%v", successRecord, err)
+	}
+	failedRecord, err := store.Inspect(failed)
+	if err != nil || failedRecord.Active == nil || failedRecord.Active.Phase != state.PhaseReleasing {
+		t.Fatalf("commit-unknown sandbox record=%+v err=%v", failedRecord, err)
+	}
 }
 
 func TestCoordinatorReleaseLinearizesWithInFlightFDDuplicate(t *testing.T) {

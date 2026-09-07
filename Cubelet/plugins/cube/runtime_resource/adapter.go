@@ -19,6 +19,7 @@ import (
 
 	"github.com/moby/sys/mountinfo"
 	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/kmutex"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/monotime"
 	runtimeservice "github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
@@ -70,12 +71,14 @@ const (
 )
 
 type adapter struct {
-	mu          sync.Mutex
+	operations  kmutex.KeyedLocker
+	tapMu       sync.Mutex
 	stateDir    string
 	assets      Assets
 	network     NetworkOps
 	persistHook func(prepareStage, *diskRecord) error
 	tapFiles    map[string]*os.File
+	closeTap    func(*os.File) error
 	cleanup     sharedRootCleanupOps
 }
 
@@ -140,8 +143,8 @@ func newAdapter(stateDir string, assets Assets, network NetworkOps) (*adapter, e
 	}
 	assets.SharedRootBase = filepath.Clean(sharedRootBase)
 	return &adapter{
-		stateDir: stateDir, assets: assets, network: network, tapFiles: make(map[string]*os.File),
-		cleanup: defaultSharedRootCleanupOps(),
+		operations: kmutex.New(), stateDir: stateDir, assets: assets, network: network, tapFiles: make(map[string]*os.File),
+		closeTap: func(file *os.File) error { return file.Close() }, cleanup: defaultSharedRootCleanupOps(),
 	}, nil
 }
 
@@ -150,8 +153,10 @@ func (a *adapter) Prepare(ctx context.Context, request *runtimev1.PrepareSandbox
 	lockStart := totalStart
 	ctx = withStartupTraceIdentity(ctx, request)
 	trace := monotime.TraceBufferFromContext(ctx)
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	if err := a.operations.Lock(ctx, request.GetSandboxId()); err != nil {
+		return nil, err
+	}
+	defer a.operations.Unlock(request.GetSandboxId())
 	lockWait := time.Since(lockStart)
 	defer func() {
 		if !trace.Enabled() {
@@ -308,11 +313,11 @@ func (a *adapter) validateSharedRoot(root string) (string, error) {
 }
 
 func (a *adapter) rollbackPreparing(ctx context.Context, record *diskRecord) error {
-	if file := a.tapFiles[record.SandboxID]; file != nil {
-		if err := file.Close(); err != nil {
+	if file := a.getTap(record.SandboxID); file != nil {
+		if err := a.closeTapFile(file); err != nil {
 			return err
 		}
-		delete(a.tapFiles, record.SandboxID)
+		a.removeTap(record.SandboxID, file)
 	}
 	if err := a.cleanupSharedRoot(record.Assets.GetSharedRoot()); err != nil {
 		return err
@@ -337,8 +342,10 @@ func (a *adapter) persistStage(record *diskRecord, stage prepareStage, trace *mo
 }
 
 func (a *adapter) Release(ctx context.Context, request state.ReleaseRequest, networkHandle string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	if err := a.operations.Lock(ctx, request.SandboxID); err != nil {
+		return err
+	}
+	defer a.operations.Unlock(request.SandboxID)
 	record, err := a.load(request.SandboxID)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -352,11 +359,11 @@ func (a *adapter) Release(ctx context.Context, request state.ReleaseRequest, net
 	if networkHandle != "" && record.NetworkHandle != networkHandle {
 		return errors.New("release network handle does not match runtime resource record")
 	}
-	if file := a.tapFiles[record.SandboxID]; file != nil {
-		if err := file.Close(); err != nil {
+	if file := a.getTap(record.SandboxID); file != nil {
+		if err := a.closeTapFile(file); err != nil {
 			return err
 		}
-		delete(a.tapFiles, record.SandboxID)
+		a.removeTap(record.SandboxID, file)
 	}
 	if record.Assets != nil {
 		if err := a.cleanupSharedRoot(record.Assets.GetSharedRoot()); err != nil {
@@ -484,9 +491,11 @@ func ignorableUnmountError(err error) bool {
 	return errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOENT)
 }
 
-func (a *adapter) Inspect(_ context.Context, sandboxID string, lease state.Lease) (*runtimev1.PreparedSandbox, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+func (a *adapter) Inspect(ctx context.Context, sandboxID string, lease state.Lease) (*runtimev1.PreparedSandbox, error) {
+	if err := a.operations.Lock(ctx, sandboxID); err != nil {
+		return nil, err
+	}
+	defer a.operations.Unlock(sandboxID)
 	record, err := a.load(sandboxID)
 	if err != nil {
 		return nil, err
@@ -508,8 +517,10 @@ func (a *adapter) OpenTap(binding handoff.Binding) (descriptorFile *os.File, err
 	var lockWait, loadTime, openTime, duplicateTime time.Duration
 	trace := monotime.NewTraceBuffer()
 	defer trace.Flush()
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	if err := a.operations.Lock(context.Background(), binding.SandboxID); err != nil {
+		return nil, err
+	}
+	defer a.operations.Unlock(binding.SandboxID)
 	lockWait = time.Since(stageStart)
 	stageStart = time.Now()
 	defer func() {
@@ -531,27 +542,62 @@ func (a *adapter) OpenTap(binding handoff.Binding) (descriptorFile *os.File, err
 	}
 	loadTime = time.Since(stageStart)
 	stageStart = time.Now()
-	file := a.tapFiles[binding.SandboxID]
+	file := a.getTap(binding.SandboxID)
 	if file == nil {
 		file, err = a.network.Open(record.NetNSPath, record.TapName)
 		if err != nil {
 			return nil, err
 		}
-		a.tapFiles[binding.SandboxID] = file
+		a.setTap(binding.SandboxID, file)
 	}
 	openTime = time.Since(stageStart)
 	stageStart = time.Now()
-	descriptor, err := unix.FcntlInt(file.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	descriptor, err := duplicateTapFD(file.Fd())
 	if err != nil {
-		if a.tapFiles[binding.SandboxID] == file {
-			_ = file.Close()
-			delete(a.tapFiles, binding.SandboxID)
+		if a.removeTap(binding.SandboxID, file) {
+			_ = a.closeTapFile(file)
 		}
 		return nil, err
 	}
 	duplicateTime = time.Since(stageStart)
 	descriptorFile = os.NewFile(uintptr(descriptor), file.Name())
 	return descriptorFile, nil
+}
+
+var duplicateTapFD = func(fd uintptr) (int, error) {
+	return unix.FcntlInt(fd, unix.F_DUPFD_CLOEXEC, 0)
+}
+
+func (a *adapter) closeTapFile(file *os.File) error {
+	if a.closeTap != nil {
+		return a.closeTap(file)
+	}
+	return file.Close()
+}
+
+// TAP descriptors are owned by a sandbox operation lock. tapMu protects only
+// the Go map so unrelated sandboxes never hold it across netns work, open(2),
+// close(2), or descriptor duplication.
+func (a *adapter) getTap(sandboxID string) *os.File {
+	a.tapMu.Lock()
+	defer a.tapMu.Unlock()
+	return a.tapFiles[sandboxID]
+}
+
+func (a *adapter) setTap(sandboxID string, file *os.File) {
+	a.tapMu.Lock()
+	defer a.tapMu.Unlock()
+	a.tapFiles[sandboxID] = file
+}
+
+func (a *adapter) removeTap(sandboxID string, file *os.File) bool {
+	a.tapMu.Lock()
+	defer a.tapMu.Unlock()
+	if a.tapFiles[sandboxID] != file {
+		return false
+	}
+	delete(a.tapFiles, sandboxID)
+	return true
 }
 
 func (a *adapter) load(sandboxID string) (*diskRecord, error) {
