@@ -73,6 +73,7 @@
     - [PortMapping](#cubelet-services-cubebox-v1-PortMapping)
     - [PostStop](#cubelet-services-cubebox-v1-PostStop)
     - [PreStop](#cubelet-services-cubebox-v1-PreStop)
+    - [PreparedRootFS](#cubelet-services-cubebox-v1-PreparedRootFS)
     - [Probe](#cubelet-services-cubebox-v1-Probe)
     - [ProbeHandler](#cubelet-services-cubebox-v1-ProbeHandler)
     - [RLimit](#cubelet-services-cubebox-v1-RLimit)
@@ -87,6 +88,8 @@
     - [SELinuxOption](#cubelet-services-cubebox-v1-SELinuxOption)
     - [SandboxPathVolumeSource](#cubelet-services-cubebox-v1-SandboxPathVolumeSource)
     - [SandboxStorageInfo](#cubelet-services-cubebox-v1-SandboxStorageInfo)
+    - [SnapshotRuntimeRequest](#cubelet-services-cubebox-v1-SnapshotRuntimeRequest)
+    - [SnapshotRuntimeResponse](#cubelet-services-cubebox-v1-SnapshotRuntimeResponse)
     - [StorageOrphanEntry](#cubelet-services-cubebox-v1-StorageOrphanEntry)
     - [StorageVolumeInfo](#cubelet-services-cubebox-v1-StorageVolumeInfo)
     - [SysCall](#cubelet-services-cubebox-v1-SysCall)
@@ -534,6 +537,7 @@ Capability contains the container capabilities to add or drop
 | id | [string](#string) |  | container name use by cubebox |
 | hooks | [Hooks](#cubelet-services-cubebox-v1-Hooks) |  | Hooks for the container. |
 | oci_config | [OCIConfig](#cubelet-services-cubebox-v1-OCIConfig) |  | CDI |
+| prepared_rootfs | [PreparedRootFS](#cubelet-services-cubebox-v1-PreparedRootFS) |  | prepared_rootfs contains node-local read-only EROFS mounts prepared and integrity-checked by EROX. It bypasses image pull and unpack completely. |
 
 
 
@@ -1511,6 +1515,22 @@ resource contention and others.
 
 
 
+<a name="cubelet-services-cubebox-v1-PreparedRootFS"></a>
+
+### PreparedRootFS
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| image_mount | [string](#string) |  | Read-only mount of the base EROFS Image Manifest. |
+| rootfs_mount | [string](#string) |  | Optional read-only mount of a RootFS Snapshot Manifest. |
+
+
+
+
+
+
 <a name="cubelet-services-cubebox-v1-Probe"></a>
 
 ### Probe
@@ -1774,6 +1794,42 @@ for a single sandbox.
 | namespace | [string](#string) |  |  |
 | sandboxID | [string](#string) |  |  |
 | volumes | [StorageVolumeInfo](#cubelet-services-cubebox-v1-StorageVolumeInfo) | repeated |  |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-SnapshotRuntimeRequest"></a>
+
+### SnapshotRuntimeRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  |  |
+| sandboxID | [string](#string) |  |  |
+| staging_dir | [string](#string) |  | Absolute destination for the immutable Runtime staging directory. |
+| stop_after_snapshot | [bool](#bool) |  | Stop the VM task after the Runtime checkpoint is complete while keeping Cube and volume metadata available for storage snapshotting. |
+
+
+
+
+
+
+<a name="cubelet-services-cubebox-v1-SnapshotRuntimeResponse"></a>
+
+### SnapshotRuntimeResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| requestID | [string](#string) |  |  |
+| ret | [cubelet.services.errorcode.v1.Ret](#cubelet-services-errorcode-v1-Ret) |  |  |
+| sandboxID | [string](#string) |  |  |
+| staging_dir | [string](#string) |  |  |
 
 
 
@@ -2083,6 +2139,7 @@ Service for handling cubesandbox
 | Exec | [ExecCubeSandboxRequest](#cubelet-services-cubebox-v1-ExecCubeSandboxRequest) | [ExecCubeSandboxResponse](#cubelet-services-cubebox-v1-ExecCubeSandboxResponse) |  |
 | AppSnapshot | [AppSnapshotRequest](#cubelet-services-cubebox-v1-AppSnapshotRequest) | [AppSnapshotResponse](#cubelet-services-cubebox-v1-AppSnapshotResponse) | AppSnapshot creates a cubebox, makes an app snapshot, and destroys the cubebox. Required annotations: - cube.master.appsnapshot.create: &#34;true&#34; - cube.master.appsnapshot.template.id: &#34;&lt;template_id&gt;&#34; |
 | CommitSandbox | [CommitSandboxRequest](#cubelet-services-cubebox-v1-CommitSandboxRequest) | [CommitSandboxResponse](#cubelet-services-cubebox-v1-CommitSandboxResponse) | CommitSandbox snapshots an existing running sandbox into a template snapshot. |
+| SnapshotRuntime | [SnapshotRuntimeRequest](#cubelet-services-cubebox-v1-SnapshotRuntimeRequest) | [SnapshotRuntimeResponse](#cubelet-services-cubebox-v1-SnapshotRuntimeResponse) | SnapshotRuntime exports VM state and memory from an existing sandbox. |
 | RollbackSandbox | [RollbackSandboxRequest](#cubelet-services-cubebox-v1-RollbackSandboxRequest) | [RollbackSandboxResponse](#cubelet-services-cubebox-v1-RollbackSandboxResponse) | RollbackSandbox restores a running sandbox to a committed snapshot. |
 | CleanupTemplate | [CleanupTemplateRequest](#cubelet-services-cubebox-v1-CleanupTemplateRequest) | [CleanupTemplateResponse](#cubelet-services-cubebox-v1-CleanupTemplateResponse) | CleanupTemplate removes local template snapshot/base data from this node. |
 | ListSandboxSnapshots | [ListSandboxSnapshotsRequest](#cubelet-services-cubebox-v1-ListSandboxSnapshotsRequest) | [ListSandboxSnapshotsResponse](#cubelet-services-cubebox-v1-ListSandboxSnapshotsResponse) | ListSandboxSnapshots inspects the requested snapshot objects on this node. |

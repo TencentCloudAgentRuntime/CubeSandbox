@@ -7,3 +7,4 @@ coverage.profile
 coverage/*
 .vscode
 /coscli.log
+/out/

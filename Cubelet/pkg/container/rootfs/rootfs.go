@@ -62,6 +62,11 @@ func GenRootfsOpt(
 }
 
 func GenImageSharedDirs(hostLayers []string) ([]virtiofs.ShareDirMapping, error) {
+	for _, layer := range hostLayers {
+		if err := virtiofs.EnsureHostErofsMount(layer); err != nil {
+			return nil, err
+		}
+	}
 	return hostToShareDirs(hostLayers)
 }
 
@@ -89,7 +94,10 @@ func HostToShareDir(dir string) (*virtiofs.ShareDirMapping, error) {
 	if !virtiofs.CheckVmRelativePath(dir) {
 		return nil, fmt.Errorf("rootfs not a valid share dir:%v", dir)
 	}
-	if strings.HasSuffix(dir, "/fs") {
+	if virtiofs.IsReadOnlyMount(dir) {
+		sharePath = dir
+		mountPath = "."
+	} else if strings.HasSuffix(dir, "/fs") {
 
 		sharePath = strings.TrimSuffix(dir, "/fs")
 		mountPath = filepath.Join(filepath.Base(sharePath), "fs")

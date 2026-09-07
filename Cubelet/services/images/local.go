@@ -20,6 +20,7 @@ import (
 	"github.com/containerd/plugin/registry"
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1"
 
+	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cube/server/images"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
@@ -175,6 +176,9 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 
 	realReq := opts.ReqInfo
 	for _, c := range realReq.Containers {
+		if !requiresImageEnsure(c) {
+			continue
+		}
 		ctx = constants.WithImageSpec(ctx, c.GetImage())
 		i, err := l.criImage.EnsureImage(ctx, c.GetImage().GetImage(),
 			c.GetImage().GetUsername(),
@@ -197,6 +201,10 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 		}
 	}
 	return nil
+}
+
+func requiresImageEnsure(container *cubebox.ContainerConfig) bool {
+	return container != nil && container.GetPreparedRootfs() == nil
 }
 
 func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) error {

@@ -63,6 +63,10 @@ RUN set -eux; \
       -o /out/bin/cubelet ./cmd/cubelet; \
     GOOS=linux GOARCH="${goarch}" go build -ldflags "${ldflags}" \
       -o /out/bin/cubecli ./cmd/cubecli; \
+    GOOS=linux GOARCH="${goarch}" go build -ldflags "-s -w" \
+      -o /out/bin/cube-volume-block-device ./cmd/cube-volume-block-device; \
+    GOOS=linux GOARCH="${goarch}" go build -ldflags "-s -w" \
+      -o /out/bin/cube-volume-erox-workspace ./cmd/cube-volume-erox-workspace; \
     cd /workspace/volume-s3; \
     go mod download; \
     CGO_ENABLED=0 GOOS=linux GOARCH="${goarch}" go build -trimpath -ldflags '-s -w' \
@@ -73,6 +77,8 @@ RUN set -eux; \
     mkdir -p /out/Cubelet/bin /out/Cubelet/config /out/Cubelet/dynamicconf /out/Cubelet/plugin \
              /out/cube-vs/network/bin; \
     cp /out/bin/cubelet /out/bin/cubecli /out/Cubelet/bin/; \
+    cp /out/bin/cube-volume-block-device /out/Cubelet/plugin/; \
+    cp /out/bin/cube-volume-erox-workspace /out/Cubelet/plugin/; \
     cp /out/bin/cubevsmapdump /out/cube-vs/network/bin/; \
     install -m 0755 /out/bin/cube-volume-s3 /out/Cubelet/plugin/cube-volume-s3; \
     cp -a /workspace/Cubelet/config/. /out/Cubelet/config/; \
@@ -138,6 +144,8 @@ RUN printf '{"schema_version":1,"components":{"cubelet":{"version":"%s"},"cubecl
       ${IMAGE_ROOT}/cube-vs/network/bin/cubevsmapdump \
       ${IMAGE_ROOT}/Cubelet/plugin/cube-volume-cos \
       ${IMAGE_ROOT}/Cubelet/plugin/cube-volume-s3 \
+      ${IMAGE_ROOT}/Cubelet/plugin/cube-volume-block-device \
+      ${IMAGE_ROOT}/Cubelet/plugin/cube-volume-erox-workspace \
       /usr/local/bin/component-entrypoint.sh \
     && mkdir -p \
       /data/cubelet \

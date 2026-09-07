@@ -896,7 +896,7 @@ impl Container {
     }
 
     fn is_cold_start(&self) -> bool {
-        self.id == self.real_id
+        is_cold_start(&self.id, &self.real_id, self.sb_conf.app_snapshot_restore)
     }
 
     /// Template creation writes stdout/stderr to regular files under
@@ -1545,6 +1545,10 @@ impl Container {
     pub fn get_id(&self) -> String {
         self.id.clone()
     }
+}
+
+fn is_cold_start(id: &str, real_id: &str, app_snapshot_restore: bool) -> bool {
+    !app_snapshot_restore && id == real_id
 }
 
 #[cfg(test)]
@@ -2229,10 +2233,16 @@ mod identity_translation_tests {
 
 #[cfg(test)]
 mod log_forward_tests {
-    use super::LogForwardHandle;
+    use super::{is_cold_start, LogForwardHandle};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn explicit_snapshot_restore_never_starts_restored_process_again() {
+        assert!(!is_cold_start("sandbox_0", "sandbox_0", true));
+        assert!(is_cold_start("sandbox_0", "sandbox_0", false));
+    }
 
     /// Spawn a task that mimics a log-forward loop: it runs until cancelled,
     /// then records a clean exit.  This is what the pre-fix `abort()` fallback

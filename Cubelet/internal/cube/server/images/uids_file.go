@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/mount"
@@ -86,8 +88,11 @@ func (c *CubeImageService) GenImageExtraAttributes(ctx context.Context, oldimg, 
 		}
 	}
 
-	_, uidsFileExists := i.Labels[constants.LabelImageUidFiles]
-	if !uidsFileExists {
+	uidsFileReady := false
+	if uidFile := i.Labels[constants.LabelImageUidFiles]; uidFile != "" {
+		uidsFileReady = !isReadOnlyMount(filepath.Dir(uidFile)) && isUidFilesDir(uidFile)
+	}
+	if !uidsFileReady {
 		startTime := time.Now()
 		defer func() {
 			workflow.RecordCreateMetricIfGreaterThan(ctx, nil, "image_prepare_uids_time", time.Since(startTime), time.Millisecond)
@@ -95,7 +100,7 @@ func (c *CubeImageService) GenImageExtraAttributes(ctx context.Context, oldimg, 
 		log.Debugf("try to generate uid files for image")
 
 		uidFile := filepath.Join(c.uidDir, ns, i.Target.Digest.String())
-		if localRoot, ok := i.Labels[constants.LabelImageHostLowerDirsPrefix]; ok && localRoot != "" {
+		if localRoot, ok := i.Labels[constants.LabelImageHostLowerDirsPrefix]; ok && localRoot != "" && !isReadOnlyMount(localRoot) {
 			uidFile = filepath.Join(localRoot, "uids_file")
 			info, statErr := os.Stat(uidFile)
 			if statErr == nil && !info.IsDir() {
@@ -141,6 +146,23 @@ func (c *CubeImageService) GenImageExtraAttributes(ctx context.Context, oldimg, 
 	}
 
 	return
+}
+
+func isUidFilesDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func isReadOnlyMount(path string) bool {
+	var stat unix.Statfs_t
+	if unix.Statfs(path, &stat) == nil && isReadOnlyMountFlags(stat.Flags) {
+		return true
+	}
+	return unix.Statfs(filepath.Join("/proc/1/root", path), &stat) == nil && isReadOnlyMountFlags(stat.Flags)
+}
+
+func isReadOnlyMountFlags(flags int64) bool {
+	return flags&unix.ST_RDONLY != 0
 }
 
 func CopyImageUidsFile(ctx context.Context, client *containerd.Client, snapshotter string, i containerd.Image, target string) error {

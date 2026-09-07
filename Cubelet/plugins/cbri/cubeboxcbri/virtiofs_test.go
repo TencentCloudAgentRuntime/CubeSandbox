@@ -53,6 +53,45 @@ func TestSortRestoreVirtioMountsNilInput(t *testing.T) {
 	require.Empty(t, sortRestoreVirtioMounts(nil))
 }
 
+func TestGenerateSandboxVirtiofsOptDirectShare(t *testing.T) {
+	flowOpts := &workflow.CreateContext{ReqInfo: &cubebox.RunCubeSandboxRequest{}, StorageInfo: &storage.StorageInfo{
+		HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{
+			"workspace": {
+				ShareDir:    "/data/cube-shared/volume/workspace/.erox/workspaces/workspace/merged",
+				BindPath:    "/data/cube-shared/volume/workspace/.erox/workspaces/workspace/merged",
+				DirectShare: true,
+				VirtiofsID:  constants.EroxWorkspaceVirtiofsID,
+			},
+		},
+	}}
+
+	opts, err := generateSandboxVirtiofsOpt(context.Background(), flowOpts, false)
+	require.NoError(t, err)
+	spec := applySpecOpts(t, context.Background(), opts)
+	var configs []*virtiofs.VirtiofsConfig
+	require.NoError(t, json.Unmarshal([]byte(spec.Annotations[constants.AnnotationVirtiofs]), &configs))
+	require.Len(t, configs, 1)
+	require.Equal(t, constants.EroxWorkspaceVirtiofsID, configs[0].ID)
+	require.Empty(t, configs[0].VirtioBackendFsConfig.AllowedDirs)
+}
+
+func TestGenerateSandboxVirtiofsOptEqualPathIsNotImplicitDirectShare(t *testing.T) {
+	path := "/data/cubelet/hostdir/equal"
+	flowOpts := &workflow.CreateContext{ReqInfo: &cubebox.RunCubeSandboxRequest{}, StorageInfo: &storage.StorageInfo{
+		HostDirBackendInfos: map[string]*storage.HostDirBackendInfo{
+			"legacy": {ShareDir: path, BindPath: path},
+		},
+	}}
+
+	opts, err := generateSandboxVirtiofsOpt(context.Background(), flowOpts, false)
+	require.NoError(t, err)
+	spec := applySpecOpts(t, context.Background(), opts)
+	var configs []*virtiofs.VirtiofsConfig
+	require.NoError(t, json.Unmarshal([]byte(spec.Annotations[constants.AnnotationVirtiofs]), &configs))
+	require.Len(t, configs, 1)
+	require.Equal(t, []string{path}, configs[0].VirtioBackendFsConfig.AllowedDirs)
+}
+
 func TestSortRestoreVirtioMountsUsesBackendKeyAsFinalTiebreaker(t *testing.T) {
 	t.Parallel()
 

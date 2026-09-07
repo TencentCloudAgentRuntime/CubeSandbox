@@ -20,6 +20,7 @@ var (
 	// errIPExhausted is returned when every usable address in the sandbox CIDR is
 	// either reserved or currently assigned.
 	errIPExhausted = errors.New("ip exhausted")
+	errIPUnavailable = errors.New("ip unavailable")
 )
 
 const (
@@ -156,6 +157,21 @@ func (a *ipAllocator) Allocate() (net.IP, error) {
 		}
 	}
 	return nil, errIPExhausted
+}
+
+func (a *ipAllocator) AllocateSpecific(ip net.IP) (net.IP, error) {
+	a.Lock()
+	defer a.Unlock()
+	ipv4 := ip.To4()
+	if ipv4 == nil {
+		return nil, errIPUnavailable
+	}
+	idx := a.ip2Idx(ipv4) - a.startIdx
+	if idx < 0 || idx >= a.size || a.existIdx(idx) {
+		return nil, errIPUnavailable
+	}
+	a.setUsed(idx)
+	return a.idx2IP(idx), nil
 }
 
 // Release makes an address available again unless it is outside the managed

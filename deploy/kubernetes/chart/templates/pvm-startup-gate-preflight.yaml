@@ -14,7 +14,7 @@
 {{- $first = false -}}
 {{- end -}}
 {{- $pullSecrets := list -}}
-{{- range .Values.imagePullSecrets -}}
+{{- range (default .Values.imagePullSecrets .Values.global.imagePullSecrets) -}}
 {{- $pullSecrets = append $pullSecrets .name -}}
 {{- end -}}
 apiVersion: v1
@@ -113,7 +113,7 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: {{ include "cube.fullname" . }}-pvm-preflight
-      {{- with .Values.imagePullSecrets }}
+{{- with (default .Values.imagePullSecrets .Values.global.imagePullSecrets) }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}

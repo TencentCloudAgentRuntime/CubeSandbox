@@ -219,6 +219,15 @@ func (p *TapPool) AddReserved(entry *TapPoolEntry, owner string) error {
 // until CommitActive, which lets create rollback release the reservation without
 // treating the TAP as an active sandbox resource.
 func (p *TapPool) Acquire(owner string) (*TapPoolEntry, error) {
+	return p.acquire(owner, nil)
+}
+
+// AcquireIP reserves the Ready TAP carrying the requested sandbox IP.
+func (p *TapPool) AcquireIP(owner string, ip net.IP) (*TapPoolEntry, error) {
+	return p.acquire(owner, ip.To4())
+}
+
+func (p *TapPool) acquire(owner string, requestedIP net.IP) (*TapPoolEntry, error) {
 	if owner == "" {
 		return nil, fmt.Errorf("owner is empty")
 	}
@@ -231,7 +240,7 @@ func (p *TapPool) Acquire(owner string) (*TapPoolEntry, error) {
 		return nil, fmt.Errorf("owner %s already has tap %s in state %s", owner, existing.TapName, existing.State)
 	}
 	idx := slices.IndexFunc(p.entries, func(entry *TapPoolEntry) bool {
-		return entry.IsAssignable()
+		return entry.IsAssignable() && (requestedIP == nil || entry.SandboxIP.Equal(requestedIP))
 	})
 	if idx < 0 {
 		return nil, fmt.Errorf("no ready tap entry")

@@ -39,7 +39,7 @@ spec:
       hostPID: false
       dnsPolicy: ClusterFirst
       terminationGracePeriodSeconds: {{ .Values.cubeNodeInstaller.terminationGracePeriodSeconds }}
-      {{- with .Values.imagePullSecrets }}
+{{- with (default .Values.imagePullSecrets .Values.global.imagePullSecrets) }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/volume"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
@@ -230,6 +231,20 @@ func (l *local) attachPluginVolume(
 				readOnly = true
 			}
 		}
+	}
+	if driver == "erox-workspace" {
+		if result.HostDirBackendInfos == nil {
+			result.HostDirBackendInfos = make(map[string]*HostDirBackendInfo)
+		}
+		result.HostDirBackendInfos[volumeName] = &HostDirBackendInfo{
+			VolumeName:  volumeName,
+			ShareDir:    res.HostPath,
+			BindPath:    res.HostPath,
+			ReadOnly:    readOnly,
+			DirectShare: true,
+			VirtiofsID:  constants.EroxWorkspaceVirtiofsID,
+		}
+		return nil
 	}
 
 	shareDir := filepath.Join(hostDirBasePath, opts.SandboxID, roStr)

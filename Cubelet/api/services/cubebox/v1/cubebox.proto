@@ -26,6 +26,8 @@ service CubeboxMgr {
   rpc AppSnapshot(AppSnapshotRequest) returns (AppSnapshotResponse);
   // CommitSandbox snapshots an existing running sandbox into a template snapshot.
   rpc CommitSandbox(CommitSandboxRequest) returns (CommitSandboxResponse);
+  // SnapshotRuntime exports VM state and memory from an existing sandbox.
+  rpc SnapshotRuntime(SnapshotRuntimeRequest) returns (SnapshotRuntimeResponse);
   // RollbackSandbox restores a running sandbox to a committed snapshot.
   rpc RollbackSandbox(RollbackSandboxRequest) returns (RollbackSandboxResponse);
   // CleanupTemplate removes local template snapshot/base data from this node.
@@ -369,6 +371,9 @@ message ContainerConfig {
   Hooks hooks = 20;
   // CDI
   OCIConfig oci_config = 21;
+  // prepared_rootfs contains node-local read-only EROFS mounts prepared and
+  // integrity-checked by EROX. It bypasses image pull and unpack completely.
+  PreparedRootFS prepared_rootfs = 22;
 }
 
 message OCIConfig {
@@ -1221,4 +1226,28 @@ message CleanupOrphanStorageFilesResponse {
   cubelet.services.errorcode.v1.Ret ret = 2;
   // Orphan files cubelet found (and possibly removed).
   repeated StorageOrphanEntry orphans = 3;
+}
+
+message SnapshotRuntimeRequest {
+  string requestID = 1;
+  string sandboxID = 2;
+  // Absolute destination for the immutable Runtime staging directory.
+  string staging_dir = 3;
+  // Stop the VM task after the Runtime checkpoint is complete while keeping
+  // Cube and volume metadata available for storage snapshotting.
+  bool stop_after_snapshot = 4;
+}
+
+message SnapshotRuntimeResponse {
+  string requestID = 1;
+  cubelet.services.errorcode.v1.Ret ret = 2;
+  string sandboxID = 3;
+  string staging_dir = 4;
+}
+
+message PreparedRootFS {
+  // Read-only mount of the base EROFS Image Manifest.
+  string image_mount = 1;
+  // Optional read-only mount of a RootFS Snapshot Manifest.
+  string rootfs_mount = 2;
 }

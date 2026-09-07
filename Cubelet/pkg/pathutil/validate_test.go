@@ -30,6 +30,21 @@ func TestValidateSafeID(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "current_directory",
+			id:      ".",
+			wantErr: true,
+		},
+		{
+			name:    "parent_directory",
+			id:      "..",
+			wantErr: true,
+		},
+		{
+			name:    "absolute_path",
+			id:      "/sandbox-a",
+			wantErr: true,
+		},
+		{
 			name:    "id_with_forward_slash",
 			id:      "invalid/id",
 			wantErr: true,

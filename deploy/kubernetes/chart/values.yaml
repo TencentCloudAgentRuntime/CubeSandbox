@@ -107,6 +107,18 @@ images:
     tag: v0.7.0
     pullPolicy: IfNotPresent
 
+  egressConfigurer:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress-configurer
+    tag: v0.7.0
+    digest: ""
+    pullPolicy: IfNotPresent
+
+  egressProxy:
+    repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-egress-proxy
+    tag: v0.7.0
+    digest: ""
+    pullPolicy: IfNotPresent
+
   webui:
     repository: cube-sandbox-int.tencentcloudcr.com/cube-sandbox/cube-webui
     tag: v0.7.0
@@ -571,7 +583,7 @@ cubeNode:
     enabled: true
 
   network:
-    # Auto-detect primary NIC inside the Pod netns and patch Cubelet eth_name.
+    # Auto-detect the node primary NIC and patch Cubelet eth_name.
     autoDetectEthName: true
     # Leave empty to keep auto-detection. Set to pin Cubelet eth_name.
     ethName: ""
@@ -585,6 +597,12 @@ cubeNode:
     # Skip host-network conflict checks (cube-node-init) and the Service CIDR
     # preflight Hook. Use only when you accept blackhole / routing risk.
     cidrSkipConflictCheck: false
+    cubeRouter:
+      # Required by egressProxy. CubeVS normalizes sandbox traffic to natIP
+      # and redirects it into the persistent host cube-router interface.
+      enabled: false
+      cidr: "172.20.0.0/24"
+      natIP: "172.20.0.2"
 
   dns:
     clusterDomain: cluster.local
@@ -632,6 +650,13 @@ cubeNode:
       initialDelaySeconds: 60
       periodSeconds: 20
       failureThreshold: 6
+
+egressProxy:
+  # Requires cubeNode.hostNetwork=true and cubeNode.network.cubeRouter.enabled=true.
+  enabled: false
+  # Only these original sandbox destinations are routed through EgressProxy.
+  # Explicitly configure every Kubernetes Pod and Service CIDR.
+  clusterCIDRs: []
 
 # Artifact install DaemonSet (shim/kernel/guest). Always deployed with
 # cube-node (no enable switch). May RollingUpdate and grow containers; does NOT

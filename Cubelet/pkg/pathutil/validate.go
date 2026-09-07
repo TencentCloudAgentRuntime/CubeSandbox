@@ -26,7 +26,7 @@ func ValidateSafeID(id string) error {
 	if id == "" {
 		return fmt.Errorf("id cannot be empty")
 	}
-	if strings.ContainsAny(id, `/\`) || strings.Contains(id, "..") {
+	if id == "." || strings.ContainsAny(id, `/\`) || strings.Contains(id, "..") {
 		return fmt.Errorf("invalid id %q: contains path separators or traversal sequences", id)
 	}
 	return nil
