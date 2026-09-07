@@ -9,7 +9,7 @@
 - 使用 task --list-all 命令查看项目的各类脚本入口. 
 
 - 测试
-    - 本项目采用多worktree并行开发模式. 当前 worktree 的测试集群环境见 [本地 worktree 配置](local.env)
+    - 本项目采用多工作区并行开发模式. 当前工作区的测试集群环境见 [本地 worktree 配置](local.env)
     - 登陆节点可使用 node-shell 插件, 例如 k node-shell 172.17.137.56 -- kubelet --version
     - 如果cube节点受发布组件影响, 无法通过 node-shell 登陆节点, 可以先通过node-shell登陆非cube节点, 然后把 [本地 worktree 配置](local.env) 中的密钥上传到node-shell容器后再通过ssh登陆到目标节点. 
     - 由于 cube 依赖 pvm, 而 pvm 对内核版本有要求, 要使用集群内的OS版本为TS4的节点作为cube运行时节点.
