@@ -37,6 +37,9 @@ func (nsenterRunner) Run(ctx context.Context, netnsPath string, command ...strin
 	trace := monotime.TraceBufferFromContext(ctx)
 	identity := startupTraceIdentityFromContext(ctx)
 	defer func() {
+		if !trace.Enabled() {
+			return
+		}
 		trace.Addf(
 			"cube_perf component=cubelet operation=create phase=network-exec sandbox_id=%s pod_uid=%s operation_id=%s netns=%s command=%q ts_mono_us=%d duration_us=%d success=%t",
 			identity.sandboxID, identity.podUID, identity.operationID, netnsPath, strings.Join(command, " "), monotime.Micros(), time.Since(started).Microseconds(), err == nil,
@@ -95,6 +98,9 @@ func (n *linuxNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, ta
 	trace := monotime.TraceBufferFromContext(ctx)
 	identity := startupTraceIdentityFromContext(ctx)
 	defer func() {
+		if !trace.Enabled() {
+			return
+		}
 		trace.Addf(
 			"cube_perf component=cubelet operation=create phase=network-prepare sandbox_id=%s pod_uid=%s operation_id=%s netns=%s interface=%s tap=%s ts_mono_us=%d duration_us=%d success=%t",
 			identity.sandboxID, identity.podUID, identity.operationID, netnsPath, interfaceName, tapName, monotime.Micros(), time.Since(started).Microseconds(), err == nil,

@@ -33,6 +33,13 @@ func NewTraceBuffer() *TraceBuffer {
 	return &TraceBuffer{enabled: TraceEnabled()}
 }
 
+// Enabled lets callers avoid evaluating timestamp and formatting arguments on
+// the trace-off path. Go evaluates variadic arguments before entering Addf, so
+// the nil/disabled guard inside Addf alone is not sufficient.
+func (b *TraceBuffer) Enabled() bool {
+	return b != nil && b.enabled
+}
+
 // WithTraceBuffer makes a request-owned trace buffer available to adapter and
 // network layers without changing their public interfaces.
 func WithTraceBuffer(ctx context.Context, buffer *TraceBuffer) context.Context {

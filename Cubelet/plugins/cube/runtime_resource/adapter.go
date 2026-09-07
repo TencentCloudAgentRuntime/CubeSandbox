@@ -154,6 +154,9 @@ func (a *adapter) Prepare(ctx context.Context, request *runtimev1.PrepareSandbox
 	defer a.mu.Unlock()
 	lockWait := time.Since(lockStart)
 	defer func() {
+		if !trace.Enabled() {
+			return
+		}
 		trace.Addf(
 			"cube_perf component=cubelet operation=create phase=adapter-prepare sandbox_id=%s pod_uid=%s operation_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d",
 			request.GetSandboxId(), request.GetPod().GetUid(), request.GetSandboxId(), request.GetGeneration(), monotime.Micros(), time.Since(totalStart).Microseconds(),
@@ -193,6 +196,9 @@ func (a *adapter) resumePrepare(ctx context.Context, record *diskRecord) (prepar
 	var validateRoot, persistShared, networkPrepare, persistPrepared time.Duration
 	trace := monotime.TraceBufferFromContext(ctx)
 	defer func() {
+		if !trace.Enabled() {
+			return
+		}
 		trace.Addf(
 			"cube_perf component=cubelet operation=create phase=adapter-resume sandbox_id=%s pod_uid=%s operation_id=%s generation=%d initial_stage=%s final_stage=%s ts_mono_us=%d duration_us=%d success=%t validate_root_us=%d persist_shared_us=%d network_us=%d persist_prepared_us=%d",
 			record.SandboxID, record.PodUID, record.OperationID, record.Generation, initialStage, record.Stage, monotime.Micros(),
@@ -507,6 +513,9 @@ func (a *adapter) OpenTap(binding handoff.Binding) (descriptorFile *os.File, err
 	lockWait = time.Since(stageStart)
 	stageStart = time.Now()
 	defer func() {
+		if !trace.Enabled() {
+			return
+		}
 		trace.Addf(
 			"cube_perf component=cubelet operation=start phase=adapter-open-tap sandbox_id=%s operation_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d load_us=%d open_us=%d duplicate_us=%d",
 			binding.SandboxID, binding.SandboxID, binding.Generation, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
@@ -569,6 +578,9 @@ func (a *adapter) persist(record *diskRecord, trace *monotime.TraceBuffer) (err 
 	stageStart := totalStart
 	var encodeTime, createTime, writeTime, fileSyncTime, renameTime, parentSyncTime time.Duration
 	defer func() {
+		if !trace.Enabled() {
+			return
+		}
 		trace.Addf(
 			"cube_perf component=cubelet operation=persist phase=adapter-store sandbox_id=%s pod_uid=%s operation_id=%s record_stage=%s ts_mono_us=%d duration_us=%d success=%t encode_us=%d create_us=%d write_us=%d file_fsync_us=%d rename_us=%d parent_fsync_us=%d fsync_count=2",
 			record.SandboxID, record.PodUID, record.OperationID, record.Stage, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,

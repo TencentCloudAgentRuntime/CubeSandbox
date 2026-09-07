@@ -11,6 +11,9 @@ import (
 func TestDisabledTraceBufferRetainsNothing(t *testing.T) {
 	t.Setenv("CUBE_PERF_TRACE", "")
 	buffer := NewTraceBuffer()
+	if buffer.Enabled() {
+		t.Fatal("disabled buffer reported enabled")
+	}
 	buffer.Addf("should not be retained: %s", "value")
 	if len(buffer.records) != 0 {
 		t.Fatalf("disabled buffer retained %d records", len(buffer.records))
@@ -20,6 +23,9 @@ func TestDisabledTraceBufferRetainsNothing(t *testing.T) {
 func TestTraceBufferCopiesArgumentsAndIsSingleUse(t *testing.T) {
 	t.Setenv("CUBE_PERF_TRACE", "1")
 	buffer := NewTraceBuffer()
+	if !buffer.Enabled() {
+		t.Fatal("enabled buffer reported disabled")
+	}
 	buffer.Addf("value=%s", "fixed")
 	if len(buffer.records) != 1 || len(buffer.records[0].args) != 1 || buffer.records[0].args[0] != "fixed" {
 		t.Fatalf("unexpected buffered record: %#v", buffer.records)

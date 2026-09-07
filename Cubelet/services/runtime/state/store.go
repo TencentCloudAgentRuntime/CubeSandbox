@@ -562,6 +562,9 @@ func (s *Store) persist(record *Record, trace *monotime.TraceBuffer) (err error)
 	stageStart := totalStart
 	var encodeTime, createTime, writeTime, fileSyncTime, renameTime, parentSyncTime time.Duration
 	defer func() {
+		if !trace.Enabled() {
+			return
+		}
 		podUID := ""
 		if record.Active != nil {
 			podUID = record.Active.PodUID
@@ -624,6 +627,9 @@ func (s *Store) persist(record *Record, trace *monotime.TraceBuffer) (err error)
 func (s *Store) syncParent(operation string, trace *monotime.TraceBuffer, record *Record) (err error) {
 	started := time.Now()
 	defer func() {
+		if !trace.Enabled() {
+			return
+		}
 		sandboxID, podUID := "", ""
 		if record != nil {
 			sandboxID = record.SandboxID

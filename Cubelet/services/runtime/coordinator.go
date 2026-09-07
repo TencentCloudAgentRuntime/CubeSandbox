@@ -59,6 +59,9 @@ func (c *Coordinator) Prepare(request state.PrepareRequest) (result *state.Prepa
 	lockWait := time.Since(lockStart)
 	storeStart := time.Now()
 	defer func() {
+		if !request.Trace.Enabled() {
+			return
+		}
 		request.Trace.Addf(
 			"cube_perf component=cubelet operation=create phase=coordinator-prepare sandbox_id=%s pod_uid=%s operation_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d store_us=%d",
 			request.SandboxID, request.PodUID, request.SandboxID, request.Generation, monotime.Micros(), time.Since(totalStart).Microseconds(),
@@ -89,6 +92,9 @@ func (c *Coordinator) MarkReadyAndPublish(sandboxID string, generation uint64, l
 	lockWait := time.Since(lockStart)
 	storeStart := time.Now()
 	defer func() {
+		if !trace.Enabled() {
+			return
+		}
 		podUID := ""
 		if lease != nil {
 			podUID = lease.PodUID
