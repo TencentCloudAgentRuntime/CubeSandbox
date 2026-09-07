@@ -131,9 +131,12 @@ P95 保持在 1500 ms 内。分位数不能直接逐项相加，预算只用于�
 - Cubelet/RuntimeResource restart、创建中取消和重复 Release 后全部资源 exact-zero。
 
 S5.5b 实测证明 keyed lock 已消除，但 absolute VMM start 展开仍受 CNI 和持久化阶段影响。
-经最终 reviewer 确认，`CRI receive→start vm` 并发 P95≤450ms 归入 S5.5c；S5.5d 再收紧到
-300ms，并最迟在 S5.5d 重验每轮 10 Pod 的 absolute VMM start 展开≤250ms。S5.5f 最终
-端到端门禁不变。
+S5.5c 实测进一步证明网络 backend 的直接耗时已经达标，但原先把整个
+`CRI receive→start vm` 压入网络阶段的累计门禁无法归因：串行/并发 P95 分别仍为
+429.479/965.868ms，其中主要剩余时间位于 Shim 连接前和 durable create/cgroup 路径。该累计
+门禁按 reviewer 要求重新划归 S5.5d.1/S5.5d.2；S5.5c 必须如实记录累计 checkpoint 未通过，
+不能用 network prepare 的局部通过掩盖。S5.5d 总门禁仍为串行≤220ms、并发≤300ms，并最迟
+在 S5.5d.2 重验每轮 10 Pod 的 absolute VMM start 展开≤250ms。S5.5f 最终端到端门禁不变。
 
 ### S5.5c：进程内 netns/netlink 网络快路径
 
@@ -148,13 +151,39 @@ S5.5b 实测证明 keyed lock 已消除，但 absolute VMM start 展开仍受 CN
 
 验收：
 
-- Cilium 单/双栈、ClusterIP、跨节点 PodIP、NetworkPolicy、DNS 和 MTU 专项无回归。
+- 当前 PoC 选定的 Cilium IPv4 集群上，ClusterIP、真实跨节点 PodIP、NetworkPolicy、DNS 和
+  MTU 专项无回归；生产 netlink backend 还需通过两个真实 netns 的 IPv4/IPv6、并发和故障
+  回滚内核测试。完整 Cilium 双栈集成留到 S5.5f 网络兼容矩阵，不把单栈环境伪装成双栈通过。
 - trace 证明普通启动不再 exec `nsenter`、`ip`、`tc` 或 `ping`。
 - RuntimeResource network prepare 串行 P95≤25 ms、10 并发 P95≤50 ms。
-- `CRI receive→start vm` 串行 P95≤300 ms、10 并发 P95≤450 ms。
+- command backend 可通过节点配置回滚，且回滚和再次切回 netlink 都通过相同冒烟与清理检查。
 - 失败回滚后 TAP、qdisc/filter、netns FD 和 lease 全部归零。
 
-### S5.5d：持久化与 Host cgroup 快路径
+`CRI receive→start vm` 在本阶段作为非阻断累计 checkpoint 报告；若超过串行 300ms/并发
+450ms，必须带非重叠分段转交 S5.5d.1/S5.5d.2，不能扩大 S5.5c 的实现边界。
+
+### S5.5d.1：CRI/CNI dispatch 与 Shim 连接前快路径
+
+目标：先建立无重叠时间线，再消除 `RunPodSandbox` 接收至 CubeShim create 开始前的排队、
+重复配置发现和非必要进程/IPC；不在本子阶段修改 durable journal 或 Host cgroup 状态机。
+
+工作项：
+
+- 补齐同一时钟域的 CRI receive、CNI begin/end、shim resolve/spawn/connect 和 Shim create begin
+  事件，逐项相减，不再把重叠区间相加成“上界”。
+- 区分 containerd CRI 排队、CNI、shim manager 查找/连接和新 Shim 拉起；只优化 Cube 可控且有
+  实测占比的步骤。
+- 保持 RuntimeClass handler、CNI 调用顺序、sandbox ownership 和 containerd shim v2 契约不变。
+
+验收：
+
+- 50 串行和 5×10 并发样本均能一一绑定 Pod UID、sandbox ID、Shim PID 和 worker PID，时间段
+  无重叠、无负数、总和与端到端残差有解释。
+- `CRI receive→Shim create begin` 串行 P95≤80ms、10 并发 P95≤150ms；成功率 100%。
+- DNS、ClusterIP、跨节点 PodIP、NetworkPolicy、创建中取消、containerd restart 和 exact-zero
+  无回退。
+
+### S5.5d.2：durable create、持久化与 Host cgroup 快路径
 
 目标：保留崩溃恢复能力，同时减少每 Pod 原子文件提交、目录 fsync 和 systemd placement 固定等待。
 
@@ -172,6 +201,7 @@ S5.5b 实测证明 keyed lock 已消除，但 absolute VMM start 展开仍受 CN
 - 正常路径 `systemctl show=0`，每 Pod journal commit/fsync 数量和累计耗时明确下降。
 - 全部既有 atomic persistence failpoint、worker/Shim kill、containerd/Cubelet restart 测试通过。
 - 不接受通过关闭 fsync、把状态放入 tmpfs 或删除精确 readback 得到的性能结果。
+- `Shim create begin→start vm` 串行 P95≤140ms、10 并发 P95≤150ms。
 - `CRI receive→start vm` 串行 P95≤220 ms、10 并发 P95≤300 ms。
 - 每轮 10 Pod 的 absolute VMM start 展开≤250 ms。
 

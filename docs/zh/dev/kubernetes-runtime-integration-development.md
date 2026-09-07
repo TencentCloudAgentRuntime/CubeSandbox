@@ -461,7 +461,7 @@ S0.4 将 Kubernetes 新链路分为三层：host containerd 维护 CRI、OCI ima
 | S5.2 升级与回滚 | `NOT_STARTED` | 待指定 | — | — | 验证版本协商、滚动升级和回滚 |
 | S5.3 兼容性 | `DONE` | Codex | Kubernetes v1.36.4 官方 477 个 NodeConformance `It` 已通过互斥分片完整执行并唯一归并：456 Passed、17 Failed、4 Skipped；支持路径真实缺陷已修复，17 个失败和 4 个 Skip 均有上游名称、责任层、问题 ID 与后续方案；测试环境、普通 kubelet/CNI/系统 workload 已恢复 | 最终 Agent `64381287`；Device/PodResources `inv-389w3ggrk9` 为 10/10 通过、1 个 SR-IOV 条件 Skip；终审重跑后双节点 exact-zero `inv-98a04qgm41`；集群恢复 `inv-a8a04sguer`；同一 reviewer `PASS`（P0/P1/P2=0）；[最终报告](../../handoffs/kubernetes-runtime/evidence/s5.3/s5.3b-nodeconformance.md) | 兼容性回归输入留到 S5.5f；性能主线当前进入 S5.5c |
 | S5.4 启动架构、性能与稳定性 | `IN_PROGRESS` | Codex | S5.4a/b/c 已完成：worker 拆分后以单次 D-Bus placement + inode/`/proc` 轻量门禁取代正常启动的重复 `systemctl show`；50 次串行和 5×10 并发均 100% 成功且无 PullImage，串行入口 P95 达标；生命周期矩阵和 exact-zero 无回退 | 实现 `7a4d5554 → 26d3ca74 → c949d6d4 → 94c01e21 → fa278467`；[S5.4b 证据](../../handoffs/kubernetes-runtime/evidence/s5.4/s5.4b-worker-split.md)；[S5.4c 证据](../../handoffs/kubernetes-runtime/evidence/s5.4/s5.4c-startup-fastpath.md)；同一 reviewer `PASS`，P0/P1/P2=0/0/1 | 先执行 S5.5 普通冷启动优化；最终一秒目标仍在 S6.2/S5.4d 关闭 |
-| S5.5 普通冷启动性能优化 | `IN_PROGRESS` | Codex | S5.5a 已完成最终制品基线；S5.5b 已把 adapter、Coordinator、Store 和 FD Registry 改为 per-sandbox 并发，5×10 lock-wait/RuntimeResource/Ready P95 为 0.005/138.400/2701.742ms，串行无明显回退，restart/cancel/exact-zero 通过 | [S5.5 性能方案](./kubernetes-runtime-performance-s5.5.md)；[S5.5a 基线](../../handoffs/kubernetes-runtime/evidence/s5.5/s5.5a-final-baseline.md)；[S5.5b 证据](../../handoffs/kubernetes-runtime/evidence/s5.5/s5.5b-cross-sandbox-parallelism.md)；两个子阶段 reviewer 均 `PASS`（P0/P1/P2=0） | 正在执行 S5.5c：以进程内 netlink 移除普通启动的外部网络命令，目标 CRI→start-vm 并发 P95≤450ms |
+| S5.5 普通冷启动性能优化 | `IN_PROGRESS` | Codex | S5.5a/b 已完成；S5.5c netlink 实现和主要单节点证据已完成，network prepare 串行/并发 P95=4.313/6.293ms、热路径 network exec=0，但累计 CRI→start-vm=429.479/965.868ms，按归因拆入 S5.5d.1/d.2 | [S5.5 性能方案](./kubernetes-runtime-performance-s5.5.md)；[S5.5a 基线](../../handoffs/kubernetes-runtime/evidence/s5.5/s5.5a-final-baseline.md)；[S5.5b 证据](../../handoffs/kubernetes-runtime/evidence/s5.5/s5.5b-cross-sandbox-parallelism.md)；S5.5c 等待跨节点/故障证据和 reviewer 终审 | 关闭 S5.5c 后执行 S5.5d.1 无重叠时间线与 pre-Shim 快路径，再执行 S5.5d.2 durable create/cgroup |
 
 ### S5.3～S5.5 剩余实现单元与执行顺序
 
@@ -477,7 +477,7 @@ S6.1 讨论 RuntimeTemplate、PodSnapshot 和 Pause/Resume；不回退已经验�
 | 4 | S5.4c 非快照启动优化与 E2E 入口门禁 | `DONE` | 已删除正常启动的 systemd CLI 门禁，使用单次 D-Bus placement + `/proc`/inode/epoch 轻量验证；100 个性能样本与生命周期故障矩阵证明 E2E 将运行在新 worker 快路径 | trace 中 `systemctl show=0`；串行 50/50，Scheduled→Ready P95=1935.438ms、RunPodSandbox P95=1575.632ms；5×10 并发 50/50；PullImage=0；故障后 exact-zero；[验收证据](../../handoffs/kubernetes-runtime/evidence/s5.4/s5.4c-startup-fastpath.md)；reviewer `PASS`，P0/P1/P2=0/0/1 |
 | 5 | S5.3b Node E2E 支持面收口 | `DONE` | worker 普通启动路径上的 477 项已全部执行；支持路径缺陷已关闭，环境失败与当前架构差异分开记录 | 456 Passed、17 Failed、4 Skipped；其中 1 个环境限制、16 个已解释架构差异；3 个 hostNetwork 相关 Passed 未走 Cube；最终 Device/PodResources 10/10 通过、1 个硬件 Skip；同一 reviewer `PASS`（P0/P1/P2=0） |
 | 6 | S5.3c 最终 Node E2E 与报告 | `DONE` | 477 项唯一归并、原始输入哈希、失败/Skip 分类、问题 ID、双节点恢复和 exact-zero 已完成 | [最终报告](../../handoffs/kubernetes-runtime/evidence/s5.3/s5.3b-nodeconformance.md)；`inv-98a04qgm41`/`inv-a8a04sguer` 证明 W1/W2 Ready、kube-system 全 Ready、临时 policy/auth 已删除且双 Worker exact-zero；`make handoff-validate` 通过；同一 reviewer `PASS`（P0/P1/P2=0） |
-| 7 | S5.5a～S5.5f 普通冷启动性能优化 | `IN_PROGRESS` | 不依赖模板/快照，依次完成逐 Pod tracing和资源 A/B、跨 Pod 解锁、netlink、持久化/cgroup、Guest boot/内存与端到端门禁 | 串行 PodScheduled→Ready P95≤1.5s；5×10 并发 P95≤1.8s 且相对串行增量≤300ms；普通冷启动资源开销完成同口径标定并达到 S5.5e 门禁；完整标准见 [S5.5 方案](./kubernetes-runtime-performance-s5.5.md) |
+| 7 | S5.5a～S5.5f 普通冷启动性能优化 | `IN_PROGRESS` | 不依赖模板/快照，依次完成逐 Pod tracing和资源 A/B、跨 Pod 解锁、netlink、pre-Shim/CRI-CNI dispatch、durable create/cgroup、Guest boot/内存与端到端门禁 | 串行 PodScheduled→Ready P95≤1.5s；5×10 并发 P95≤1.8s 且相对串行增量≤300ms；普通冷启动资源开销完成同口径标定并达到 S5.5e 门禁；完整标准见 [S5.5 方案](./kubernetes-runtime-performance-s5.5.md) |
 | 8 | S6.1～S6.4 模板、快照与暂停恢复 | `NOT_STARTED` | S5.5 后与用户讨论并冻结 RuntimeTemplate、PodSnapshot 和 Pause/Resume 的产品语义；先按 S6.2a～c 完成 RuntimeTemplate，再进入 PodSnapshot | 见 S6 子阶段；不得用旧 Pod UID、IP、DNS、Secret 或 volume mount 污染新 Pod；若设计需要调整 worker IPC，使用版本化扩展而非改写已经验收的普通启动路径 |
 | 9 | S5.4d 最终一秒门禁与回归 | `NOT_STARTED` | 若普通 boot 尚未达到一秒目标，使用 RuntimeTemplate 快路径关闭最终 SLO；新默认路径必须补做 Node E2E 回归 | 所有镜像预拉取且日志证明无 PullImage；单容器无 probe 的 PodScheduled→Ready P95≤1s，同时 RunPodSandbox 接收→Ready P95≤700ms；50 次串行、10 并发，成功率 100%；P99、普通 boot fallback 和模板 miss 单列；若模板成为默认路径，NodeConformance 支持面回归仍为 0 失败 |
 
@@ -491,8 +491,9 @@ S6.1 讨论 RuntimeTemplate、PodSnapshot 和 Pause/Resume；不回退已经验�
 |---|---|---|---|---|
 | S5.5a 最终制品基线与可观测性 | `DONE` | Codex | 已建立 kubelet/containerd/CubeShim/Cubelet/worker/Guest 的逐 Pod 单调时间线，并冻结 worker/embedded、1/5/20 Pod、PSS/cgroup 双账本和 virtiofs 0/1/2 resident 增量口径 | 串行和 5×10 各 50/50 唯一关联，覆盖最低 99.77%，trace 回退<0.05%；18 轮资源矩阵、9 轮 virtiofs 配对、生产恢复和 exact-zero 通过；[最终基线](../../handoffs/kubernetes-runtime/evidence/s5.5/s5.5a-final-baseline.md)；reviewer `PASS`（P0/P1/P2=0） |
 | S5.5b 移除跨 Pod 串行 | `DONE` | Codex | adapter、Coordinator、Store 和 FD Registry 已改为 per-sandbox 并发；同 sandbox 仍线性化 | lock-wait P95=0.005ms；RuntimeResource P95 346.823→138.400ms；串行回退<0.4%；restart/cancel/exact-zero 通过；[最终证据](../../handoffs/kubernetes-runtime/evidence/s5.5/s5.5b-cross-sandbox-parallelism.md)；reviewer `PASS`（P0/P1/P2=0） |
-| S5.5c netlink 网络快路径 | `IN_PROGRESS` | Codex | 以进程内 netns/netlink 取代热路径 `nsenter/ip/tc/ping` | network prepare 串行 P95≤25ms、并发≤50ms；CRI→start-vm 并发 P95≤450ms；网络专项通过；exec trace 为 0；回滚后无残留 |
-| S5.5d 持久化与 Host cgroup 快路径 | `NOT_STARTED` | Codex | 合并可恢复 journal 阶段并移除固定 placement 等待 | 不关闭 fsync/精确回读；原子故障矩阵通过；CRI→VMM 串行 P95≤220ms、并发≤300ms；最迟在本阶段重验 10 Pod absolute VMM start 展开≤250ms |
+| S5.5c netlink 网络快路径 | `VALIDATING` | Codex | 生产 netlink backend 已取代热路径 `nsenter/ip/tc/ping`；直接耗时已达标 | network prepare 串行/并发 P95=4.313/6.293ms、exec=0；当前 Cilium IPv4、真实双 netns IPv4/IPv6、command 回滚和 restart 已通过；还需真实跨节点 PodIP、内核故障注入、exact-zero 和 reviewer 终审。累计 CRI→start-vm 未达原 checkpoint，债务显式转入 d.1/d.2 |
+| S5.5d.1 CRI/CNI dispatch 与 Shim 连接前快路径 | `NOT_STARTED` | Codex | 建立同钟域非重叠时间线，优化 CRI receive 至 Shim create begin 的可控排队、CNI/resolve/spawn/connect | 串行 P95≤80ms、并发≤150ms；50+50 样本 100% 绑定且残差可解释；网络、取消、restart、exact-zero 无回退 |
+| S5.5d.2 durable create、持久化与 Host cgroup 快路径 | `NOT_STARTED` | Codex | 合并可恢复 journal 阶段并移除固定 placement 等待 | 不关闭 fsync/精确回读；Shim create→start-vm 串行/并发 P95≤140/150ms；原子故障矩阵通过；累计 CRI→VMM≤220/300ms；10 Pod absolute start 展开≤250ms |
 | S5.5e Guest 冷启动与普通路径内存优化 | `NOT_STARTED` | Codex | 把 Agent/vsock 提前并缩短 kernel/init 关键路径；删除无收益的 Guest/worker 私有常驻页 | VMM→vsock 串行 P95≤950ms、并发≤1050ms；同口径 20 Pod 稳态 Host cgroup 均值≤100MiB/Pod，且节点 MemAvailable 差值摊销相对 S5.5a 下降≥15%或≤100MiB/Pod；能力冒烟零回退 |
 | S5.5f 端到端门禁与回归 | `NOT_STARTED` | Codex | 证明局部收益转化为 Kubernetes Ready 延迟与可持续密度 | 串行 P95≤1.5s；5×10 并发 P95≤1.8s、增量≤300ms；100 Pod 报告启动/稳态/峰值资源；受影响 E2E 零新增失败、最终 exact-zero |
 
@@ -585,8 +586,9 @@ Stage 进度只记录在本文各 `Sx.x` 状态表中；活动 handoff 只保存
 Work Stage 未达到全部验收标准时不能标记 `DONE`。允许以 `DEFERRED` 延期非关键项，但必须注明新的目标 Stage；会改变主架构或公共接口的问题不能带入不可逆实现。
 
 GLM 在冻结分支和独立工作目录执行的全量 Node E2E 属于外部并行验证，不进入上述 Stage 状态，
-也不得改写主线证据。其报告只有在绑定 commit/artifact SHA、原始结果可复验且归因审阅通过后，
-才作为 S5.5f 或 S6.2c 的回归输入；主线继续在 W2 推进，避免与其使用的 W1 相互干扰。
+也不作为 S5.5c～S5.5e 的进入或退出门禁。其报告只有在绑定 commit/artifact SHA、原始结果可
+复验且归因审阅通过后，才作为 S5.5f 或 S6.2c 的补充回归输入；GLM 发现的问题先登记、复现和
+归因，不能直接修改主线 Stage 状态。主线继续在 W2/W3 推进，避免与其使用的 W1 相互干扰。
 
 
 ## 13. 未确认问题记录规则
