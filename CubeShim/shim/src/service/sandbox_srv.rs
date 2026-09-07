@@ -272,7 +272,7 @@ impl SandboxService {
         let phase_started = Instant::now();
         let prepared =
             runtime_resource::prepare(&self.id, &netns_path, &config, &plan, &mut spec).await;
-        log::info!(
+        crate::cube_perf!(
             "cube_perf component=shim operation=create phase=runtime-resource sandbox_id={} ts_mono_us={} duration_us={} success={}",
             self.id,
             Utils::monotonic_time_micros(),
@@ -291,7 +291,7 @@ impl SandboxService {
             Err(error) => Err((format!("prepare RuntimeResource: {error}"), None)),
         };
         let succeeded = result.is_ok();
-        log::info!(
+        crate::cube_perf!(
             "cube_perf component=shim operation=create phase=sandbox-init sandbox_id={} ts_mono_us={} duration_us={} success={}",
             self.id,
             Utils::monotonic_time_micros(),
@@ -321,7 +321,7 @@ impl SandboxService {
             }
         }
         self.lifecycle.changed.notify_waiters();
-        log::info!(
+        crate::cube_perf!(
             "cube_perf component=shim operation=create phase=publish sandbox_id={} ts_mono_us={} duration_us={} total_us={} success={}",
             self.id,
             Utils::monotonic_time_micros(),
@@ -423,7 +423,7 @@ impl SandboxService {
                 cleanup: StartCleanup::Released,
             })
         };
-        log::info!(
+        crate::cube_perf!(
             "cube_perf component=shim operation=start phase=managed-start sandbox_id={} ts_mono_us={} duration_us={} success={}",
             self.id,
             Utils::monotonic_time_micros(),
@@ -470,7 +470,7 @@ impl SandboxService {
             )
             .await);
         }
-        log::info!(
+        crate::cube_perf!(
             "cube_perf component=shim operation=start phase=host-readback sandbox_id={} ts_mono_us={} duration_us={}",
             self.id,
             Utils::monotonic_time_micros(),
@@ -502,7 +502,7 @@ impl SandboxService {
             )
             .await);
         }
-        log::info!(
+        crate::cube_perf!(
             "cube_perf component=shim operation=start phase=tap-intent sandbox_id={} ts_mono_us={} duration_us={}",
             self.id,
             Utils::monotonic_time_micros(),
@@ -520,7 +520,7 @@ impl SandboxService {
                 .await);
             }
         };
-        log::info!(
+        crate::cube_perf!(
             "cube_perf component=shim operation=start phase=tap-handoff sandbox_id={} ts_mono_us={} duration_us={}",
             self.id,
             Utils::monotonic_time_micros(),
@@ -555,7 +555,7 @@ impl SandboxService {
             )
             .await);
         }
-        log::info!(
+        crate::cube_perf!(
             "cube_perf component=shim operation=start phase=vm-intent sandbox_id={} ts_mono_us={} duration_us={}",
             self.id,
             Utils::monotonic_time_micros(),
@@ -587,7 +587,7 @@ impl SandboxService {
             Ok::<(), String>(())
         }
         .await;
-        log::info!(
+        crate::cube_perf!(
             "cube_perf component=shim operation=start phase=guest-start sandbox_id={} ts_mono_us={} duration_us={} success={}",
             self.id,
             Utils::monotonic_time_micros(),
@@ -1315,7 +1315,7 @@ impl Sandbox for SandboxService {
                 format!("finish CreateSandbox waiter: {error}"),
             ));
         }
-        log::info!(
+        crate::cube_perf!(
             "cube_perf component=shim operation=create phase=ttrpc-total sandbox_id={} ts_mono_us={} duration_us={} success={}",
             self.id,
             Utils::monotonic_time_micros(),
@@ -1352,7 +1352,7 @@ impl Sandbox for SandboxService {
             tokio::spawn(self.clone().run_start());
         }
         let result = self.wait_for_start().await;
-        log::info!(
+        crate::cube_perf!(
             "cube_perf component=shim operation=start phase=ttrpc-total sandbox_id={} ts_mono_us={} duration_us={} success={}",
             self.id,
             Utils::monotonic_time_micros(),

@@ -61,6 +61,9 @@ func (c *Coordinator) Prepare(request state.PrepareRequest) (result *state.Prepa
 	lockWait := time.Since(lockStart)
 	storeStart := time.Now()
 	defer func() {
+		if !monotime.TraceEnabled() {
+			return
+		}
 		CubeLog.WithContext(context.Background()).Infof(
 			"cube_perf component=cubelet operation=create phase=coordinator-prepare sandbox_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d store_us=%d",
 			request.SandboxID, request.Generation, monotime.Micros(), time.Since(totalStart).Microseconds(),
@@ -91,6 +94,9 @@ func (c *Coordinator) MarkReadyAndPublish(sandboxID string, generation uint64, l
 	lockWait := time.Since(lockStart)
 	storeStart := time.Now()
 	defer func() {
+		if !monotime.TraceEnabled() {
+			return
+		}
 		CubeLog.WithContext(context.Background()).Infof(
 			"cube_perf component=cubelet operation=create phase=coordinator-ready sandbox_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d store_publish_us=%d",
 			sandboxID, generation, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,

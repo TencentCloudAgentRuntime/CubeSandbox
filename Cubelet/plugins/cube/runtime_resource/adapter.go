@@ -129,6 +129,9 @@ func (a *adapter) Prepare(ctx context.Context, request *runtimev1.PrepareSandbox
 	defer a.mu.Unlock()
 	lockWait := time.Since(lockStart)
 	defer func() {
+		if !monotime.TraceEnabled() {
+			return
+		}
 		CubeLog.WithContext(ctx).Infof(
 			"cube_perf component=cubelet operation=create phase=adapter-prepare sandbox_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d",
 			request.GetSandboxId(), request.GetGeneration(), monotime.Micros(), time.Since(totalStart).Microseconds(),
@@ -166,6 +169,9 @@ func (a *adapter) resumePrepare(ctx context.Context, record *diskRecord) (prepar
 	initialStage := record.Stage
 	var validateRoot, persistShared, networkPrepare, persistPrepared time.Duration
 	defer func() {
+		if !monotime.TraceEnabled() {
+			return
+		}
 		CubeLog.WithContext(ctx).Infof(
 			"cube_perf component=cubelet operation=create phase=adapter-resume sandbox_id=%s generation=%d initial_stage=%s final_stage=%s ts_mono_us=%d duration_us=%d success=%t validate_root_us=%d persist_shared_us=%d network_us=%d persist_prepared_us=%d",
 			record.SandboxID, record.Generation, initialStage, record.Stage, monotime.Micros(),
@@ -478,6 +484,9 @@ func (a *adapter) OpenTap(binding handoff.Binding) (descriptorFile *os.File, err
 	lockWait = time.Since(stageStart)
 	stageStart = time.Now()
 	defer func() {
+		if !monotime.TraceEnabled() {
+			return
+		}
 		CubeLog.WithContext(context.Background()).Infof(
 			"cube_perf component=cubelet operation=start phase=adapter-open-tap sandbox_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d load_us=%d open_us=%d duplicate_us=%d",
 			binding.SandboxID, binding.Generation, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
@@ -540,6 +549,9 @@ func (a *adapter) persist(record *diskRecord) (err error) {
 	stageStart := totalStart
 	var encodeTime, createTime, writeTime, fileSyncTime, renameTime, parentSyncTime time.Duration
 	defer func() {
+		if !monotime.TraceEnabled() {
+			return
+		}
 		CubeLog.WithContext(context.Background()).Infof(
 			"cube_perf component=cubelet operation=persist phase=adapter-store sandbox_id=%s record_stage=%s ts_mono_us=%d duration_us=%d success=%t encode_us=%d create_us=%d write_us=%d file_fsync_us=%d rename_us=%d parent_fsync_us=%d fsync_count=2",
 			record.SandboxID, record.Stage, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,

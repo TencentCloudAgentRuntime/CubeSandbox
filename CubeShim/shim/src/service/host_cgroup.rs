@@ -6356,7 +6356,7 @@ fn sync_directory(path: &Path) -> Result<(), String> {
     let result = File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| format!("sync directory {}: {error}", path.display()));
-    log::info!(
+    crate::cube_perf!(
         "cube_perf component=shim operation=persist phase=directory-fsync target={} ts_mono_us={} duration_us={} success={}",
         path.display(),
         Utils::monotonic_time_micros(),
@@ -6424,7 +6424,7 @@ fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<(), String> 
         ));
     }
     let result = sync_directory(parent);
-    log::info!(
+    crate::cube_perf!(
         "cube_perf component=shim operation=persist phase=atomic-write-json target={} ts_mono_us={} duration_us={} success={}",
         path.display(),
         Utils::monotonic_time_micros(),
@@ -6478,7 +6478,7 @@ fn atomic_write_bytes(path: &Path, data: &[u8]) -> Result<(), String> {
         return Err(format!("commit record {}: {error}", path.display()));
     }
     let result = sync_directory(parent);
-    log::info!(
+    crate::cube_perf!(
         "cube_perf component=shim operation=persist phase=atomic-write-bytes target={} ts_mono_us={} duration_us={} success={}",
         path.display(),
         Utils::monotonic_time_micros(),

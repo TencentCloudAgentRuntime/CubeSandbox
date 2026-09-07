@@ -36,6 +36,9 @@ type nsenterRunner struct{}
 func (nsenterRunner) Run(ctx context.Context, netnsPath string, command ...string) (output []byte, err error) {
 	started := time.Now()
 	defer func() {
+		if !monotime.TraceEnabled() {
+			return
+		}
 		CubeLog.WithContext(ctx).Infof(
 			"cube_perf component=cubelet operation=create phase=network-exec netns=%s command=%q ts_mono_us=%d duration_us=%d success=%t",
 			netnsPath, strings.Join(command, " "), monotime.Micros(), time.Since(started).Microseconds(), err == nil,
@@ -92,6 +95,9 @@ func newLinuxNetwork() *linuxNetwork { return &linuxNetwork{runner: nsenterRunne
 func (n *linuxNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, tapName string) (attachment *runtimev1.NetworkAttachment, err error) {
 	started := time.Now()
 	defer func() {
+		if !monotime.TraceEnabled() {
+			return
+		}
 		CubeLog.WithContext(ctx).Infof(
 			"cube_perf component=cubelet operation=create phase=network-prepare netns=%s interface=%s tap=%s ts_mono_us=%d duration_us=%d success=%t",
 			netnsPath, interfaceName, tapName, monotime.Micros(), time.Since(started).Microseconds(), err == nil,

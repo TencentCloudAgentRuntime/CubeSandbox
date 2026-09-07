@@ -213,7 +213,7 @@ impl WorkerClient {
         if let Some(placement) = placement {
             let phase_started = Instant::now();
             placement.prepare_vmm_worker_spawn(&worker_path, &nonce, PROTOCOL_VERSION)?;
-            log::info!(
+            crate::cube_perf!(
                 "cube_perf component=vmm-worker operation=start phase=prepare-intent sandbox_id={} ts_mono_us={} duration_us={}",
                 sandbox_id,
                 Utils::monotonic_time_micros(),
@@ -245,7 +245,7 @@ impl WorkerClient {
         drop(event_child);
 
         let pid = child.id();
-        log::info!(
+        crate::cube_perf!(
             "cube_perf component=vmm-worker operation=start phase=fork-exec sandbox_id={} pid={} ts_mono_us={} duration_us={}",
             sandbox_id,
             pid,
@@ -338,7 +338,7 @@ impl WorkerClient {
         {
             return Err(client.terminate_after_error(error));
         }
-        log::info!(
+        crate::cube_perf!(
             "cube_perf component=vmm-worker operation=start phase=hello sandbox_id={} pid={} ts_mono_us={} duration_us={}",
             sandbox_id,
             pid,
@@ -355,7 +355,7 @@ impl WorkerClient {
         if let Err(error) = verify_worker_fd_allowlist(pid, control_child_fd, event_child_fd) {
             return Err(client.terminate_after_error(error));
         }
-        log::info!(
+        crate::cube_perf!(
             "cube_perf component=vmm-worker operation=start phase=fd-gate sandbox_id={} pid={} ts_mono_us={} duration_us={}",
             sandbox_id,
             pid,
@@ -376,7 +376,7 @@ impl WorkerClient {
                     PLACEMENT_DEADLINE, placement_elapsed
                 )));
             }
-            log::info!(
+            crate::cube_perf!(
                 "cube_perf component=vmm-worker operation=start phase=placement sandbox_id={} pid={} ts_mono_us={} duration_us={}",
                 sandbox_id,
                 pid,
@@ -389,7 +389,7 @@ impl WorkerClient {
             if let Err(error) = client.request(WorkerCommand::Launch(config), &[]) {
                 return Err(client.terminate_after_error(error));
             }
-            log::info!(
+            crate::cube_perf!(
                 "cube_perf component=vmm-worker operation=start phase=launch sandbox_id={} pid={} ts_mono_us={} duration_us={} total_us={}",
                 sandbox_id,
                 pid,

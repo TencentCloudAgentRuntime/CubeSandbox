@@ -40,6 +40,29 @@ macro_rules! infof {
     }};
 }
 
+/// Emit a structured startup trace through the Rust `log` facade only when
+/// CUBE_PERF_TRACE=1. Arguments are not evaluated while tracing is disabled.
+#[macro_export]
+macro_rules! cube_perf {
+    ($($arg:tt)*) => {{
+        if $crate::common::utils::Utils::perf_trace_enabled() {
+            log::info!($($arg)*);
+        }
+    }};
+}
+
+/// Emit a structured startup trace through CubeShim's per-sandbox logger only
+/// when CUBE_PERF_TRACE=1. Arguments are not evaluated while disabled.
+#[macro_export]
+macro_rules! cube_perff {
+    ($log:expr, $($arg:tt)*) => {{
+        if $crate::common::utils::Utils::perf_trace_enabled() {
+            let msg = format!($($arg)*);
+            let _ = $log.info(msg);
+        }
+    }};
+}
+
 #[macro_export]
 macro_rules! warnf {
     ($log:expr, $($arg:tt)*) => {{

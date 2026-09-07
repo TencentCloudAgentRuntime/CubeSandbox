@@ -560,6 +560,9 @@ func (s *Store) persist(record *Record) (err error) {
 	stageStart := totalStart
 	var encodeTime, createTime, writeTime, fileSyncTime, renameTime, parentSyncTime time.Duration
 	defer func() {
+		if !monotime.TraceEnabled() {
+			return
+		}
 		CubeLog.WithContext(context.Background()).Infof(
 			"cube_perf component=cubelet operation=persist phase=runtime-store sandbox_id=%s ts_mono_us=%d duration_us=%d success=%t encode_us=%d create_us=%d write_us=%d file_fsync_us=%d rename_us=%d parent_fsync_us=%d fsync_count=2",
 			record.SandboxID, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
@@ -618,6 +621,9 @@ func (s *Store) persist(record *Record) (err error) {
 func (s *Store) syncParent(operation string) (err error) {
 	started := time.Now()
 	defer func() {
+		if !monotime.TraceEnabled() {
+			return
+		}
 		CubeLog.WithContext(context.Background()).Infof(
 			"cube_perf component=cubelet operation=persist phase=runtime-parent-fsync persist_operation=%s ts_mono_us=%d duration_us=%d success=%t fsync_count=1",
 			operation, monotime.Micros(), time.Since(started).Microseconds(), err == nil,

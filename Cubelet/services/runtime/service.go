@@ -169,6 +169,9 @@ func (s *Service) PrepareSandbox(ctx context.Context, request *runtimev1.Prepare
 		generation = request.GetGeneration()
 	}
 	defer func() {
+		if !monotime.TraceEnabled() {
+			return
+		}
 		CubeLog.WithContext(ctx).Infof(
 			"cube_perf component=cubelet operation=create phase=prepare-sandbox sandbox_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t operation_lock_us=%d digest_us=%d coordinator_us=%d adapter_us=%d validate_us=%d mark_ready_us=%d",
 			sandboxID, generation, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,

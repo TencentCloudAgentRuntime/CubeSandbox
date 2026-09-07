@@ -7,7 +7,18 @@
 // across Cubelet, CubeShim, and the per-Pod VMM worker.
 package monotime
 
-import "golang.org/x/sys/unix"
+import (
+	"os"
+
+	"golang.org/x/sys/unix"
+)
+
+// TraceEnabled reports whether opt-in startup performance tracing is enabled.
+// Callers should check this before collecting timestamps or formatting logs so
+// the default runtime path has negligible observability overhead.
+func TraceEnabled() bool {
+	return os.Getenv("CUBE_PERF_TRACE") == "1"
+}
 
 // Micros returns CLOCK_MONOTONIC in microseconds. A zero value means the
 // underlying clock read failed and must not be used as an ordering point.

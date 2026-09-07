@@ -164,6 +164,16 @@ const IVSHMEM_PREFIX: &str = "ivshmem-";
 pub struct Utils {}
 pub struct AsyncUtils {}
 impl Utils {
+    /// Return whether opt-in startup performance tracing is enabled.
+    ///
+    /// The check intentionally happens at every trace point so an unset
+    /// variable avoids formatting and timestamp collection on the normal
+    /// runtime path. The environment is fixed for the lifetime of a shim or
+    /// worker process, so no additional synchronization is needed.
+    pub fn perf_trace_enabled() -> bool {
+        std::env::var_os("CUBE_PERF_TRACE").is_some_and(|value| value == "1")
+    }
+
     /// Return the Linux host CLOCK_MONOTONIC value in microseconds.
     ///
     /// Unlike `Instant`, this value can be correlated across CubeShim and the

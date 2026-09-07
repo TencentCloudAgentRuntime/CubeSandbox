@@ -1350,13 +1350,13 @@ pub(crate) async fn prepare(
     spec: &mut Spec,
 ) -> Result<RuntimeLease, String> {
     let started = Instant::now();
-    log::info!(
+    crate::cube_perf!(
         "cube_perf component=shim operation=create phase=runtime-resource-begin sandbox_id={} ts_mono_us={}",
         sandbox_id,
         crate::common::utils::Utils::monotonic_time_micros()
     );
     let result = prepare_inner(sandbox_id, netns_path, config, plan, spec).await;
-    log::info!(
+    crate::cube_perf!(
         "cube_perf component=shim operation=create phase=runtime-resource-end sandbox_id={} ts_mono_us={} duration_us={} success={}",
         sandbox_id,
         crate::common::utils::Utils::monotonic_time_micros(),
@@ -1386,7 +1386,7 @@ async fn prepare_inner(
         )
         .await?;
     validate_capabilities(&capabilities)?;
-    log::info!(
+    crate::cube_perf!(
         "cube_perf component=shim operation=create phase=runtime-capabilities sandbox_id={} ts_mono_us={} duration_us={}",
         sandbox_id,
         crate::common::utils::Utils::monotonic_time_micros(),
@@ -1425,7 +1425,7 @@ async fn prepare_inner(
     cleanup_lease.persist_cleanup_record().map_err(|error| {
         format!("persist RuntimeResource cleanup identity before Prepare: {error}")
     })?;
-    log::info!(
+    crate::cube_perf!(
         "cube_perf component=shim operation=create phase=runtime-intent sandbox_id={} generation={} ts_mono_us={} duration_us={}",
         sandbox_id,
         generation,
@@ -1479,7 +1479,7 @@ async fn prepare_inner(
             .await)
         }
     };
-    log::info!(
+    crate::cube_perf!(
         "cube_perf component=shim operation=create phase=runtime-prepare-rpc sandbox_id={} generation={} ts_mono_us={} duration_us={}",
         sandbox_id,
         generation,

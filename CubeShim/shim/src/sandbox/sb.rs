@@ -616,7 +616,7 @@ impl SandBox {
         let total_started = Instant::now();
         let phase_started = Instant::now();
         let snapshot = self.start_vm(worker_placement).await?;
-        infof!(
+        crate::cube_perff!(
             self.log,
             "cube_perf component=shim operation=start phase=vm-ready sandbox_id={} ts_mono_us={} duration_us={} restored={}",
             self.id,
@@ -635,7 +635,7 @@ impl SandBox {
         let phase_started = Instant::now();
         self.connect_agent().await?;
 
-        infof!(
+        crate::cube_perff!(
             self.log,
             "cube_perf component=shim operation=start phase=agent-connect sandbox_id={} ts_mono_us={} duration_us={}",
             self.id,
@@ -652,7 +652,7 @@ impl SandBox {
         if !self.app_snapshot_restore() {
             self.add_device().await?;
         }
-        infof!(
+        crate::cube_perff!(
             self.log,
             "cube_perf component=shim operation=start phase=guest-devices sandbox_id={} ts_mono_us={} duration_us={}",
             self.id,
@@ -708,7 +708,7 @@ impl SandBox {
                 .await
                 .map_err(|e| format!("create sandbox failed:{}", e))?;
         }
-        infof!(
+        crate::cube_perff!(
             self.log,
             "cube_perf component=shim operation=start phase=agent-create-sandbox sandbox_id={} ts_mono_us={} duration_us={}",
             self.id,
@@ -728,7 +728,7 @@ impl SandBox {
             self.tx_monitor_exited = Some(sender);
             self.monitor_handle = Some(Arc::new(handle));
         }
-        infof!(
+        crate::cube_perff!(
             self.log,
             "cube_perf component=shim operation=start phase=monitor-setup sandbox_id={} ts_mono_us={} duration_us={} total_us={}",
             self.id,
@@ -1072,7 +1072,7 @@ impl SandBox {
         worker_placement: Option<&dyn crate::hypervisor::worker::WorkerPlacement>,
     ) -> CResult<bool> {
         let total_started = Instant::now();
-        infof!(
+        crate::cube_perff!(
             self.log,
             "cube_perf component=shim operation=start phase=start-vm-begin sandbox_id={} ts_mono_us={}",
             self.id,
@@ -1116,7 +1116,7 @@ impl SandBox {
         } else {
             None
         };
-        infof!(
+        crate::cube_perff!(
             self.log,
             "cube_perf component=shim operation=start phase=vm-config sandbox_id={} ts_mono_us={} duration_us={} snapshot={}",
             self.id,
@@ -1129,7 +1129,7 @@ impl SandBox {
             let mut ch = self.ch.as_mut().unwrap().lock().await;
             ch.launch_vmm(worker_placement).await?;
         }
-        infof!(
+        crate::cube_perff!(
             self.log,
             "cube_perf component=shim operation=start phase=launch-vmm sandbox_id={} ts_mono_us={} duration_us={}",
             self.id,
@@ -1165,7 +1165,7 @@ impl SandBox {
                 self.boot_vm().await?;
             }
         }
-        infof!(
+        crate::cube_perff!(
             self.log,
             "cube_perf component=shim operation=start phase=boot-or-restore sandbox_id={} ts_mono_us={} duration_us={} restored={}",
             self.id,
@@ -1189,7 +1189,7 @@ impl SandBox {
                 ));
             }
             let duration = start.elapsed().as_millis();
-            infof!(
+            crate::cube_perff!(
                 self.log,
                 "cube_perf component=shim operation=start phase=vsock-ready sandbox_id={} ts_mono_us={} duration_us={} total_us={} legacy_cost_ms={}",
                 self.id,

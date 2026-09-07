@@ -17,3 +17,20 @@ func TestMicrosIsAvailableAndMonotonic(t *testing.T) {
 		t.Fatalf("CLOCK_MONOTONIC moved backwards: first=%d second=%d", first, second)
 	}
 }
+
+func TestTraceEnabledRequiresExactOptIn(t *testing.T) {
+	t.Setenv("CUBE_PERF_TRACE", "")
+	if TraceEnabled() {
+		t.Fatal("trace unexpectedly enabled for an empty value")
+	}
+
+	t.Setenv("CUBE_PERF_TRACE", "true")
+	if TraceEnabled() {
+		t.Fatal("trace unexpectedly enabled for a non-canonical value")
+	}
+
+	t.Setenv("CUBE_PERF_TRACE", "1")
+	if !TraceEnabled() {
+		t.Fatal("trace was not enabled for CUBE_PERF_TRACE=1")
+	}
+}
