@@ -27,11 +27,11 @@
 
 ## 集群回归
 
-已构建并推送安装镜像：`ccr.ccs.tencentyun.com/journeyyou/cube-cri-installer@sha256:bdd2f351f0963fb55263c553adb3d7687d2f6d33562cceaedee8ce75fe2f64a7`。尚未部署到节点。
+已构建并推送安装镜像：`ccr.ccs.tencentyun.com/journeyyou/cube-cri-installer@sha256:bdd2f351f0963fb55263c553adb3d7687d2f6d33562cceaedee8ce75fe2f64a7`。节点制品哈希校验通过。
 
-尚未执行。计划在 TS4 节点 `10.0.244.89` 部署，使用 `10.0.244.2` 作 runc 对照，独立命名空间为 `cube-merge-agc-20260907`。
+2026-09-07 已部署到 TS4 节点 `10.0.244.89`，以 `10.0.244.2` 为 runc 对照，在独立命名空间 `cube-merge-agc-20260907` 完成回归。
 
-目标节点持续出现另一轮 Sonobuoy 任务，需待其释放或明确分配节点后再替换运行时。
+按要求停止 Sonobuoy 执行器、排队补测及运行中的测试 Pod，保留已有结果。运行时安装目录为 `/opt/cube-cri/releases/0399a21ba4aed3a8`。
 
 ```bash
 UTILITY_IMAGE=mirror.ccs.tencentyun.com/library/busybox:1.36.1 \
@@ -40,6 +40,16 @@ UTILITY_IMAGE=mirror.ccs.tencentyun.com/library/busybox:1.36.1 \
   --namespace cube-merge-agc-20260907
 ```
 
-该框架含 15 项：探针 4、20 Pod 并发 1、基础语义 4、混合运行时 5、AWV CSI 1；不覆盖 Cubebox 组合检查点的集群恢复。
+结果：**15/15 通过，0 失败、0 跳过，耗时 307.029 秒**。
 
-本地日志、制品哈希和部署前快照保存于集成 worktree 的 `_output/merge-agc/`。
+| 范围 | 通过 |
+| --- | --- |
+| exec/HTTP/TCP 存活探针、就绪探针 | 4/4 |
+| 20 Pod 并发启动 | 1/1，全部就绪耗时 28.077 秒 |
+| privileged、initContainer、emptyDir、多容器、生命周期 | 4/4 |
+| 默认/显式 runc、hostPath、DaemonSet、另一节点对照 | 5/5 |
+| AWV CSI：Cube 写入、重建读取、另一节点 runc 读取 | 1/1 |
+
+本轮未新增代码修复、跳过用例或放宽超时；复查合并改动，无待移除的调试 workaround。测试资源已清理，节点及运行时服务正常。该框架不覆盖 Cubebox 组合检查点的集群恢复。
+
+完整日志：`_output/merge-agc/e2e-framework-full-1.log`；制品哈希、部署日志、前后快照及逐项结果见同目录和 `manifest.json`。
