@@ -2,14 +2,16 @@
 
 ## 当前 Stage
 
-S5.5c `VALIDATING`。S5.3、S5.3a、S5.3b、S5.3c、S5.4a～S5.4c 与 S5.5a～S5.5b 均为 `DONE`。
+S5.5c `DONE`，独立 reviewer 终审 `PASS`（P0/P1/P2=0）；S5.5d.1 `IN_PROGRESS`。
+S5.3、S5.3a、S5.3b、S5.3c、S5.4a～S5.4c 与 S5.5a～S5.5c 均为 `DONE`。
 用户决定先优化普通 OCI 冷启动，目标是串行 PodScheduled→Ready P95≤1.5s 并消除并发放大；
 S5.5 完成后再进入 S6.1。不得回退已验收的普通 worker 启动路径。
 
 ## 基线
 
-当前 S5.5c 实现 commit 为 `69b3f9b1503566171bb4a03cef56f0447a80b346`，tree 为
-`0cdedb2ecf259486d238c3b7dc5e657e36008048`。W2 已部署候选 RuntimeResource；Host
+当前 S5.5c 实现 commit 为 `69b3f9b1503566171bb4a03cef56f0447a80b346`，真实内核回滚测试
+commit 为 `adc416d2`，tree 为
+`0cdedb2b10aeebf6f49e785f446d6edd363b5d4e`。W2 已部署候选 RuntimeResource；Host
 CubeShim/worker/runtime 的最终 digest 必须在 S5.5c 证据包中重新冻结。上一已验收基线为：
 Shim SHA-256 `4bcc5d53…`、worker `5b0b0d9f…`、RuntimeResource harness `68233e1d…`；
 Agent ext4 为 `3c36bcb9…`。`RuntimeClass/cube` 保留。W1 由 GLM 独立使用，主线未触碰。
@@ -50,12 +52,14 @@ S5.5c 已完成生产 netlink backend、command 回滚开关和单元/race/vet�
 并发均 50/50 成功，network prepare P95 为 4.313/6.293ms，普通 netlink 路径 network exec=0，
 当前 Cilium IPv4 的 DNS/PodIP/ClusterIP/NetworkPolicy/MTU、真实内核双 netns IPv4/IPv6、
 RuntimeResource restart 和清理已经通过。累计 CRI→start-vm P95 仍为 429.479/965.868ms，
-明确转交 S5.5d.1/d.2，不把它归咎于 netlink。S5.5c 尚缺真实两节点 PodIP、实际内核部分失败
-注入、最终 exact-zero/证据包和 reviewer 终审，因此状态保持 `VALIDATING`。
+明确转交 S5.5d.1/d.2，不把它归咎于 netlink。真实 W2↔W3 Cube Pod 双向 PodIP、实际内核
+部分失败注入、command↔netlink 完整往返、活动 Pod restart、最终 exact-zero 和包含完整
+runner/源码的三份可反向校验 v6 证据包均已完成；独立 reviewer 终审 `PASS`
+（P0/P1/P2=0），状态为 `DONE`。完整结果见 [S5.5c 最终证据](./evidence/s5.5/s5.5c-netlink-fastpath.md)。
 
 ## 未完成
 
-- S5.5c、S5.5d.1、S5.5d.2、S5.5e～S5.5f：普通冷启动性能优化；退出门禁为串行 P95≤1.5s、5×10 并发 P95≤1.8s，
+- S5.5d.1、S5.5d.2、S5.5e～S5.5f：普通冷启动性能优化；退出门禁为串行 P95≤1.5s、5×10 并发 P95≤1.8s，
   冲刺并发 P95≤1.5s。
 - S6.1、S6.2a～c、S6.3～S6.4：模板、快照与暂停恢复设计和实现；S6.2c 负责模板路径密度和
   RuntimeClass overhead 最终标定。
@@ -81,14 +85,15 @@ RuntimeResource restart 和清理已经通过。累计 CRI→start-vm P95 仍为
 - S5.5b W2/控制证据包 SHA-256 为 `c2d802a8…`/`189362f2…`，均已从 COS 反向下载核验；
   trace-off 恢复 `inv-68cp87gx7f`，最终 exact-zero `inv-88cp8q0ni2`/`inv-08cp8pg2rr`；
   reviewer `PASS`（P0/P1/P2=0）。
+- S5.5c 三份 v6 包的外层/内层 checksum、credential scan、command/netlink 往返、restart、
+  双节点 exact-zero 均通过；独立 reviewer `PASS`（P0/P1/P2=0）。
 - `git diff --check`、credential scan、`make handoff-validate` 与 reviewer 终审均通过。
 
 ## 阻塞
 
 GLM 的冻结分支全量 Node E2E 是独立并行验证，不占用主线 Stage，也不阻塞 S5.5；只有绑定
 commit/artifact SHA 且原始结果可复验后才接收入回归证据。GLM 当前使用的 W1 可处于
-NotReady，主线不得恢复或修改 W1。S5.5c 当前唯一外部执行边界是：W3 加入集群需要短期
-kubeadm bootstrap token；该凭据不得上传 COS，须通过临时受控通道传递并在加入后撤销。
+NotReady，主线不得恢复或修改 W1。当前没有阻止 S5.5d.1 实现与 W2/W3 验证的明确卡点。
 
 ## 受保护路径
 
@@ -99,9 +104,11 @@ assets 和回滚副本；不得在仓库或 handoff 中记录凭证、token、�
 
 ## 下一步
 
-1. 关闭 S5.5c：在 W2/W3 补真实跨节点 PodIP、实际内核部分失败注入、exact-zero 和终审；
-   已达成的 network prepare 4.313/6.293ms 与 exec=0 不重复优化。
-2. 按 S5.5d.1、S5.5d.2、S5.5e 依次关闭 pre-Shim/CRI-CNI dispatch、重复持久化/placement 等待和 Guest
+1. S5.5d.1 先修正 runner 的输出截断、唯一计数和分位数元数据，建立同钟域非重叠时间线，
+   再优化 CRI receive 至 Shim create begin；已达成的 network prepare 4.313/6.293ms 与 exec=0
+   不重复优化。
+2. 按 S5.5d.1、S5.5d.2、
+   S5.5e 依次关闭 pre-Shim/CRI-CNI dispatch、重复持久化/placement 等待和 Guest
    cold boot；每个子阶段只在专项、故障与 exact-zero 通过后进入下一阶段。
 3. S5.5f 达到串行 P95≤1.5s、并发 P95≤1.8s，并完成受影响 Node E2E 回归；完整方案见
    [S5.5 性能优化方案](../../zh/dev/kubernetes-runtime-performance-s5.5.md)。

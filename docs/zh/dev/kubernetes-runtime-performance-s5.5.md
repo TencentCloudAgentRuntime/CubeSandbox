@@ -171,6 +171,8 @@ S5.5c 实测进一步证明网络 backend 的直接耗时已经达标，但原�
 
 - 补齐同一时钟域的 CRI receive、CNI begin/end、shim resolve/spawn/connect 和 Shim create begin
   事件，逐项相减，不再把重叠区间相加成“上界”。
+- 修正性能 runner：新 run 启动时截断 append-only manifest/output，结果中写入真实分位数算法，
+  并在验收前断言 manifest、Pod UID、sandbox ID 的期望数和唯一数，禁止复用目录污染样本。
 - 区分 containerd CRI 排队、CNI、shim manager 查找/连接和新 Shim 拉起；只优化 Cube 可控且有
   实测占比的步骤。
 - 保持 RuntimeClass handler、CNI 调用顺序、sandbox ownership 和 containerd shim v2 契约不变。
