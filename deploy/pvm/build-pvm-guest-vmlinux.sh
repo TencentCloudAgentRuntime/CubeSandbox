@@ -42,6 +42,8 @@ CONFIG_SHA256="${CONFIG_SHA256:-8e579bea756b6dadeff1203a5e4f3bba851a7426e4e50abd
 # CONFIG_URL, so air-gapped / offline build environments work out of the box.
 # Set LOCAL_CONFIG_FILE=/dev/null to force the CONFIG_URL path.
 LOCAL_CONFIG_FILE="${LOCAL_CONFIG_FILE:-${SCRIPT_DIR}/configs/pvm_guest}"
+# release 是部署默认值；设置为 debug 才保留 debug/FTRACE/SCHEDSTATS。
+CUBE_GUEST_KERNEL_PROFILE="${CUBE_GUEST_KERNEL_PROFILE:-release}"
 
 WORK_DIR="${WORK_DIR:-$(pwd)/pvm-guest-build}"
 SRC_DIR="${SRC_DIR:-${WORK_DIR}/linux}"
@@ -103,6 +105,8 @@ main() {
 
     clone_source
     fetch_config
+    CUBE_GUEST_KERNEL_PROFILE="${CUBE_GUEST_KERNEL_PROFILE}" \
+        bash "${SCRIPT_DIR}/apply-guest-kernel-profile.sh" "${SRC_DIR}"
     build_vmlinux
 
     log "All done."

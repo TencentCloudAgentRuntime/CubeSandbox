@@ -43,7 +43,7 @@ func panels() []any {
 		timeseriesWidth(3, "Sandbox 创建结果速率", 1, 16, 8, "ops", true, []query{{"sum by (result) (rate(cube_cri_operations_total{node=~\"$node\",component=\"shim\",operation=\"CreatePodSandbox\"}[$__rate_interval]))", "{{result}}"}}),
 
 		row(32, "Kubernetes 控制链路", 9),
-		timeseries(34, "Kubelet 同步与 CRI P95", 10, 0, "s", false, kubeletRuntimeP95()),
+		timeseries(34, "Kubelet 与 CRI（RunPodSandbox 含 CNI）P95", 10, 0, "s", false, kubeletRuntimeP95()),
 		timeseries(39, "API Server Pod POST P95", 10, 12, "s", false, apiserverPodPostP95()),
 
 		row(8, "Shim 与 VMM worker", 18),
@@ -119,7 +119,8 @@ func kubeletPodStartP95() []query {
 func kubeletRuntimeP95() []query {
 	return []query{
 		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_pod_worker_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))", "pod worker p95"},
-		{"histogram_quantile(0.95, sum by (le, operation_type) (rate(kubelet_runtime_operations_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\",operation_type=~\"run_podsandbox|create_container|start_container\"}[1m])))", "{{operation_type}} p95"},
+		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_runtime_operations_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\",operation_type=\"run_podsandbox\"}[1m])))", "RunPodSandbox（含 CNI）p95"},
+		{"histogram_quantile(0.95, sum by (le, operation_type) (rate(kubelet_runtime_operations_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\",operation_type=~\"create_container|start_container\"}[1m])))", "{{operation_type}} p95"},
 	}
 }
 

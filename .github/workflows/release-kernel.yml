@@ -25,6 +25,7 @@ env:
   KERNEL_ARCHIVE_URL: https://cnb.cool/CubeSandbox/OpenCloudOS-Kernel/-/git/archive/6.6.119-49.6.zip
   PVM_KERNEL_TAG: 6.6.69-1.2.cubesandbox
   PVM_VMLINUX_CACHE_PATH: kernel-cache/vmlinux-pvm
+  CUBE_GUEST_KERNEL_PROFILE: release
 
 defaults:
   run:
@@ -85,7 +86,7 @@ jobs:
       - name: Compute vmlinux cache metadata
         id: vmlinux_metadata
         run: |
-          config_hash="$(sha256sum "configs/kernel-oc9.${KERNEL_ARCH}.config" | awk '{print $1}')"
+          config_hash="$(sha256sum "configs/kernel-oc9.${KERNEL_ARCH}.config" deploy/pvm/apply-guest-kernel-profile.sh | sha256sum | awk '{print $1}')"
           echo "cache_key=vmlinux-opencloudos-${KERNEL_TAG}-${KERNEL_ARCH}-${config_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
 
       - name: Install kernel build dependencies
@@ -129,6 +130,7 @@ jobs:
         run: |
           cp "configs/kernel-oc9.${KERNEL_ARCH}.config" "${KERNEL_SRC}/.config"
           make -C "${KERNEL_SRC}" ARCH="${KBUILD_ARCH}" olddefconfig
+          bash deploy/pvm/apply-guest-kernel-profile.sh "${KERNEL_SRC}"
 
       - name: Build vmlinux
         if: steps.restore_vmlinux.outputs.cache-hit != 'true'
@@ -194,6 +196,7 @@ jobs:
           source_hash="$(
             sha256sum \
               deploy/pvm/build-pvm-guest-vmlinux.sh \
+              deploy/pvm/apply-guest-kernel-profile.sh \
               deploy/pvm/common.sh \
               deploy/pvm/configs/pvm_guest \
               | sha256sum \

@@ -6,7 +6,9 @@ build scripts:
 - `pvm_host` is used by `deploy/pvm/build-pvm-host-kernel-pkg.sh` to build the
   host kernel package that enables `KVM_PVM`.
 - `pvm_guest` is used by `deploy/pvm/build-pvm-guest-vmlinux.sh` to build the
-  guest `vmlinux` consumed by CubeSandbox.
+  guest `vmlinux` consumed by CubeSandbox. 默认 `release` profile 移除
+  debug、FTRACE 和 SCHEDSTATS；诊断时设置 `CUBE_GUEST_KERNEL_PROFILE=debug`
+  保留它们。
 
 The configs are kept in-tree so the default build path is reproducible and
 works in offline or air-gapped environments. They are derived from the PVM

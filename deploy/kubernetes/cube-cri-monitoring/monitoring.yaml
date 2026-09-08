@@ -563,13 +563,24 @@ data:
                 "uid": "cube-cri-prometheus"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.95, sum by (le, operation_type) (rate(kubelet_runtime_operations_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\",operation_type=~\"run_podsandbox|create_container|start_container\"}[1m])))",
-              "legendFormat": "{{operation_type}} p95",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(kubelet_runtime_operations_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\",operation_type=\"run_podsandbox\"}[1m])))",
+              "legendFormat": "RunPodSandbox（含 CNI）p95",
               "range": true,
               "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum by (le, operation_type) (rate(kubelet_runtime_operations_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\",operation_type=~\"create_container|start_container\"}[1m])))",
+              "legendFormat": "{{operation_type}} p95",
+              "range": true,
+              "refId": "C"
             }
           ],
-          "title": "Kubelet 同步与 CRI P95",
+          "title": "Kubelet 与 CRI（RunPodSandbox 含 CNI）P95",
           "type": "timeseries"
         },
         {
