@@ -9,10 +9,11 @@
 - 使用 task --list-all 命令查看项目的各类脚本入口. 
 
 - 测试
-    - 本项目采用多工作区并行开发模式. 当前工作区的测试集群环境见 [本地 worktree 配置](local.env)
+    - 本项目采用多工作区并行开发模式. 当前工作区的测试集群环境见 [本地 workspace 配置](local.env)
     - 登陆节点可使用 node-shell 插件, 例如 k node-shell 172.17.137.56 -- kubelet --version
-    - 如果cube节点受发布组件影响, 无法通过 node-shell 登陆节点, 可以先通过node-shell登陆非cube节点, 然后把 [本地 worktree 配置](local.env) 中的密钥上传到node-shell容器后再通过ssh登陆到目标节点. 
+    - 如果cube节点受发布组件影响, 无法通过 node-shell 登陆节点, 可以先通过node-shell登陆非cube节点, 然后把 [本地 workspace 配置](local.env) 中的密钥上传到node-shell容器后再通过ssh登陆到目标节点. 
     - 由于 cube 依赖 pvm, 而 pvm 对内核版本有要求, 要使用集群内的OS版本为TS4的节点作为cube运行时节点.
     - 涉及到代码层面的开发变动, 必须到测试集群中进行针对性测试, 通过验收后才能认为完成.
+    - 运行社区的e2e测试用例时, 可能遇到 registry.k8s.io 的镜像无法拉取的问题, 尽量自己独立解决. 例如上传到 ccr.ccs.tencentyun.com/journeyyou 仓库或者直接导入节点. 
 
 - 在停止工作前, 应该回顾本次开发引入的改动, 识别哪些是调试期间所做的 workaround, 分析并验证此workaround是否是非必要的临时更改. 若是, 应该收敛改动并且到集群做复测. 
