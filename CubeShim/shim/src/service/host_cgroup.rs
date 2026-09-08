@@ -22,9 +22,10 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zbus::zvariant::Value as ZbusValue;
 
+use crate::common::utils::Utils;
 use crate::service::bootstrap::BootstrapParams;
 use crate::service::runtime_resource::{self, HostResourceCeiling};
 
@@ -1379,54 +1380,60 @@ impl LifecycleHandle {
         identity: ProcessIdentity,
         expected_nonce_hash: &str,
     ) -> Result<(), String> {
-        self.update_record(|record| {
-            if record.launch_nonce_sha256 != expected_nonce_hash {
-                return Err("server launch nonce does not match lifecycle record".to_string());
+        let _lock = self.record_lock()?;
+        let mut record = self.read_record()?;
+        if record.launch_nonce_sha256 != expected_nonce_hash {
+            return Err("server launch nonce does not match lifecycle record".to_string());
+        }
+        if identity.launch_nonce_sha256.as_deref() != Some(expected_nonce_hash) {
+            return Err("server process environment nonce does not match PREPARED".to_string());
+        }
+        if identity.executable != record.expected_server_executable
+            || identity.command_sha256 != record.expected_server_command_sha256
+            || identity.cwd != record.bundle_identity
+        {
+            return Err(
+                "server executable, argv, or bundle identity changed after PREPARED".to_string(),
+            );
+        }
+        let actual_executable = fs::read_link(format!("/proc/{}/exe", identity.pid))
+            .map_err(|error| format!("read server executable link: {error}"))?;
+        if actual_executable != Path::new(&record.expected_server_path) {
+            return Err(format!(
+                "server executable path {} does not match PREPARED {}",
+                actual_executable.display(),
+                record.expected_server_path
+            ));
+        }
+        if let Some(registered) = &record.server {
+            if immutable_identity_matches(registered, &identity) {
+                // Parent and child deliberately race to publish the same
+                // immutable identity. The loser only verifies it; rewriting
+                // the identical durable record adds an fsync to every Pod.
+                return Ok(());
             }
-            if identity.launch_nonce_sha256.as_deref() != Some(expected_nonce_hash) {
-                return Err("server process environment nonce does not match PREPARED".to_string());
-            }
-            if identity.executable != record.expected_server_executable
-                || identity.command_sha256 != record.expected_server_command_sha256
-                || identity.cwd != record.bundle_identity
-            {
-                return Err(
-                    "server executable, argv, or bundle identity changed after PREPARED"
-                        .to_string(),
-                );
-            }
-            let actual_executable = fs::read_link(format!("/proc/{}/exe", identity.pid))
-                .map_err(|error| format!("read server executable link: {error}"))?;
-            if actual_executable != Path::new(&record.expected_server_path) {
-                return Err(format!(
-                    "server executable path {} does not match PREPARED {}",
-                    actual_executable.display(),
-                    record.expected_server_path
-                ));
-            }
-            if let Some(registered) = &record.server {
-                if immutable_identity_matches(registered, &identity) {
-                    return Ok(());
-                }
-                return Err("a different server identity is already registered".to_string());
-            }
-            if record.phase != LifecyclePhase::Prepared {
-                return Err(format!(
-                    "server registration requires PREPARED, found {:?}",
-                    record.phase
-                ));
-            }
-            if record.target.cgroup() != identity.cgroup {
-                return Err(format!(
-                    "server registered in {}, expected {}",
-                    identity.cgroup,
-                    record.target.cgroup()
-                ));
-            }
-            record.server = Some(identity);
-            record.phase = LifecyclePhase::ServerIdentified;
-            Ok(())
-        })?;
+            return Err("a different server identity is already registered".to_string());
+        }
+        if record.phase != LifecyclePhase::Prepared {
+            return Err(format!(
+                "server registration requires PREPARED, found {:?}",
+                record.phase
+            ));
+        }
+        if record.target.cgroup() != identity.cgroup {
+            return Err(format!(
+                "server registered in {}, expected {}",
+                identity.cgroup,
+                record.target.cgroup()
+            ));
+        }
+        record.server = Some(identity);
+        record.phase = LifecyclePhase::ServerIdentified;
+        record.sequence = record
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| "lifecycle sequence overflow".to_string())?;
+        atomic_write_json(&self.directory.join(RECORD_FILE), &record)?;
         Ok(())
     }
 
@@ -1737,7 +1744,7 @@ impl LifecycleHandle {
             Classification::LegacyTask
         };
         let owner_path = self.directory.join(HOST_OWNER_FILE);
-        let (registered, claim_epoch, target) = {
+        let (registered, claim_epoch, target, trace_sandbox_id) = {
             // Keep record.lock only around validation and the durable Host
             // INTENT. The scanner must be able to revoke this epoch while a
             // systemd/cgroupfs placement call is stuck.
@@ -1849,12 +1856,13 @@ impl LifecycleHandle {
                 registered,
                 record.operation_owner.epoch,
                 record.target.clone(),
+                record.instance_id.clone(),
             )
         };
 
         let mut server = current_claim_server_identity()?;
         if server.cgroup != target.cgroup() {
-            create_and_join_target(&target, server.pid)?;
+            create_and_join_target(&target, server.pid, Some(&trace_sandbox_id))?;
         }
         server = current_claim_server_identity()?;
         if !immutable_identity_matches(&registered, &server) {
@@ -3345,7 +3353,9 @@ impl BootstrapSession {
     pub(crate) fn place_helper(&mut self) -> Result<(), String> {
         if self.target.managed() {
             let operation = self.handle.begin_helper_host_operation()?;
-            if let Err(error) = create_and_join_target(&self.target, std::process::id() as i32) {
+            if let Err(error) =
+                create_and_join_target(&self.target, std::process::id() as i32, None)
+            {
                 self.helper_moved = current_process_cgroup(std::process::id() as i32)
                     .map(|actual| actual == self.target.cgroup())
                     .unwrap_or(false);
@@ -3599,7 +3609,7 @@ pub(crate) fn run_systemd_probe() -> Result<(), String> {
             leaf_identity: None,
         };
         let pid = child.id() as i32;
-        if let Err(error) = create_and_join_target(&target, pid) {
+        if let Err(error) = create_and_join_target(&target, pid, None) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!("systemd probe iteration {iteration}: {error}"));
@@ -5863,22 +5873,51 @@ fn validate_cgroup_parent(cgroup: &str) -> Result<FileIdentity, String> {
     file_identity(&canonical)
 }
 
-fn create_and_join_target(target: &HostTarget, pid: i32) -> Result<(), String> {
+fn create_and_join_target(
+    target: &HostTarget,
+    pid: i32,
+    trace_sandbox_id: Option<&str>,
+) -> Result<(), String> {
     match target {
         HostTarget::Systemd { slice, unit, .. } => {
+            let sandbox_id = trace_sandbox_id.unwrap_or("host-probe");
             let mut properties = PropertiesBuilder::default_cgroup(slice, unit)
                 .pids(vec![pid as u32])
                 .build();
             properties.push(("CollectMode", ZbusValue::Str("inactive-or-failed".into())));
             let client = SystemdClient::new(unit, properties)
                 .map_err(|error| format!("construct systemd scope {unit}: {error}"))?;
-            if client.exists() {
+            let phase_started = Instant::now();
+            let exists = client.exists();
+            crate::cube_perf!(
+                "cube_perf component=shim operation=create phase=systemd-exists sandbox_id={} operation_id={} unit={} target_pid={} ts_mono_us={} duration_us={} exists={}",
+                sandbox_id,
+                sandbox_id,
+                unit,
+                pid,
+                Utils::monotonic_time_micros(),
+                phase_started.elapsed().as_micros(),
+                exists
+            );
+            if exists {
                 return Err(format!("refuse to reuse existing systemd scope {unit}"));
             }
-            client
+            let phase_started = Instant::now();
+            let result = client
                 .start()
-                .map_err(|error| format!("start systemd scope {unit}: {error}"))?;
-            verify_systemd_placement(target, pid)
+                .map_err(|error| format!("start systemd scope {unit}: {error}"));
+            crate::cube_perf!(
+                "cube_perf component=shim operation=create phase=systemd-start-transient sandbox_id={} operation_id={} unit={} target_pid={} ts_mono_us={} duration_us={} success={}",
+                sandbox_id,
+                sandbox_id,
+                unit,
+                pid,
+                Utils::monotonic_time_micros(),
+                phase_started.elapsed().as_micros(),
+                result.is_ok()
+            );
+            result?;
+            verify_systemd_placement(target, pid, trace_sandbox_id)
         }
         HostTarget::Cgroupfs { cgroup, .. } => {
             let path = Path::new("/sys/fs/cgroup").join(cgroup.trim_start_matches('/'));
@@ -5935,7 +5974,11 @@ fn verify_live_target_identity(target: &HostTarget) -> Result<(), String> {
     Ok(())
 }
 
-fn verify_systemd_placement(target: &HostTarget, pid: i32) -> Result<(), String> {
+fn verify_systemd_placement(
+    target: &HostTarget,
+    pid: i32,
+    trace_sandbox_id: Option<&str>,
+) -> Result<(), String> {
     let HostTarget::Systemd { cgroup, .. } = target else {
         return Err("systemd verification called for non-systemd target".to_string());
     };
@@ -5946,9 +5989,11 @@ fn verify_systemd_placement(target: &HostTarget, pid: i32) -> Result<(), String>
     let expected_parent = target
         .parent_identity()
         .ok_or_else(|| "systemd target has no durable parent identity".to_string())?;
+    let sandbox_id = trace_sandbox_id.unwrap_or("host-probe");
     // StartTransientUnit returns after systemd has accepted the job.  Wait for
     // the kernel-visible cgroup placement, then prove that the same parent,
     // leaf, and process membership remain stable before persisting the leaf.
+    let readiness_started = Instant::now();
     let mut leaf_identity = None;
     for _ in 0..200 {
         if path.exists()
@@ -5966,7 +6011,16 @@ fn verify_systemd_placement(target: &HostTarget, pid: i32) -> Result<(), String>
             path.display()
         )
     })?;
+    crate::cube_perf!(
+        "cube_perf component=shim operation=create phase=systemd-placement-ready sandbox_id={} operation_id={} target_pid={} ts_mono_us={} duration_us={} success=true",
+        sandbox_id,
+        sandbox_id,
+        pid,
+        Utils::monotonic_time_micros(),
+        readiness_started.elapsed().as_micros()
+    );
     const STABLE_SAMPLES: usize = 5;
+    let stability_started = Instant::now();
     for sample in 0..STABLE_SAMPLES {
         let actual = current_process_cgroup(pid)?;
         if file_identity(parent)? != *expected_parent
@@ -5981,6 +6035,15 @@ fn verify_systemd_placement(target: &HostTarget, pid: i32) -> Result<(), String>
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+    crate::cube_perf!(
+        "cube_perf component=shim operation=create phase=systemd-stability-gate sandbox_id={} operation_id={} target_pid={} samples={} ts_mono_us={} duration_us={} success=true",
+        sandbox_id,
+        sandbox_id,
+        pid,
+        STABLE_SAMPLES,
+        Utils::monotonic_time_micros(),
+        stability_started.elapsed().as_micros()
+    );
     Ok(())
 }
 
@@ -6353,12 +6416,22 @@ fn ensure_directory(path: &Path) -> Result<(), String> {
 }
 
 fn sync_directory(path: &Path) -> Result<(), String> {
-    File::open(path)
+    let started = Instant::now();
+    let result = File::open(path)
         .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("sync directory {}: {error}", path.display()))
+        .map_err(|error| format!("sync directory {}: {error}", path.display()));
+    crate::cube_perf!(
+        "cube_perf component=shim operation=persist phase=directory-fsync target={} ts_mono_us={} duration_us={} success={}",
+        path.display(),
+        Utils::monotonic_time_micros(),
+        started.elapsed().as_micros(),
+        result.is_ok()
+    );
+    result
 }
 
 fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    let started = Instant::now();
     let parent = path
         .parent()
         .ok_or_else(|| format!("record has no parent: {}", path.display()))?;
@@ -6414,7 +6487,15 @@ fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<(), String> 
             path.display()
         ));
     }
-    sync_directory(parent)
+    let result = sync_directory(parent);
+    crate::cube_perf!(
+        "cube_perf component=shim operation=persist phase=atomic-write-json target={} ts_mono_us={} duration_us={} success={}",
+        path.display(),
+        Utils::monotonic_time_micros(),
+        started.elapsed().as_micros(),
+        result.is_ok()
+    );
+    result
 }
 
 #[cfg(test)]
@@ -6436,6 +6517,7 @@ fn take_atomic_write_failpoint(_path: &Path, _stage: &str) -> bool {
 }
 
 fn atomic_write_bytes(path: &Path, data: &[u8]) -> Result<(), String> {
+    let started = Instant::now();
     let parent = path
         .parent()
         .ok_or_else(|| format!("record has no parent: {}", path.display()))?;
@@ -6459,7 +6541,15 @@ fn atomic_write_bytes(path: &Path, data: &[u8]) -> Result<(), String> {
         let _ = fs::remove_file(&temporary);
         return Err(format!("commit record {}: {error}", path.display()));
     }
-    sync_directory(parent)
+    let result = sync_directory(parent);
+    crate::cube_perf!(
+        "cube_perf component=shim operation=persist phase=atomic-write-bytes target={} ts_mono_us={} duration_us={} success={}",
+        path.display(),
+        Utils::monotonic_time_micros(),
+        started.elapsed().as_micros(),
+        result.is_ok()
+    );
+    result
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
@@ -7936,6 +8026,45 @@ mod tests {
         owner.server = None;
         atomic_write_json(&handle.directory.join(HOST_OWNER_FILE), &owner).unwrap();
         handle
+    }
+
+    #[test]
+    fn duplicate_server_identity_registration_does_not_rewrite_record() {
+        let root = std::env::temp_dir().join(format!(
+            "cube-host-cgroup-idempotent-server-register-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir(&root).unwrap();
+        let handle = lifecycle_fixture(&root, LifecyclePhase::Prepared);
+        let nonce_hash = sha256_hex(b"idempotent-server-register");
+        let mut identity = process_identity(std::process::id() as i32).unwrap();
+        identity.launch_nonce_sha256 = Some(nonce_hash.clone());
+        let expected_path = fs::read_link("/proc/self/exe").unwrap();
+        handle
+            .update_record(|record| {
+                record.launch_nonce_sha256 = nonce_hash.clone();
+                record.expected_server_path = expected_path.display().to_string();
+                record.expected_server_executable = identity.executable.clone();
+                record.expected_server_command_sha256 = identity.command_sha256.clone();
+                record.bundle_identity = identity.cwd.clone();
+                record.target = HostTarget::Legacy {
+                    cgroup: identity.cgroup.clone(),
+                };
+                Ok(())
+            })
+            .unwrap();
+
+        let before = handle.read_record().unwrap().sequence;
+        handle
+            .register_server_identity(identity.clone(), &nonce_hash)
+            .unwrap();
+        let registered = handle.read_record().unwrap();
+        assert_eq!(registered.sequence, before + 1);
+        handle
+            .register_server_identity(identity, &nonce_hash)
+            .unwrap();
+        assert_eq!(handle.read_record().unwrap().sequence, registered.sequence);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

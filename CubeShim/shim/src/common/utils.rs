@@ -11,6 +11,7 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::str::FromStr;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use cube_hypervisor::config::{RateLimiterConfig, TokenBucketConfig};
@@ -49,6 +50,8 @@ const DEV_URANDOM: &str = "/dev/urandom";
 
 const PASSFD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const PASSFD_ACK_MAX_LINE_LEN: usize = 64;
+const PERF_TRACE_PATH: &str = "/data/log/CubeShim/cube-perf.log";
+static PERF_TRACE_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 
 /// Reject OCI exec fields before `oci-spec` deserialization can discard them.
 /// In particular, oci-spec 0.6.8 derives `execCpuAffinity` while the OCI
@@ -164,6 +167,76 @@ const IVSHMEM_PREFIX: &str = "ivshmem-";
 pub struct Utils {}
 pub struct AsyncUtils {}
 impl Utils {
+    /// Return whether opt-in startup performance tracing is enabled.
+    ///
+    /// The check intentionally happens at every trace point so an unset
+    /// variable avoids formatting and timestamp collection on the normal
+    /// runtime path. The environment is fixed for the lifetime of a shim or
+    /// worker process, so no additional synchronization is needed.
+    pub fn perf_trace_enabled() -> bool {
+        std::env::var_os("CUBE_PERF_TRACE").is_some_and(|value| value == "1")
+    }
+
+    /// Append one structured performance trace without touching the shim
+    /// bootstrap stdout/stderr protocol. Each process opens the file once;
+    /// O_APPEND keeps independent Shim and worker writes from sharing offsets.
+    /// Callers must check `perf_trace_enabled` before formatting arguments.
+    pub fn emit_perf_trace(arguments: std::fmt::Arguments<'_>) {
+        let sink = PERF_TRACE_FILE.get_or_init(|| {
+            let file = (|| {
+                if let Some(parent) = Path::new(PERF_TRACE_PATH).parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(PERF_TRACE_PATH)
+            })()
+            .ok();
+            Mutex::new(file)
+        });
+        let Ok(mut guard) = sink.lock() else {
+            return;
+        };
+        let Some(file) = guard.as_mut() else {
+            return;
+        };
+        let message = arguments.to_string();
+        let operation = if message
+            .split_whitespace()
+            .any(|field| field.starts_with("operation_id="))
+        {
+            String::new()
+        } else {
+            message
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("sandbox_id="))
+                .map(|sandbox_id| format!(" operation_id={sandbox_id}"))
+                .unwrap_or_default()
+        };
+        let line = format!("{message}{operation} emitter_pid={}\n", process::id());
+        let _ = file.write_all(line.as_bytes());
+    }
+
+    /// Return the Linux host CLOCK_MONOTONIC value in microseconds.
+    ///
+    /// Unlike `Instant`, this value can be correlated across CubeShim and the
+    /// per-Pod VMM worker. It is emitted only as a local performance trace
+    /// coordinate and is not persisted as lifecycle state.
+    pub fn monotonic_time_micros() -> u128 {
+        let mut value = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `value` is a valid writable timespec and CLOCK_MONOTONIC
+        // requires no additional lifetime or ownership guarantees.
+        let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) };
+        if result != 0 || value.tv_sec < 0 || value.tv_nsec < 0 {
+            return 0;
+        }
+        (value.tv_sec as u128) * 1_000_000 + (value.tv_nsec as u128) / 1_000
+    }
+
     /// Validate sandbox_id before using it in filesystem paths.
     fn validate_sandbox_id(id: &str) -> CResult<()> {
         if id.is_empty() || id.len() > 255 {
@@ -1170,6 +1243,14 @@ mod tests {
     fn utils_vsock_path() {
         let p = Utils::vsock_path("123");
         assert_eq!(p, PathBuf::from(format!("{}/{}/cube.sock", VM_PATH, "123")));
+    }
+
+    #[test]
+    fn monotonic_time_is_available_and_ordered() {
+        let first = Utils::monotonic_time_micros();
+        let second = Utils::monotonic_time_micros();
+        assert!(first > 0);
+        assert!(second >= first);
     }
 
     #[test]

@@ -18,7 +18,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Notify};
 use tokio::time::{sleep, Duration};
 
@@ -268,15 +268,19 @@ impl SandboxService {
         plan: runtime_resource::RuntimePreparePlan,
         publisher: CreatePublisherGuard,
     ) {
-        let result = match runtime_resource::prepare(
-            &self.id,
-            &netns_path,
-            &config,
-            &plan,
-            &mut spec,
-        )
-        .await
-        {
+        let total_started = Instant::now();
+        let phase_started = Instant::now();
+        let prepared =
+            runtime_resource::prepare(&self.id, &netns_path, &config, &plan, &mut spec).await;
+        crate::cube_perf!(
+            "cube_perf component=shim operation=create phase=runtime-resource sandbox_id={} ts_mono_us={} duration_us={} success={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros(),
+            prepared.is_ok()
+        );
+        let phase_started = Instant::now();
+        let result = match prepared {
             Ok(lease) => match self.sandbox.lock().await.init(spec) {
                 Ok(()) => Ok(lease),
                 Err(error) => match lease.release().await {
@@ -286,6 +290,15 @@ impl SandboxService {
             },
             Err(error) => Err((format!("prepare RuntimeResource: {error}"), None)),
         };
+        let succeeded = result.is_ok();
+        crate::cube_perf!(
+            "cube_perf component=shim operation=create phase=sandbox-init sandbox_id={} ts_mono_us={} duration_us={} success={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros(),
+            succeeded
+        );
+        let phase_started = Instant::now();
         let mut state = self.lifecycle.state.lock().await;
         match result {
             Ok(lease) => {
@@ -308,6 +321,14 @@ impl SandboxService {
             }
         }
         self.lifecycle.changed.notify_waiters();
+        crate::cube_perf!(
+            "cube_perf component=shim operation=create phase=publish sandbox_id={} ts_mono_us={} duration_us={} total_us={} success={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros(),
+            total_started.elapsed().as_micros(),
+            succeeded
+        );
     }
 
     async fn validate_durable_create_success(
@@ -392,6 +413,7 @@ impl SandboxService {
     }
 
     async fn run_start(self) {
+        let started = Instant::now();
         let lease = self.lifecycle.state.lock().await.runtime.clone();
         let result = if let Some(lease) = lease {
             self.run_start_with_lease(&lease).await
@@ -401,10 +423,18 @@ impl SandboxService {
                 cleanup: StartCleanup::Released,
             })
         };
+        crate::cube_perf!(
+            "cube_perf component=shim operation=start phase=managed-start sandbox_id={} ts_mono_us={} duration_us={} success={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            started.elapsed().as_micros(),
+            result.is_ok()
+        );
         self.finish_start(result).await;
     }
 
     async fn run_start_with_lease(&self, lease: &RuntimeLease) -> Result<(), StartFailure> {
+        let phase_started = Instant::now();
         let lifecycle = match lifecycle_from_env() {
             Ok(Some(lifecycle)) => lifecycle,
             Ok(None) => {
@@ -440,7 +470,14 @@ impl SandboxService {
             )
             .await);
         }
+        crate::cube_perf!(
+            "cube_perf component=shim operation=start phase=host-readback sandbox_id={} ts_mono_us={} duration_us={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros()
+        );
 
+        let phase_started = Instant::now();
         let tap_cleanup_identity = match lease.tap_cleanup_identity() {
             Ok(identity) => identity,
             Err(error) => {
@@ -465,6 +502,13 @@ impl SandboxService {
             )
             .await);
         }
+        crate::cube_perf!(
+            "cube_perf component=shim operation=start phase=tap-intent sandbox_id={} ts_mono_us={} duration_us={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros()
+        );
+        let phase_started = Instant::now();
         let tap = match lease.acquire_tap().await {
             Ok(tap) => tap,
             Err(error) => {
@@ -476,6 +520,13 @@ impl SandboxService {
                 .await);
             }
         };
+        crate::cube_perf!(
+            "cube_perf component=shim operation=start phase=tap-handoff sandbox_id={} ts_mono_us={} duration_us={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros()
+        );
+        let phase_started = Instant::now();
         if let Err(error) = operation.mark_tap_allocated() {
             drop(tap);
             drop(operation);
@@ -504,9 +555,16 @@ impl SandboxService {
             )
             .await);
         }
+        crate::cube_perf!(
+            "cube_perf component=shim operation=start phase=vm-intent sandbox_id={} ts_mono_us={} duration_us={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros()
+        );
 
         let mut sandbox = self.sandbox.lock().await;
         sandbox.set_runtime_tap(tap);
+        let phase_started = Instant::now();
         let started = async {
             Utils::record_pid().map_err(|error| format!("record shim pid: {error}"))?;
             operation
@@ -529,6 +587,13 @@ impl SandboxService {
             Ok::<(), String>(())
         }
         .await;
+        crate::cube_perf!(
+            "cube_perf component=shim operation=start phase=guest-start sandbox_id={} ts_mono_us={} duration_us={} success={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            phase_started.elapsed().as_micros(),
+            started.is_ok()
+        );
         match started {
             Ok(()) => {
                 drop(sandbox);
@@ -1071,6 +1136,7 @@ impl Sandbox for SandboxService {
         _ctx: &TtrpcContext,
         req: api::CreateSandboxRequest,
     ) -> TtrpcResult<api::CreateSandboxResponse> {
+        let total_started = Instant::now();
         self.validate_id(&req.sandbox_id)?;
         if req.bundle_path.is_empty() || !Path::new(&req.bundle_path).is_absolute() {
             return Err(rpc_error(
@@ -1249,6 +1315,13 @@ impl Sandbox for SandboxService {
                 format!("finish CreateSandbox waiter: {error}"),
             ));
         }
+        crate::cube_perf!(
+            "cube_perf component=shim operation=create phase=ttrpc-total sandbox_id={} ts_mono_us={} duration_us={} success={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            total_started.elapsed().as_micros(),
+            result.is_ok()
+        );
         result
     }
 
@@ -1257,6 +1330,7 @@ impl Sandbox for SandboxService {
         _ctx: &TtrpcContext,
         req: api::StartSandboxRequest,
     ) -> TtrpcResult<api::StartSandboxResponse> {
+        let total_started = Instant::now();
         self.validate_id(&req.sandbox_id)?;
         let should_start = {
             let mut state = self.lifecycle.state.lock().await;
@@ -1277,7 +1351,15 @@ impl Sandbox for SandboxService {
         if should_start {
             tokio::spawn(self.clone().run_start());
         }
-        self.wait_for_start().await
+        let result = self.wait_for_start().await;
+        crate::cube_perf!(
+            "cube_perf component=shim operation=start phase=ttrpc-total sandbox_id={} ts_mono_us={} duration_us={} success={}",
+            self.id,
+            Utils::monotonic_time_micros(),
+            total_started.elapsed().as_micros(),
+            result.is_ok()
+        );
+        result
     }
 
     async fn platform(

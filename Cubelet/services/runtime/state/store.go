@@ -5,6 +5,7 @@
 package state
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -17,7 +18,10 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"time"
 
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/kmutex"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/monotime"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -42,6 +46,8 @@ type PrepareRequest struct {
 	Generation     uint64
 	IdempotencyKey string
 	PayloadDigest  string
+	PodUID         string
+	Trace          *monotime.TraceBuffer
 }
 
 type ReleaseRequest struct {
@@ -60,6 +66,7 @@ type Lease struct {
 	NetworkHandle string `json:"networkHandle,omitempty"`
 	ReleaseKey    string `json:"releaseKey,omitempty"`
 	Phase         Phase  `json:"phase"`
+	PodUID        string `json:"podUID,omitempty"`
 }
 
 type Tombstone struct {
@@ -143,10 +150,11 @@ func persistenceFailure(stage string, commitUnknown bool, err error) error {
 }
 
 type Store struct {
-	dir      string
-	generate ValueGenerator
-	hooks    PersistenceHooks
-	mu       sync.Mutex
+	dir        string
+	generate   ValueGenerator
+	hooks      PersistenceHooks
+	operations kmutex.KeyedLocker
+	generateMu sync.Mutex
 }
 
 func Open(dir string, generator ValueGenerator, options ...OpenOption) (*Store, error) {
@@ -159,7 +167,7 @@ func Open(dir string, generator ValueGenerator, options ...OpenOption) (*Store, 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	store := &Store{dir: dir, generate: generator}
+	store := &Store{dir: dir, generate: generator, operations: kmutex.New()}
 	for _, option := range options {
 		if option != nil {
 			option(store)
@@ -204,8 +212,8 @@ func (s *Store) Prepare(request PrepareRequest) (*PrepareResult, error) {
 		return nil, status.Error(codes.InvalidArgument, "prepare fields must be non-zero")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockSandbox(request.SandboxID)
+	defer unlock()
 
 	record, err := s.loadOrNew(request.SandboxID)
 	if err != nil {
@@ -239,7 +247,9 @@ func (s *Store) Prepare(request PrepareRequest) (*PrepareResult, error) {
 	}
 
 	leaseID := ExpectedLeaseIDForPrepare(request)
+	s.generateMu.Lock()
 	token, err := s.generate()
+	s.generateMu.Unlock()
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
@@ -250,6 +260,7 @@ func (s *Store) Prepare(request PrepareRequest) (*PrepareResult, error) {
 		PayloadDigest: request.PayloadDigest,
 		HandoffToken:  token,
 		Phase:         PhasePreparing,
+		PodUID:        request.PodUID,
 	}
 	record.HighWatermark = request.Generation
 	record.Active = lease
@@ -259,7 +270,7 @@ func (s *Store) Prepare(request PrepareRequest) (*PrepareResult, error) {
 		LeaseID:       leaseID,
 		PayloadDigest: request.PayloadDigest,
 	}
-	if err := s.persist(record); err != nil {
+	if err := s.persist(record, request.Trace); err != nil {
 		return nil, err
 	}
 	return &PrepareResult{Lease: *lease}, nil
@@ -267,12 +278,12 @@ func (s *Store) Prepare(request PrepareRequest) (*PrepareResult, error) {
 
 // MarkReady binds the network handle to the exact current lease. It is
 // idempotent for an identical READY record.
-func (s *Store) MarkReady(sandboxID string, generation uint64, leaseID, networkHandle string) (*Lease, error) {
+func (s *Store) MarkReady(sandboxID string, generation uint64, leaseID, networkHandle string, trace *monotime.TraceBuffer) (*Lease, error) {
 	if sandboxID == "" || generation == 0 || leaseID == "" || networkHandle == "" {
 		return nil, status.Error(codes.InvalidArgument, "ready fields must be non-zero")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockSandbox(sandboxID)
+	defer unlock()
 	record, err := s.load(sandboxID)
 	if err != nil {
 		return nil, stateLoadError(err)
@@ -292,7 +303,7 @@ func (s *Store) MarkReady(sandboxID string, generation uint64, leaseID, networkH
 	default:
 		return nil, status.Error(codes.FailedPrecondition, "releasing lease cannot become ready")
 	}
-	if err := s.persist(record); err != nil {
+	if err := s.persist(record, trace); err != nil {
 		return nil, err
 	}
 	return cloneLease(record.Active), nil
@@ -304,8 +315,8 @@ func (s *Store) BeginRelease(request ReleaseRequest) (*ReleaseResult, error) {
 	if request.SandboxID == "" || request.Generation == 0 || request.LeaseID == "" || request.IdempotencyKey == "" {
 		return nil, status.Error(codes.InvalidArgument, "release fields must be non-zero")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockSandbox(request.SandboxID)
+	defer unlock()
 	record, err := s.loadOrNew(request.SandboxID)
 	if err != nil {
 		return nil, stateLoadError(err)
@@ -316,14 +327,14 @@ func (s *Store) BeginRelease(request ReleaseRequest) (*ReleaseResult, error) {
 		}
 		if record.Active != nil && record.Active.Generation == request.Generation &&
 			record.Active.LeaseID == request.LeaseID && record.Active.ReleaseKey == request.IdempotencyKey {
-			if err := s.syncParent("confirm-release-retry"); err != nil {
+			if err := s.syncParent("confirm-release-retry", nil, record); err != nil {
 				return nil, err
 			}
 			return &ReleaseResult{Lease: *record.Active, Reused: true}, nil
 		}
 		if tombstone, ok := record.Tombstones[generationKey(request.Generation)]; ok &&
 			tombstone.LeaseID == request.LeaseID && tombstone.ReleaseKey == request.IdempotencyKey {
-			if err := s.syncParent("confirm-tombstone-retry"); err != nil {
+			if err := s.syncParent("confirm-tombstone-retry", nil, record); err != nil {
 				return nil, err
 			}
 			return &ReleaseResult{Lease: leaseFromTombstone(tombstone), Reused: true}, nil
@@ -344,7 +355,7 @@ func (s *Store) BeginRelease(request ReleaseRequest) (*ReleaseResult, error) {
 			record.IdempotencyKeys[request.IdempotencyKey] = KeyUse{
 				Operation: OperationRelease, Generation: request.Generation, LeaseID: request.LeaseID,
 			}
-			if err := s.persist(record); err != nil {
+			if err := s.persist(record, nil); err != nil {
 				return nil, err
 			}
 			return &ReleaseResult{Lease: leaseFromTombstone(tombstone)}, nil
@@ -364,7 +375,7 @@ func (s *Store) BeginRelease(request ReleaseRequest) (*ReleaseResult, error) {
 		Generation: request.Generation,
 		LeaseID:    request.LeaseID,
 	}
-	if err := s.persist(record); err != nil {
+	if err := s.persist(record, nil); err != nil {
 		return nil, err
 	}
 	return &ReleaseResult{Lease: *record.Active}, nil
@@ -377,8 +388,8 @@ func (s *Store) ConfirmReleaseDurable(request ReleaseRequest) (*ReleaseResult, e
 	if request.SandboxID == "" || request.Generation == 0 || request.LeaseID == "" || request.IdempotencyKey == "" {
 		return nil, status.Error(codes.InvalidArgument, "release confirmation fields must be non-zero")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockSandbox(request.SandboxID)
+	defer unlock()
 	record, err := s.load(request.SandboxID)
 	if err != nil {
 		return nil, stateLoadError(err)
@@ -386,14 +397,14 @@ func (s *Store) ConfirmReleaseDurable(request ReleaseRequest) (*ReleaseResult, e
 	if record.Active != nil && record.Active.Phase == PhaseReleasing &&
 		record.Active.Generation == request.Generation && record.Active.LeaseID == request.LeaseID &&
 		record.Active.ReleaseKey == request.IdempotencyKey {
-		if err := s.syncParent("confirm-release"); err != nil {
+		if err := s.syncParent("confirm-release", nil, record); err != nil {
 			return nil, err
 		}
 		return &ReleaseResult{Lease: *record.Active, Reused: true}, nil
 	}
 	if tombstone, ok := record.Tombstones[generationKey(request.Generation)]; ok &&
 		tombstone.LeaseID == request.LeaseID && tombstone.ReleaseKey == request.IdempotencyKey {
-		if err := s.syncParent("confirm-tombstone"); err != nil {
+		if err := s.syncParent("confirm-tombstone", nil, record); err != nil {
 			return nil, err
 		}
 		return &ReleaseResult{Lease: leaseFromTombstone(tombstone), Reused: true}, nil
@@ -407,8 +418,8 @@ func (s *Store) CompleteRelease(request ReleaseRequest) error {
 	if request.SandboxID == "" || request.Generation == 0 || request.LeaseID == "" || request.IdempotencyKey == "" {
 		return status.Error(codes.InvalidArgument, "complete release fields must be non-zero")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockSandbox(request.SandboxID)
+	defer unlock()
 	record, err := s.load(request.SandboxID)
 	if err != nil {
 		return stateLoadError(err)
@@ -432,7 +443,7 @@ func (s *Store) CompleteRelease(request ReleaseRequest) error {
 		ReleaseKey:    record.Active.ReleaseKey,
 	}
 	record.Active = nil
-	if err := s.persist(record); err != nil {
+	if err := s.persist(record, nil); err != nil {
 		return err
 	}
 	return nil
@@ -444,8 +455,8 @@ func (s *Store) AbandonPrepare(sandboxID string, generation uint64, leaseID stri
 	if sandboxID == "" || generation == 0 || leaseID == "" {
 		return status.Error(codes.InvalidArgument, "abandon fields must be non-zero")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockSandbox(sandboxID)
+	defer unlock()
 	record, err := s.load(sandboxID)
 	if err != nil {
 		return stateLoadError(err)
@@ -461,15 +472,13 @@ func (s *Store) AbandonPrepare(sandboxID string, generation uint64, leaseID stri
 		PayloadDigest: record.Active.PayloadDigest,
 	}
 	record.Active = nil
-	if err := s.persist(record); err != nil {
+	if err := s.persist(record, nil); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (s *Store) ListSandboxIDs() ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
@@ -500,8 +509,8 @@ func (s *Store) Inspect(sandboxID string) (*Record, error) {
 	if sandboxID == "" {
 		return nil, status.Error(codes.InvalidArgument, "sandbox id is empty")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	unlock := s.lockSandbox(sandboxID)
+	defer unlock()
 	record, err := s.load(sandboxID)
 	if err != nil {
 		return nil, stateLoadError(err)
@@ -513,6 +522,16 @@ func (s *Store) Inspect(sandboxID string) (*Record, error) {
 	copy.Tombstones = cloneTombstones(record.Tombstones)
 	copy.IdempotencyKeys = cloneKeys(record.IdempotencyKeys)
 	return &copy, nil
+}
+
+// lockSandbox keeps one sandbox's read-modify-write sequence linearizable.
+// context.Background cannot cancel, so Lock cannot fail; keeping this helper
+// non-error-returning makes it difficult for callers to forget the unlock.
+func (s *Store) lockSandbox(sandboxID string) func() {
+	if err := s.operations.Lock(context.Background(), sandboxID); err != nil {
+		panic(fmt.Sprintf("lock runtime state for sandbox %q: %v", sandboxID, err))
+	}
+	return func() { s.operations.Unlock(sandboxID) }
 }
 
 func (s *Store) loadOrNew(sandboxID string) (*Record, error) {
@@ -551,29 +570,54 @@ func (s *Store) load(sandboxID string) (*Record, error) {
 	return record, nil
 }
 
-func (s *Store) persist(record *Record) error {
+func (s *Store) persist(record *Record, trace *monotime.TraceBuffer) (err error) {
+	totalStart := time.Now()
+	stageStart := totalStart
+	var encodeTime, createTime, writeTime, fileSyncTime, renameTime, parentSyncTime time.Duration
+	defer func() {
+		if !trace.Enabled() {
+			return
+		}
+		podUID := ""
+		if record.Active != nil {
+			podUID = record.Active.PodUID
+		}
+		trace.Addf(
+			"cube_perf component=cubelet operation=persist phase=runtime-store sandbox_id=%s pod_uid=%s operation_id=%s ts_mono_us=%d duration_us=%d success=%t encode_us=%d create_us=%d write_us=%d file_fsync_us=%d rename_us=%d parent_fsync_us=%d fsync_count=2",
+			record.SandboxID, podUID, record.SandboxID, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
+			encodeTime.Microseconds(), createTime.Microseconds(), writeTime.Microseconds(), fileSyncTime.Microseconds(),
+			renameTime.Microseconds(), parentSyncTime.Microseconds(),
+		)
+	}()
 	data, err := json.Marshal(record)
 	if err != nil {
 		return persistenceFailure("encode", false, err)
 	}
+	encodeTime = time.Since(stageStart)
+	stageStart = time.Now()
 	temp, err := os.CreateTemp(s.dir, ".runtime-state-*")
 	if err != nil {
 		return persistenceFailure("create-temp", false, err)
 	}
+	createTime = time.Since(stageStart)
 	tempName := temp.Name()
 	defer os.Remove(tempName)
 	if err := temp.Chmod(0o600); err != nil {
 		temp.Close()
 		return persistenceFailure("chmod-temp", false, err)
 	}
+	stageStart = time.Now()
 	if _, err := temp.Write(data); err != nil {
 		temp.Close()
 		return persistenceFailure("write-temp", false, err)
 	}
+	writeTime = time.Since(stageStart)
+	stageStart = time.Now()
 	if err := temp.Sync(); err != nil {
 		temp.Close()
 		return persistenceFailure("sync-temp", false, err)
 	}
+	fileSyncTime = time.Since(stageStart)
 	if err := temp.Close(); err != nil {
 		return persistenceFailure("close-temp", false, err)
 	}
@@ -582,13 +626,35 @@ func (s *Store) persist(record *Record) error {
 			return persistenceFailure("before-rename", false, err)
 		}
 	}
+	stageStart = time.Now()
 	if err := os.Rename(tempName, s.recordPath(record.SandboxID)); err != nil {
 		return persistenceFailure("rename", false, err)
 	}
-	return s.syncParent("commit")
+	renameTime = time.Since(stageStart)
+	stageStart = time.Now()
+	err = s.syncParent("commit", trace, record)
+	parentSyncTime = time.Since(stageStart)
+	return err
 }
 
-func (s *Store) syncParent(operation string) error {
+func (s *Store) syncParent(operation string, trace *monotime.TraceBuffer, record *Record) (err error) {
+	started := time.Now()
+	defer func() {
+		if !trace.Enabled() {
+			return
+		}
+		sandboxID, podUID := "", ""
+		if record != nil {
+			sandboxID = record.SandboxID
+			if record.Active != nil {
+				podUID = record.Active.PodUID
+			}
+		}
+		trace.Addf(
+			"cube_perf component=cubelet operation=persist phase=runtime-parent-fsync persist_operation=%s sandbox_id=%s pod_uid=%s operation_id=%s ts_mono_us=%d duration_us=%d success=%t fsync_count=1",
+			operation, sandboxID, podUID, sandboxID, monotime.Micros(), time.Since(started).Microseconds(), err == nil,
+		)
+	}()
 	if s.hooks.BeforeParentSync != nil {
 		if err := s.hooks.BeforeParentSync(); err != nil {
 			return persistenceFailure(operation+"-before-parent-sync", true, err)

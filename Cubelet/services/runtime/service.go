@@ -17,6 +17,7 @@ import (
 
 	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/kmutex"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/monotime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/crimetrics"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
@@ -54,6 +55,15 @@ type Service struct {
 	operations  kmutex.KeyedLocker
 	reaperMu    sync.Mutex
 	metrics     *crimetrics.Metrics
+}
+
+type prepareTimings struct {
+	operationLock time.Duration
+	digest        time.Duration
+	coordinator   time.Duration
+	adapter       time.Duration
+	validate      time.Duration
+	markReady     time.Duration
 }
 
 func NewService(store LifecycleStore, adapter Adapter, fdEndpoint string, metrics ...*crimetrics.Metrics) (*Service, *handoff.Registry, error) {
@@ -157,6 +167,31 @@ func (s *Service) GetCapabilities(_ context.Context, request *runtimev1.GetCapab
 func (s *Service) PrepareSandbox(ctx context.Context, request *runtimev1.PrepareSandboxRequest) (response *runtimev1.PrepareSandboxResponse, err error) {
 	finish := s.metrics.Start("resource", "Prepare")
 	defer func() { finish(err) }()
+	totalStart := time.Now()
+	stageStart := totalStart
+	var timings prepareTimings
+	trace := monotime.NewTraceBuffer()
+	ctx = monotime.WithTraceBuffer(ctx, trace)
+	sandboxID := ""
+	generation := uint64(0)
+	podUID := ""
+	if request != nil {
+		sandboxID = request.GetSandboxId()
+		generation = request.GetGeneration()
+		podUID = request.GetPod().GetUid()
+	}
+	defer func() {
+		if !trace.Enabled() {
+			return
+		}
+		trace.Addf(
+			"cube_perf component=cubelet operation=create phase=prepare-sandbox sandbox_id=%s pod_uid=%s operation_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t operation_lock_us=%d digest_us=%d coordinator_us=%d adapter_us=%d validate_us=%d mark_ready_us=%d",
+			sandboxID, podUID, sandboxID, generation, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
+			timings.operationLock.Microseconds(), timings.digest.Microseconds(), timings.coordinator.Microseconds(),
+			timings.adapter.Microseconds(), timings.validate.Microseconds(), timings.markReady.Microseconds(),
+		)
+		trace.Flush()
+	}()
 	if err := validatePrepare(request); err != nil {
 		return nil, err
 	}
@@ -164,18 +199,25 @@ func (s *Service) PrepareSandbox(ctx context.Context, request *runtimev1.Prepare
 		return nil, status.FromContextError(err).Err()
 	}
 	defer s.operations.Unlock(request.GetSandboxId())
+	timings.operationLock = time.Since(stageStart)
+	stageStart = time.Now()
 	digest, err := desiredDigest(request)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	timings.digest = time.Since(stageStart)
+	stageStart = time.Now()
 	result, err := s.coordinator.Prepare(state.PrepareRequest{
 		SandboxID: request.GetSandboxId(), Generation: request.GetGeneration(),
 		IdempotencyKey: request.GetIdempotencyKey(), PayloadDigest: digest,
+		PodUID: request.GetPod().GetUid(), Trace: trace,
 	})
 	if err != nil {
 		return nil, err
 	}
+	timings.coordinator = time.Since(stageStart)
 
+	stageStart = time.Now()
 	prepared, err := s.adapter.Prepare(ctx, request, result.Lease)
 	if err != nil {
 		if rollbackErr := s.cleanupFailedPrepare(request, result.Lease); rollbackErr != nil {
@@ -183,21 +225,27 @@ func (s *Service) PrepareSandbox(ctx context.Context, request *runtimev1.Prepare
 		}
 		return nil, status.Errorf(codes.Internal, "prepare resources: %v", err)
 	}
+	timings.adapter = time.Since(stageStart)
+	stageStart = time.Now()
 	if err := validatePrepared(request, prepared); err != nil {
 		if rollbackErr := s.cleanupFailedPrepare(request, result.Lease); rollbackErr != nil {
 			return nil, status.Errorf(codes.Internal, "validate prepared resources: %v; rollback: %v", err, rollbackErr)
 		}
 		return nil, status.Errorf(codes.Internal, "validate prepared resources: %v", err)
 	}
-	lease, err := s.coordinator.MarkReadyAndPublish(request.GetSandboxId(), request.GetGeneration(), result.Lease.LeaseID, prepared.GetNetwork().GetNetworkHandle())
+	timings.validate = time.Since(stageStart)
+	stageStart = time.Now()
+	lease, err := s.coordinator.MarkReadyAndPublish(request.GetSandboxId(), request.GetGeneration(), result.Lease.LeaseID, prepared.GetNetwork().GetNetworkHandle(), trace)
 	if err != nil {
 		if rollbackErr := s.cleanupFailedPrepare(request, result.Lease); rollbackErr != nil {
 			return nil, status.Errorf(codes.Internal, "mark RuntimeResource ready: %v; rollback: %v", err, rollbackErr)
 		}
 		return nil, status.Errorf(codes.Internal, "mark RuntimeResource ready: %v", err)
 	}
+	timings.markReady = time.Since(stageStart)
 	bindPrepared(prepared, request.GetSandboxId(), request.GetGeneration(), lease, s.fdEndpoint)
-	return &runtimev1.PrepareSandboxResponse{Sandbox: prepared, Reused: result.Reused}, nil
+	response = &runtimev1.PrepareSandboxResponse{Sandbox: prepared, Reused: result.Reused}
+	return response, nil
 }
 
 func (s *Service) cleanupFailedPrepare(request *runtimev1.PrepareSandboxRequest, lease state.Lease) error {

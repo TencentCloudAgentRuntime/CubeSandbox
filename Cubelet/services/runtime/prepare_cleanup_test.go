@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/monotime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
 )
@@ -19,8 +20,8 @@ type failAfterReadyStore struct {
 	failed bool
 }
 
-func (s *failAfterReadyStore) MarkReady(sandboxID string, generation uint64, leaseID, networkHandle string) (*state.Lease, error) {
-	lease, err := s.LifecycleStore.MarkReady(sandboxID, generation, leaseID, networkHandle)
+func (s *failAfterReadyStore) MarkReady(sandboxID string, generation uint64, leaseID, networkHandle string, trace *monotime.TraceBuffer) (*state.Lease, error) {
+	lease, err := s.LifecycleStore.MarkReady(sandboxID, generation, leaseID, networkHandle, trace)
 	if err == nil && !s.failed {
 		s.failed = true
 		return nil, errors.New("injected error after READY became durable")

@@ -136,6 +136,64 @@ func TestRegistryRetryReturnsFreshCallerOwnedDuplicate(t *testing.T) {
 	}
 }
 
+func TestRegistryDifferentSandboxOpenersRunConcurrently(t *testing.T) {
+	entered := make(chan string, 2)
+	proceed := make(chan struct{})
+	registry, err := NewRegistry(func(binding Binding) (*os.File, error) {
+		entered <- binding.SandboxID
+		<-proceed
+		return os.Open("/dev/null")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := []Binding{
+		testBinding(1, "lease-a", "network-a", "token-a", true),
+		testBinding(1, "lease-b", "network-b", "token-b", true),
+	}
+	bindings[1].SandboxID = "sandbox-b"
+	for _, binding := range bindings {
+		if err := registry.Publish(binding); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	type result struct {
+		file *os.File
+		code runtimev1.FDHandoffCode
+		err  error
+	}
+	results := make(chan result, 2)
+	for _, binding := range bindings {
+		binding := binding
+		go func() {
+			file, code, err := registry.Acquire(requestFor(binding))
+			results <- result{file: file, code: code, err: err}
+		}()
+	}
+	seen := make(map[string]bool)
+	for range 2 {
+		select {
+		case sandboxID := <-entered:
+			seen[sandboxID] = true
+		case <-time.After(time.Second):
+			close(proceed)
+			t.Fatal("different sandbox FD openers did not overlap")
+		}
+	}
+	close(proceed)
+	for range 2 {
+		result := <-results
+		if result.err != nil || result.code != runtimev1.FDHandoffCode_FD_HANDOFF_CODE_OK || result.file == nil {
+			t.Fatalf("Acquire=(%v,%s,%v)", result.file, result.code, result.err)
+		}
+		result.file.Close()
+	}
+	if !seen["sandbox-a"] || !seen["sandbox-b"] {
+		t.Fatalf("opener entries=%v", seen)
+	}
+}
+
 func TestRegistryRejectsNotReadyLease(t *testing.T) {
 	registry, err := NewRegistry(devNullOpener)
 	if err != nil {

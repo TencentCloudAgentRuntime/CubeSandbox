@@ -40,6 +40,29 @@ macro_rules! infof {
     }};
 }
 
+/// Emit a structured startup trace to the process-level append-only trace file
+/// only when CUBE_PERF_TRACE=1. Arguments are not evaluated while disabled,
+/// and the sink never touches the containerd shim bootstrap protocol.
+#[macro_export]
+macro_rules! cube_perf {
+    ($($arg:tt)*) => {{
+        if $crate::common::utils::Utils::perf_trace_enabled() {
+            $crate::common::utils::Utils::emit_perf_trace(format_args!($($arg)*));
+        }
+    }};
+}
+
+/// Compatibility form for call sites that already carry a per-sandbox logger.
+/// All structured records still use the isolated process-level trace file.
+#[macro_export]
+macro_rules! cube_perff {
+    ($ignored_log:expr, $($arg:tt)*) => {{
+        if $crate::common::utils::Utils::perf_trace_enabled() {
+            $crate::common::utils::Utils::emit_perf_trace(format_args!($($arg)*));
+        }
+    }};
+}
+
 #[macro_export]
 macro_rules! warnf {
     ($log:expr, $($arg:tt)*) => {{

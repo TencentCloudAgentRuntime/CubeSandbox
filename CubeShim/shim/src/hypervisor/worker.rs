@@ -1,6 +1,7 @@
 // Copyright (c) 2024 Tencent Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::common::utils::Utils;
 use crate::common::CResult;
 use crate::metrics;
 use cube_hypervisor::config::RestoreConfig;
@@ -216,9 +217,10 @@ impl WorkerClient {
                 placement.prepare_vmm_worker_spawn(&worker_path, &nonce, PROTOCOL_VERSION);
             metrics::observe_vmm_stage("prepare-intent", prepared.is_ok(), phase_started.elapsed());
             prepared?;
-            log::info!(
-                "cube-vmm-worker phase=prepare-intent sandbox={} duration_us={}",
+            crate::cube_perf!(
+                "cube_perf component=vmm-worker operation=start phase=prepare-intent sandbox_id={} ts_mono_us={} duration_us={}",
                 sandbox_id,
+                Utils::monotonic_time_micros(),
                 phase_started.elapsed().as_micros()
             );
         }
@@ -257,10 +259,12 @@ impl WorkerClient {
         drop(event_child);
 
         let pid = child.id();
-        log::info!(
-            "cube-vmm-worker phase=fork-exec sandbox={} pid={} duration_us={}",
+        crate::cube_perf!(
+            "cube_perf component=vmm-worker operation=start phase=fork-exec sandbox_id={} operation_id={} worker_pid={} ts_mono_us={} duration_us={}",
+            sandbox_id,
             sandbox_id,
             pid,
+            Utils::monotonic_time_micros(),
             phase_started.elapsed().as_micros()
         );
         let client = Self {
@@ -351,10 +355,12 @@ impl WorkerClient {
             return Err(client.terminate_after_error(error));
         }
         metrics::observe_vmm_stage("hello", true, phase_started.elapsed());
-        log::info!(
-            "cube-vmm-worker phase=hello sandbox={} pid={} duration_us={}",
+        crate::cube_perf!(
+            "cube_perf component=vmm-worker operation=start phase=hello sandbox_id={} operation_id={} worker_pid={} ts_mono_us={} duration_us={}",
+            sandbox_id,
             sandbox_id,
             pid,
+            Utils::monotonic_time_micros(),
             phase_started.elapsed().as_micros()
         );
         if let Err(error) = set_socket_timeout(
@@ -369,10 +375,12 @@ impl WorkerClient {
             return Err(client.terminate_after_error(error));
         }
         metrics::observe_vmm_stage("fd-gate", true, phase_started.elapsed());
-        log::info!(
-            "cube-vmm-worker phase=fd-gate sandbox={} pid={} duration_us={}",
+        crate::cube_perf!(
+            "cube_perf component=vmm-worker operation=start phase=fd-gate sandbox_id={} operation_id={} worker_pid={} ts_mono_us={} duration_us={}",
+            sandbox_id,
             sandbox_id,
             pid,
+            Utils::monotonic_time_micros(),
             phase_started.elapsed().as_micros()
         );
         if let Some(placement) = placement {
@@ -392,10 +400,12 @@ impl WorkerClient {
                 )));
             }
             metrics::observe_vmm_stage("placement", true, placement_elapsed);
-            log::info!(
-                "cube-vmm-worker phase=placement sandbox={} pid={} duration_us={}",
+            crate::cube_perf!(
+                "cube_perf component=vmm-worker operation=start phase=placement sandbox_id={} operation_id={} worker_pid={} ts_mono_us={} duration_us={}",
+                sandbox_id,
                 sandbox_id,
                 pid,
+                Utils::monotonic_time_micros(),
                 placement_elapsed.as_micros()
             );
         }
@@ -406,10 +416,12 @@ impl WorkerClient {
                 return Err(client.terminate_after_error(error));
             }
             metrics::observe_vmm_stage("launch", true, phase_started.elapsed());
-            log::info!(
-                "cube-vmm-worker phase=launch sandbox={} pid={} duration_us={} total_us={}",
+            crate::cube_perf!(
+                "cube_perf component=vmm-worker operation=start phase=launch sandbox_id={} operation_id={} worker_pid={} ts_mono_us={} duration_us={} total_us={}",
+                sandbox_id,
                 sandbox_id,
                 pid,
+                Utils::monotonic_time_micros(),
                 phase_started.elapsed().as_micros(),
                 lifecycle_started.elapsed().as_micros()
             );

@@ -19,6 +19,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io;
 use tokio::process::Command;
 
@@ -48,6 +49,7 @@ pub async fn run(runtime_id: &str, flags: Flags) -> Result<(), Error> {
 }
 
 async fn start(flags: Flags) -> Result<(), Error> {
+    let start_entered = Instant::now();
     let (params, mut protocol) = read_start(
         std::io::stdin().lock(),
         &flags,
@@ -57,6 +59,12 @@ async fn start(flags: Flags) -> Result<(), Error> {
         context: "read containerd bootstrap params".to_string(),
         err,
     })?;
+    crate::cube_perf!(
+		"cube_perf component=bootstrap operation_id={} phase=params-read ts_mono_us={} duration_us={}",
+		params.instance_id,
+		crate::common::utils::Utils::monotonic_time_micros(),
+		start_entered.elapsed().as_micros()
+	);
     if matches!(protocol, BootstrapProtocol::Legacy { .. }) {
         // JSON bootstrap and Task API versions are independent. 2.x needs
         // Task v3 to attach containers to the existing Sandbox API shim.
@@ -94,10 +102,24 @@ async fn start(flags: Flags) -> Result<(), Error> {
         err,
     })?;
     let debug = flags.debug || params.log_level <= -4;
+    let prepare_started = Instant::now();
     let mut session = BootstrapSession::prepare(&params, &cwd, &address, &executable, debug)
         .map_err(Error::Other)?;
+    crate::cube_perf!(
+        "cube_perf component=bootstrap operation_id={} phase=session-prepare ts_mono_us={} duration_us={}",
+        params.instance_id,
+        crate::common::utils::Utils::monotonic_time_micros(),
+        prepare_started.elapsed().as_micros()
+    );
     let result = async {
+        let place_started = Instant::now();
         session.place_helper().map_err(Error::Other)?;
+        crate::cube_perf!(
+            "cube_perf component=bootstrap operation_id={} phase=place-helper ts_mono_us={} duration_us={}",
+            params.instance_id,
+            crate::common::utils::Utils::monotonic_time_micros(),
+            place_started.elapsed().as_micros()
+        );
         let mut command = Command::new(executable);
         command
             .current_dir(cwd)
@@ -123,36 +145,78 @@ async fn start(flags: Flags) -> Result<(), Error> {
             .configure_child(&mut command)
             .map_err(Error::Other)?;
 
+        let spawn_started = Instant::now();
         let mut child = command.spawn().map_err(|err| Error::IoError {
             context: "spawn CubeShim server".to_string(),
             err,
         })?;
+        crate::cube_perf!(
+            "cube_perf component=bootstrap operation_id={} phase=server-spawn ts_mono_us={} duration_us={}",
+            params.instance_id,
+            crate::common::utils::Utils::monotonic_time_micros(),
+            spawn_started.elapsed().as_micros()
+        );
         session.child_spawned();
         let child_pid = i32::try_from(child.id().ok_or_else(|| {
             Error::Other("spawned CubeShim server did not report a pid".to_string())
         })?)
         .map_err(|error| Error::Other(format!("CubeShim server pid does not fit i32: {error}")))?;
+        let register_started = Instant::now();
         session
             .register_spawned_server(child_pid)
             .map_err(Error::Other)?;
+        crate::cube_perf!(
+            "cube_perf component=bootstrap operation_id={} phase=register-spawned-server ts_mono_us={} duration_us={}",
+            params.instance_id,
+            crate::common::utils::Utils::monotonic_time_micros(),
+            register_started.elapsed().as_micros()
+        );
+        let identity_started = Instant::now();
         session
             .wait_server_identity(child_pid)
             .await
             .map_err(Error::Other)?;
+        crate::cube_perf!(
+            "cube_perf component=bootstrap operation_id={} phase=wait-server-identity ts_mono_us={} duration_us={}",
+            params.instance_id,
+            crate::common::utils::Utils::monotonic_time_micros(),
+            identity_started.elapsed().as_micros()
+        );
+        let oom_started = Instant::now();
         #[cfg(target_os = "linux")]
         containerd_shim::cgroup::adjust_oom_score(child.id().unwrap())?;
+        crate::cube_perf!(
+            "cube_perf component=bootstrap operation_id={} phase=adjust-oom-score ts_mono_us={} duration_us={}",
+            params.instance_id,
+            crate::common::utils::Utils::monotonic_time_micros(),
+            oom_started.elapsed().as_micros()
+        );
+        let release_started = Instant::now();
         session.release_gate().map_err(Error::Other)?;
+        crate::cube_perf!(
+            "cube_perf component=bootstrap operation_id={} phase=release-gate ts_mono_us={} duration_us={}",
+            params.instance_id,
+            crate::common::utils::Utils::monotonic_time_micros(),
+            release_started.elapsed().as_micros()
+        );
 
         let mut ready_pipe = child
             .stdout
             .take()
             .ok_or_else(|| Error::Other("CubeShim child has no readiness pipe".to_string()))?;
+        let readiness_started = Instant::now();
         io::copy(&mut ready_pipe, &mut io::stderr())
             .await
             .map_err(|err| Error::IoError {
                 context: "wait for CubeShim server readiness".to_string(),
                 err,
             })?;
+        crate::cube_perf!(
+            "cube_perf component=bootstrap operation_id={} phase=wait-server-readiness ts_mono_us={} duration_us={}",
+            params.instance_id,
+            crate::common::utils::Utils::monotonic_time_micros(),
+            readiness_started.elapsed().as_micros()
+        );
         if let Some(status) = child.try_wait().map_err(|err| Error::IoError {
             context: "inspect CubeShim child".to_string(),
             err,
@@ -162,15 +226,30 @@ async fn start(flags: Flags) -> Result<(), Error> {
             )));
         }
 
-        session.restore_helper().map_err(Error::Other)?;
+		let restore_started = Instant::now();
+		session.restore_helper().map_err(Error::Other)?;
+		crate::cube_perf!(
+			"cube_perf component=bootstrap operation_id={} phase=restore-helper ts_mono_us={} duration_us={}",
+			params.instance_id,
+			crate::common::utils::Utils::monotonic_time_micros(),
+			restore_started.elapsed().as_micros()
+		);
 
-        durable_write_file(Path::new(ADDRESS_FILE), address.as_bytes()).map_err(|err| {
+		let address_started = Instant::now();
+		durable_write_file(Path::new(ADDRESS_FILE), address.as_bytes()).map_err(|err| {
             Error::IoError {
                 context: "persist CubeShim address".to_string(),
                 err,
-            }
-        })?;
-        let mut stdout = std::io::stdout().lock();
+			}
+		})?;
+		crate::cube_perf!(
+			"cube_perf component=bootstrap operation_id={} phase=persist-address ts_mono_us={} duration_us={}",
+			params.instance_id,
+			crate::common::utils::Utils::monotonic_time_micros(),
+			address_started.elapsed().as_micros()
+		);
+		let response_started = Instant::now();
+		let mut stdout = std::io::stdout().lock();
         protocol
             .write_result(address, &mut stdout)
             .map_err(|err| Error::IoError {
@@ -180,7 +259,15 @@ async fn start(flags: Flags) -> Result<(), Error> {
         stdout.flush().map_err(|err| Error::IoError {
             context: "flush containerd bootstrap result".to_string(),
             err,
-        })
+        })?;
+        crate::cube_perf!(
+            "cube_perf component=bootstrap operation_id={} phase=bootstrap-response ts_mono_us={} duration_us={} total_duration_us={}",
+            params.instance_id,
+            crate::common::utils::Utils::monotonic_time_micros(),
+            response_started.elapsed().as_micros(),
+            start_entered.elapsed().as_micros()
+        );
+        Ok(())
     }
     .await;
     if let Err(error) = result {

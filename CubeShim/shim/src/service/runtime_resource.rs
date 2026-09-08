@@ -23,7 +23,7 @@ use std::io::{IoSliceMut, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
 use tonic::codegen::http::uri::PathAndQuery;
 use tonic::transport::{Channel, Endpoint};
@@ -1349,6 +1349,31 @@ pub(crate) async fn prepare(
     plan: &RuntimePreparePlan,
     spec: &mut Spec,
 ) -> Result<RuntimeLease, String> {
+    let started = Instant::now();
+    crate::cube_perf!(
+        "cube_perf component=shim operation=create phase=runtime-resource-begin sandbox_id={} ts_mono_us={}",
+        sandbox_id,
+        crate::common::utils::Utils::monotonic_time_micros()
+    );
+    let result = prepare_inner(sandbox_id, netns_path, config, plan, spec).await;
+    crate::cube_perf!(
+        "cube_perf component=shim operation=create phase=runtime-resource-end sandbox_id={} ts_mono_us={} duration_us={} success={}",
+        sandbox_id,
+        crate::common::utils::Utils::monotonic_time_micros(),
+        started.elapsed().as_micros(),
+        result.is_ok()
+    );
+    result
+}
+
+async fn prepare_inner(
+    sandbox_id: &str,
+    netns_path: &str,
+    config: &CriPodSandboxConfig,
+    plan: &RuntimePreparePlan,
+    spec: &mut Spec,
+) -> Result<RuntimeLease, String> {
+    let phase_started = Instant::now();
     let endpoint = std::env::var("CUBE_RUNTIME_RESOURCE_ENDPOINT")
         .unwrap_or_else(|_| DEFAULT_ENDPOINT.to_string());
     let mut client = RuntimeResourceClient::connect(&endpoint).await?;
@@ -1361,7 +1386,14 @@ pub(crate) async fn prepare(
         )
         .await?;
     validate_capabilities(&capabilities)?;
+    crate::cube_perf!(
+        "cube_perf component=shim operation=create phase=runtime-capabilities sandbox_id={} ts_mono_us={} duration_us={}",
+        sandbox_id,
+        crate::common::utils::Utils::monotonic_time_micros(),
+        phase_started.elapsed().as_micros()
+    );
 
+    let phase_started = Instant::now();
     let metadata = pod_metadata(config)?;
     let resources = plan.resources.clone();
     let generation = u64::from(metadata.attempt) + 1;
@@ -1393,6 +1425,13 @@ pub(crate) async fn prepare(
     cleanup_lease.persist_cleanup_record().map_err(|error| {
         format!("persist RuntimeResource cleanup identity before Prepare: {error}")
     })?;
+    crate::cube_perf!(
+        "cube_perf component=shim operation=create phase=runtime-intent sandbox_id={} generation={} ts_mono_us={} duration_us={}",
+        sandbox_id,
+        generation,
+        crate::common::utils::Utils::monotonic_time_micros(),
+        phase_started.elapsed().as_micros()
+    );
     let request = PrepareSandboxRequest {
         sandbox_id: sandbox_id.to_string(),
         idempotency_key,
@@ -1422,6 +1461,7 @@ pub(crate) async fn prepare(
         // this exact INTENT rather than EMPTY.
         operation.verify()?;
     }
+    let phase_started = Instant::now();
     let response: PrepareSandboxResponse = match client
         .unary(
             request,
@@ -1439,6 +1479,13 @@ pub(crate) async fn prepare(
             .await)
         }
     };
+    crate::cube_perf!(
+        "cube_perf component=shim operation=create phase=runtime-prepare-rpc sandbox_id={} generation={} ts_mono_us={} duration_us={}",
+        sandbox_id,
+        generation,
+        crate::common::utils::Utils::monotonic_time_micros(),
+        phase_started.elapsed().as_micros()
+    );
     let mut sandbox = match response.sandbox {
         Some(sandbox) => sandbox,
         None => {
