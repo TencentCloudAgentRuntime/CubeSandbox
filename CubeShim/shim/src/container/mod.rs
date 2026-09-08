@@ -32,6 +32,7 @@ use crate::common::{
 };
 use crate::container::rootfs::ANNO_CONTAINER_CUSTOM_FILE;
 use crate::log::{stat_defer, stat_defer::StatDefer, Log};
+use crate::metrics;
 use crate::sandbox::config::{Config, ANNO_APP_SNAPSHOT_CREATE};
 use crate::{infof, warnf};
 
@@ -1002,6 +1003,7 @@ impl Container {
 
         let client = self.client.as_ref().unwrap().lock().await;
         if self.is_cold_start() {
+            let mut total = metrics::OperationTimer::new("agent", "StartContainer");
             let req = agent::StartContainerRequest {
                 container_id: self.id.clone(),
                 ..Default::default()
@@ -1010,6 +1012,7 @@ impl Container {
                 .start_container(self.ctx.clone(), &req)
                 .await
                 .map_err(|e| format!("start container failed:{}", e))?;
+            total.succeed();
         }
         if !self.sb_conf.app_snapshot_create {
             if self.state.is_none() {

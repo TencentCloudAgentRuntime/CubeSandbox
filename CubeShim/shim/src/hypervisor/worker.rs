@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::common::CResult;
+use crate::metrics;
 use cube_hypervisor::config::RestoreConfig;
 use cube_hypervisor::vm_config::{DeviceConfig, FsConfig, VmConfig};
 use cube_hypervisor::{
@@ -211,7 +212,10 @@ impl WorkerClient {
         let parent_pid = std::process::id();
         if let Some(placement) = placement {
             let phase_started = Instant::now();
-            placement.prepare_vmm_worker_spawn(&worker_path, &nonce, PROTOCOL_VERSION)?;
+            let prepared =
+                placement.prepare_vmm_worker_spawn(&worker_path, &nonce, PROTOCOL_VERSION);
+            metrics::observe_vmm_stage("prepare-intent", prepared.is_ok(), phase_started.elapsed());
+            prepared?;
             log::info!(
                 "cube-vmm-worker phase=prepare-intent sandbox={} duration_us={}",
                 sandbox_id,
@@ -236,9 +240,19 @@ impl WorkerClient {
             });
         }
         let phase_started = Instant::now();
-        let child = command
-            .spawn()
-            .map_err(|error| format!("spawn cube-vmm-worker {}: {error}", worker_path.display()))?;
+        let child = match command.spawn() {
+            Ok(child) => {
+                metrics::observe_vmm_stage("fork-exec", true, phase_started.elapsed());
+                child
+            }
+            Err(error) => {
+                metrics::observe_vmm_stage("fork-exec", false, phase_started.elapsed());
+                return Err(format!(
+                    "spawn cube-vmm-worker {}: {error}",
+                    worker_path.display()
+                ));
+            }
+        };
         drop(control_child);
         drop(event_child);
 
@@ -333,8 +347,10 @@ impl WorkerClient {
         if let Err(error) =
             client.request(WorkerCommand::Hello(HelloConfig { nonce, parent_pid }), &[])
         {
+            metrics::observe_vmm_stage("hello", false, phase_started.elapsed());
             return Err(client.terminate_after_error(error));
         }
+        metrics::observe_vmm_stage("hello", true, phase_started.elapsed());
         log::info!(
             "cube-vmm-worker phase=hello sandbox={} pid={} duration_us={}",
             sandbox_id,
@@ -349,8 +365,10 @@ impl WorkerClient {
         }
         let phase_started = Instant::now();
         if let Err(error) = verify_worker_fd_allowlist(pid, control_child_fd, event_child_fd) {
+            metrics::observe_vmm_stage("fd-gate", false, phase_started.elapsed());
             return Err(client.terminate_after_error(error));
         }
+        metrics::observe_vmm_stage("fd-gate", true, phase_started.elapsed());
         log::info!(
             "cube-vmm-worker phase=fd-gate sandbox={} pid={} duration_us={}",
             sandbox_id,
@@ -360,17 +378,20 @@ impl WorkerClient {
         if let Some(placement) = placement {
             let phase_started = Instant::now();
             if let Err(error) = placement.place_vmm_worker(pid) {
+                metrics::observe_vmm_stage("placement", false, phase_started.elapsed());
                 return Err(
                     client.terminate_after_error(format!("place cube-vmm-worker {pid}: {error}"))
                 );
             }
             let placement_elapsed = phase_started.elapsed();
             if placement_elapsed > PLACEMENT_DEADLINE {
+                metrics::observe_vmm_stage("placement", false, placement_elapsed);
                 return Err(client.terminate_after_error(format!(
                     "place cube-vmm-worker {pid} exceeded {:?}: {:?}",
                     PLACEMENT_DEADLINE, placement_elapsed
                 )));
             }
+            metrics::observe_vmm_stage("placement", true, placement_elapsed);
             log::info!(
                 "cube-vmm-worker phase=placement sandbox={} pid={} duration_us={}",
                 sandbox_id,
@@ -381,8 +402,10 @@ impl WorkerClient {
         if launch_vmm {
             let phase_started = Instant::now();
             if let Err(error) = client.request(WorkerCommand::Launch(config), &[]) {
+                metrics::observe_vmm_stage("launch", false, phase_started.elapsed());
                 return Err(client.terminate_after_error(error));
             }
+            metrics::observe_vmm_stage("launch", true, phase_started.elapsed());
             log::info!(
                 "cube-vmm-worker phase=launch sandbox={} pid={} duration_us={} total_us={}",
                 sandbox_id,

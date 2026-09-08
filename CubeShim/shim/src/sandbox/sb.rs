@@ -43,6 +43,7 @@ use crate::hypervisor::config::{HypConfig, VmConfig};
 use crate::hypervisor::cube_hypervisor as CH;
 use crate::hypervisor::snapshot::{enable_snapshot, SnapshotInfo};
 use crate::log::{stat_defer, Log};
+use crate::metrics;
 use crate::sandbox::config;
 use crate::{debugf, errf, infof, warnf};
 
@@ -613,6 +614,9 @@ impl SandBox {
         &mut self,
         worker_placement: Option<&dyn crate::hypervisor::worker::WorkerPlacement>,
     ) -> CResult<()> {
+        // Covers VMM boot and Guest Agent CreateSandbox, but not subsequent
+        // workload-container creation.
+        let mut total = metrics::OperationTimer::new("shim", "CreatePodSandbox");
         let snapshot = self.start_vm(worker_placement).await?;
 
         //todo: app snapshot
@@ -695,6 +699,7 @@ impl SandBox {
             self.monitor_handle = Some(Arc::new(handle));
         }
         stat.set_ok();
+        total.succeed();
         Ok(())
     }
 

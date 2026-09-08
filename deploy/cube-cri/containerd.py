@@ -165,6 +165,7 @@ ExecStart=
 ExecStart=""" + " ".join(map(unit_arg, final_args)) + """
 Environment=CUBE_RUNTIME_RESOURCE_ENDPOINT=/run/cube-cri/runtime-resource.sock
 Environment=CUBE_RUNTIME_RESOURCE_REAPER_DIR=/data/cubelet/runtime-resource-reaper
+Environment=CUBE_CRI_METRICS_SOCKET=/run/cube-cri/metrics.sock
 Environment=CUBE_VMM_WORKER_PATH=/opt/cube-cri/current/bin/cube-vmm-worker
 """
     unit += "Environment=ENABLE_CRI_SANDBOXES=1\nEnvironment=CUBE_ALLOW_PRIVILEGED=true\n" if major == "1.7" else "UnsetEnvironment=ENABLE_CRI_SANDBOXES\n"

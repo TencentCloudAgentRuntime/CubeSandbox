@@ -5,6 +5,7 @@
 use std::time::Instant;
 
 use super::{Log, StatRet};
+use crate::metrics;
 
 pub const ACT_CREATE: &str = "Create";
 pub const ACT_DELETE: &str = "Delete";
@@ -102,6 +103,12 @@ impl StatDefer {
             self.callee_act.clone(),
             self.ret.clone(),
             duration,
+        );
+        metrics::observe_stat(
+            &self.callee,
+            &self.callee_act,
+            &self.ret,
+            self.start.elapsed(),
         );
         self.loged = true
     }

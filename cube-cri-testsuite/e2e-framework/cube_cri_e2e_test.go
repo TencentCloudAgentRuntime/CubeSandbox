@@ -51,7 +51,7 @@ var (
 	containerCPU    = flag.String("container-cpu", envString("CONTAINER_CPU", "100m"), "container cpu request/limit")
 	containerMemory = flag.String("container-memory", envString("CONTAINER_MEMORY", "128Mi"), "container memory request/limit")
 
-	latencyConcurrency = flag.Int("latency-concurrency", envInt("LATENCY_CONCURRENCY", 20), "concurrent cube pause pods for latency test")
+	latencyConcurrency = flag.Int("latency-concurrency", envInt("LATENCY_CONCURRENCY", 100), "concurrent cube pause pods for latency test")
 	latencyTimeout     = flag.Duration("latency-timeout", envDuration("LATENCY_TIMEOUT", 120*time.Second), "latency case timeout")
 	semanticTimeout    = flag.Duration("semantic-timeout", envDuration("SEMANTIC_TIMEOUT", 60*time.Second), "semantic case startup timeout")
 	probeTimeout       = flag.Duration("probe-timeout", envDuration("PROBE_TIMEOUT", 90*time.Second), "probe case timeout")

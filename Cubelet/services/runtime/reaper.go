@@ -65,7 +65,7 @@ func (s *Service) RecoverReaperJobs(ctx context.Context, root string) error {
 		if !filepath.IsAbs(record.Endpoint) || record.SandboxID == "" || record.LeaseID == "" || record.Generation == 0 {
 			return fmt.Errorf("RuntimeResource reaper job %s has invalid identity", job)
 		}
-		if err := s.operations.Lock(ctx, record.SandboxID); err != nil {
+		if err := s.lockOperation(ctx, record.SandboxID); err != nil {
 			return err
 		}
 		releaseErr := s.releaseLocked(ctx, state.ReleaseRequest{

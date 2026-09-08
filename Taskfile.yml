@@ -56,6 +56,9 @@ tasks:
         vars:
           CLI_ARGS: '{{.CLI_ARGS}}'
       - bash ./deploy/cube-cri/smoke.sh {{.ARGS}}
+  deploy:monitoring:
+    desc: 部署 Cube CRI Prometheus 与 Grafana 监控栈。
+    cmds: [bash ./deploy/cube-cri/monitoring.sh]
   test:cri:
     aliases: [test]
     desc: 在指定节点验证 Pod 启动、init、卷、探针、日志和 exec，完成后清理。

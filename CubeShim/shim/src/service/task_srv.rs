@@ -36,6 +36,7 @@ use crate::common::utils::Utils;
 use crate::container::resources;
 use crate::container::{container_mgr::ContainerInfo, exec::Tty};
 use crate::log::{stat_defer, Log, LogLevel};
+use crate::metrics;
 use crate::sandbox::sb;
 use crate::service::host_cgroup::{
     lifecycle_from_env, BeginCreateError, Classification, CreateAdmission, CreatePublisherGuard,
@@ -666,6 +667,7 @@ impl Task for TaskService {
         _ctx: &TtrpcContext,
         req: api::CreateTaskRequest,
     ) -> TtrpcResult<api::CreateTaskResponse> {
+        let mut total = metrics::OperationTimer::new("shim", "TaskCreate");
         infof!(self.log, "create req start");
         let start = Instant::now();
         let mut stat = stat_defer::StatDefer::new(
@@ -957,6 +959,9 @@ impl Task for TaskService {
         // so a same-fingerprint waiter can distinguish completion from a
         // cancelled RPC. Drop still runs automatically on cancellation.
         drop(task_reservation);
+        if result.is_ok() {
+            total.succeed();
+        }
         result
     }
     async fn start(
@@ -964,6 +969,7 @@ impl Task for TaskService {
         _ctx: &TtrpcContext,
         req: api::StartRequest,
     ) -> TtrpcResult<api::StartResponse> {
+        let mut total = metrics::OperationTimer::new("shim", "TaskStart");
         let start_at = Instant::now();
         infof!(
             self.log,
@@ -1015,6 +1021,7 @@ impl Task for TaskService {
             req.exec_id(),
             start_at.elapsed().as_millis()
         );
+        total.succeed();
         Ok(api::StartResponse {
             pid: sb.pid(),
             ..Default::default()

@@ -27,12 +27,10 @@ task test:e2e-framework -- --help
 ## 并发启动延迟
 
 ```bash
-task test:e2e-framework -- --feature latency \
-  --latency-count 20 --latency-concurrency 20 --latency-timeout 240s \
-  --latency-output-dir /tmp/cube-cri-latency
+task test:e2e-framework -- --feature latency --cube-node 10.0.244.241
 ```
 
-`--latency-count` 为 Pod 总数，默认等于 `--latency-concurrency`；后者限制同时进行的 Create 请求数，默认 20，提交后不等待 Ready 即继续提交。对应环境变量为 `LATENCY_COUNT`、`LATENCY_CONCURRENCY`、`LATENCY_TIMEOUT`、`LATENCY_OUTPUT_DIR`。
+`--latency-count` 为 Pod 总数，`--latency-concurrency` 限制同时进行的 Create 请求数，二者默认均为 100。提交后不等待 Ready 即继续提交。对应环境变量为 `LATENCY_COUNT`、`LATENCY_CONCURRENCY`、`LATENCY_TIMEOUT`、`LATENCY_OUTPUT_DIR`。
 
 Pod 总数须按节点剩余资源及 RuntimeClass 的 `overhead` 选择，降低 Create 并发度不会减少最终驻留的 Pod 数。
 

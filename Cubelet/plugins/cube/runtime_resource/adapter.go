@@ -15,9 +15,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/moby/sys/mountinfo"
 	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/crimetrics"
 	runtimeservice "github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
@@ -46,6 +48,7 @@ const (
 )
 
 type adapter struct {
+	metrics     *crimetrics.Metrics
 	mu          sync.Mutex
 	stateDir    string
 	assets      Assets
@@ -80,8 +83,12 @@ var _ runtimeservice.Adapter = (*adapter)(nil)
 // Cubelet and by privileged end-to-end validation. The returned interface keeps
 // the implementation details private while allowing a standalone service to
 // exercise the exact asset, network, TAP, and cleanup path.
-func NewNodeAdapter(stateDir string, assets Assets) (runtimeservice.Adapter, error) {
-	return newAdapter(stateDir, assets, newLinuxNetwork())
+func NewNodeAdapter(stateDir string, assets Assets, metrics ...*crimetrics.Metrics) (runtimeservice.Adapter, error) {
+	adapter, err := newAdapter(stateDir, assets, newLinuxNetwork())
+	if err == nil && len(metrics) > 0 {
+		adapter.metrics = metrics[0]
+	}
+	return adapter, err
 }
 
 func newAdapter(stateDir string, assets Assets, network NetworkOps) (*adapter, error) {
@@ -120,7 +127,9 @@ func newAdapter(stateDir string, assets Assets, network NetworkOps) (*adapter, e
 }
 
 func (a *adapter) Prepare(ctx context.Context, request *runtimev1.PrepareSandboxRequest, lease state.Lease) (*runtimev1.PreparedSandbox, error) {
+	lockStarted := time.Now()
 	a.mu.Lock()
+	a.metrics.ObserveLockWait("node_adapter", lockStarted)
 	defer a.mu.Unlock()
 
 	if record, err := a.load(request.GetSandboxId()); err == nil {
@@ -169,7 +178,9 @@ func (a *adapter) resumePrepare(ctx context.Context, record *diskRecord) (*runti
 			return nil, err
 		}
 		record.Assets.SharedRoot = validated
+		finishNetwork := a.metrics.Start("resource", "NetworkPrepare")
 		network, err := a.network.Prepare(ctx, record.NetNSPath, record.InterfaceName, record.TapName)
+		finishNetwork(err)
 		if err != nil {
 			if rollbackErr := a.rollbackPreparing(ctx, record); rollbackErr != nil {
 				return nil, fmt.Errorf("prepare network: %v; rollback: %v", err, rollbackErr)
@@ -267,7 +278,9 @@ func (a *adapter) persistStage(record *diskRecord, stage prepareStage) error {
 }
 
 func (a *adapter) Release(ctx context.Context, request state.ReleaseRequest, networkHandle string) error {
+	lockStarted := time.Now()
 	a.mu.Lock()
+	a.metrics.ObserveLockWait("node_adapter", lockStarted)
 	defer a.mu.Unlock()
 	record, err := a.load(request.SandboxID)
 	if errors.Is(err, os.ErrNotExist) {
@@ -293,7 +306,10 @@ func (a *adapter) Release(ctx context.Context, request state.ReleaseRequest, net
 			return err
 		}
 	}
-	if err := a.network.Release(ctx, record.NetNSPath, record.InterfaceName, record.TapName); err != nil {
+	finishNetwork := a.metrics.Start("resource", "NetworkRelease")
+	networkErr := a.network.Release(ctx, record.NetNSPath, record.InterfaceName, record.TapName)
+	finishNetwork(networkErr)
+	if err := networkErr; err != nil {
 		return err
 	}
 	if err := os.Remove(a.path(request.SandboxID)); err != nil && !errors.Is(err, os.ErrNotExist) {

@@ -25,7 +25,7 @@ import (
 )
 
 var (
-	latencyCount     = flag.Int("latency-count", envInt("LATENCY_COUNT", 0), "total pods; 0 uses latency-concurrency")
+	latencyCount     = flag.Int("latency-count", envInt("LATENCY_COUNT", 100), "total cube pause pods for latency test")
 	latencyOutputDir = flag.String("latency-output-dir", envString("LATENCY_OUTPUT_DIR", ""), "result directory; empty creates a temporary directory")
 )
 

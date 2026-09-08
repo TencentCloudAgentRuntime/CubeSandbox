@@ -17,6 +17,7 @@ import (
 
 	runtimev1 "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/runtime/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/kmutex"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/crimetrics"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
 	"google.golang.org/grpc/codes"
@@ -52,9 +53,10 @@ type Service struct {
 	fdEndpoint  string
 	operations  kmutex.KeyedLocker
 	reaperMu    sync.Mutex
+	metrics     *crimetrics.Metrics
 }
 
-func NewService(store LifecycleStore, adapter Adapter, fdEndpoint string) (*Service, *handoff.Registry, error) {
+func NewService(store LifecycleStore, adapter Adapter, fdEndpoint string, metrics ...*crimetrics.Metrics) (*Service, *handoff.Registry, error) {
 	if store == nil || adapter == nil {
 		return nil, nil, errors.New("runtime resource store/adapter is nil")
 	}
@@ -69,8 +71,13 @@ func NewService(store LifecycleStore, adapter Adapter, fdEndpoint string) (*Serv
 	if err != nil {
 		return nil, nil, err
 	}
+	var observer *crimetrics.Metrics
+	if len(metrics) > 0 {
+		observer = metrics[0]
+	}
 	return &Service{
 		coordinator: coordinator, store: store, adapter: adapter, fdEndpoint: fdEndpoint, operations: kmutex.New(),
+		metrics: observer,
 	}, registry, nil
 }
 
@@ -147,11 +154,13 @@ func (s *Service) GetCapabilities(_ context.Context, request *runtimev1.GetCapab
 	}, nil
 }
 
-func (s *Service) PrepareSandbox(ctx context.Context, request *runtimev1.PrepareSandboxRequest) (*runtimev1.PrepareSandboxResponse, error) {
+func (s *Service) PrepareSandbox(ctx context.Context, request *runtimev1.PrepareSandboxRequest) (response *runtimev1.PrepareSandboxResponse, err error) {
+	finish := s.metrics.Start("resource", "Prepare")
+	defer func() { finish(err) }()
 	if err := validatePrepare(request); err != nil {
 		return nil, err
 	}
-	if err := s.operations.Lock(ctx, request.GetSandboxId()); err != nil {
+	if err := s.lockOperation(ctx, request.GetSandboxId()); err != nil {
 		return nil, status.FromContextError(err).Err()
 	}
 	defer s.operations.Unlock(request.GetSandboxId())
@@ -230,11 +239,13 @@ func releaseKey(sandboxID string, generation uint64, leaseID string) string {
 	return state.ExpectedReleaseKey(sandboxID, generation, leaseID)
 }
 
-func (s *Service) ReleaseSandbox(ctx context.Context, request *runtimev1.ReleaseSandboxRequest) (*runtimev1.ReleaseSandboxResponse, error) {
+func (s *Service) ReleaseSandbox(ctx context.Context, request *runtimev1.ReleaseSandboxRequest) (response *runtimev1.ReleaseSandboxResponse, err error) {
+	finish := s.metrics.Start("resource", "Release")
+	defer func() { finish(err) }()
 	if request == nil || request.GetSandboxId() == "" || request.GetLeaseId() == "" || request.GetGeneration() == 0 || request.GetIdempotencyKey() == "" {
 		return nil, status.Error(codes.InvalidArgument, "release fields must be non-zero")
 	}
-	if err := s.operations.Lock(ctx, request.GetSandboxId()); err != nil {
+	if err := s.lockOperation(ctx, request.GetSandboxId()); err != nil {
 		return nil, status.FromContextError(err).Err()
 	}
 	defer s.operations.Unlock(request.GetSandboxId())
@@ -245,7 +256,9 @@ func (s *Service) ReleaseSandbox(ctx context.Context, request *runtimev1.Release
 	return &runtimev1.ReleaseSandboxResponse{Released: true}, nil
 }
 
-func (s *Service) InspectSandbox(ctx context.Context, request *runtimev1.InspectSandboxRequest) (*runtimev1.InspectSandboxResponse, error) {
+func (s *Service) InspectSandbox(ctx context.Context, request *runtimev1.InspectSandboxRequest) (response *runtimev1.InspectSandboxResponse, err error) {
+	finish := s.metrics.Start("resource", "Inspect")
+	defer func() { finish(err) }()
 	if request == nil || request.GetSandboxId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "sandbox_id is empty")
 	}
@@ -256,7 +269,7 @@ func (s *Service) InspectSandbox(ctx context.Context, request *runtimev1.Inspect
 	if err != nil {
 		return nil, err
 	}
-	response := &runtimev1.InspectSandboxResponse{Found: true}
+	response = &runtimev1.InspectSandboxResponse{Found: true}
 	if record.Active == nil {
 		response.State = runtimev1.SandboxResourceState_SANDBOX_RESOURCE_STATE_RELEASED
 		return response, nil

@@ -29,8 +29,8 @@ Options:
   --namespace NAME        Namespace to run in. Default: ${NAMESPACE}
   --feature REGEX         e2e-framework feature regex.
   --assess REGEX          e2e-framework assessment regex.
-  --latency-count N       Total cube pause pods; defaults to concurrency.
-  --latency-concurrency N Maximum simultaneous Create requests (default: 20).
+  --latency-count N       Total cube pause pods (default: 100).
+  --latency-concurrency N Maximum simultaneous Create requests (default: 100).
   --latency-output-dir DIR
                            Write summary JSON and per-pod JSON to DIR.
   --latency-timeout DUR   Latency test timeout.
