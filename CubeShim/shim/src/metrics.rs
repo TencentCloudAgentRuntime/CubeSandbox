@@ -24,12 +24,16 @@ static DROPPED: AtomicU64 = AtomicU64::new(0);
 #[derive(Serialize)]
 struct Event {
     version: u8,
+    #[serde(rename = "event_type")]
+    event_type: &'static str,
     component: &'static str,
     operation: &'static str,
-    result: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_class: Option<&'static str>,
-    duration_seconds: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_seconds: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     dropped: Option<u64>,
 }
@@ -50,6 +54,10 @@ pub fn observe_vmm_stage(operation: &'static str, succeeded: bool, duration: Dur
     observe("vmm", operation, succeeded, duration);
 }
 
+pub fn observe_shim_stage(operation: &'static str, succeeded: bool, duration: Duration) {
+    observe("shim", operation, succeeded, duration);
+}
+
 /// Times one bounded internal operation without adding latency to the path.
 pub struct OperationTimer {
     component: &'static str,
@@ -60,6 +68,7 @@ pub struct OperationTimer {
 
 impl OperationTimer {
     pub fn new(component: &'static str, operation: &'static str) -> Self {
+        observe_start(component, operation);
         Self {
             component,
             operation,
@@ -75,7 +84,7 @@ impl OperationTimer {
 
 impl Drop for OperationTimer {
     fn drop(&mut self) {
-        observe(
+        observe_finish(
             self.component,
             self.operation,
             self.succeeded,
@@ -85,17 +94,52 @@ impl Drop for OperationTimer {
 }
 
 fn observe(component: &'static str, operation: &'static str, succeeded: bool, duration: Duration) {
-    let Some(sender) = sender() else {
-        return;
-    };
-    let event = Event {
+    send(Event {
         version: 1,
+        event_type: "observe",
         component,
         operation,
-        result: if succeeded { "ok" } else { "error" },
+        result: Some(if succeeded { "ok" } else { "error" }),
         error_class: (!succeeded).then_some("internal"),
-        duration_seconds: duration.as_secs_f64(),
+        duration_seconds: Some(duration.as_secs_f64()),
         dropped: Some(DROPPED.swap(0, Ordering::Relaxed)).filter(|count| *count > 0),
+    });
+}
+
+fn observe_start(component: &'static str, operation: &'static str) {
+    send(Event {
+        version: 1,
+        event_type: "start",
+        component,
+        operation,
+        result: None,
+        error_class: None,
+        duration_seconds: None,
+        dropped: Some(DROPPED.swap(0, Ordering::Relaxed)).filter(|count| *count > 0),
+    });
+}
+
+fn observe_finish(
+    component: &'static str,
+    operation: &'static str,
+    succeeded: bool,
+    duration: Duration,
+) {
+    send(Event {
+        version: 1,
+        event_type: "finish",
+        component,
+        operation,
+        result: Some(if succeeded { "ok" } else { "error" }),
+        error_class: (!succeeded).then_some("internal"),
+        duration_seconds: Some(duration.as_secs_f64()),
+        dropped: Some(DROPPED.swap(0, Ordering::Relaxed)).filter(|count| *count > 0),
+    });
+}
+
+fn send(event: Event) {
+    let Some(sender) = sender() else {
+        return;
     };
     match sender.try_send(event) {
         Ok(()) => {}

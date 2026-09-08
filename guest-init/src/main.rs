@@ -17,6 +17,8 @@ use nix::mount::{mount, MsFlags};
 use nix::unistd;
 use std::ffi::CString;
 use std::fs;
+#[cfg(target_arch = "aarch64")]
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::process;
 use std::time::Instant;
@@ -36,6 +38,9 @@ fn main() {
     if process::id() != 1 {
         panic!("cube init must be started as pid 1");
     }
+    if let Err(e) = notify_guest_init_started() {
+        panic!("{}", e);
+    }
 
     if let Err(e) = init(start) {
         panic!("{}", e);
@@ -44,8 +49,65 @@ fn main() {
     if let Err(e) = mount_pmem() {
         panic!("{}", e);
     }
+    if let Err(e) = notify_guest_init_ready() {
+        panic!("{}", e);
+    }
     println!("mount pmem finish at:{}", start.elapsed().as_millis());
     start_agent();
+}
+
+fn notify_guest_init_ready() -> Result<()> {
+    notify_sys_ctrl(1 << 4, "guest init ready")
+}
+
+fn notify_guest_init_started() -> Result<()> {
+    notify_sys_ctrl(1 << 6, "guest init started")
+}
+
+fn notify_sys_ctrl(data: u8, phase: &str) -> Result<()> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        const SYS_CTRL_PORT: u16 = 0x680;
+        if unsafe { libc::ioperm(SYS_CTRL_PORT as u64, 1, 1) } != 0 {
+            return Err(anyhow!(
+                "ioperm {phase} port 0x{SYS_CTRL_PORT:x} failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut port = x86_64::instructions::port::Port::new(SYS_CTRL_PORT);
+        unsafe { port.write(data) };
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        const SYS_CTRL_MMIO_ADDR: libc::off_t = 0x0903_0000;
+        const SYS_CTRL_MMIO_SIZE: usize = 0x1000;
+        let dev_mem = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/mem")
+            .with_context(|| format!("open /dev/mem for {phase}"))?;
+        let map = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                SYS_CTRL_MMIO_SIZE,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                dev_mem.as_raw_fd(),
+                SYS_CTRL_MMIO_ADDR,
+            )
+        };
+        if map == libc::MAP_FAILED {
+            return Err(anyhow!(
+                "mmap guest init ready addr 0x{SYS_CTRL_MMIO_ADDR:x} failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        unsafe {
+            std::ptr::write_volatile(map as *mut u8, data);
+            libc::munmap(map, SYS_CTRL_MMIO_SIZE);
+        }
+    }
+    Ok(())
 }
 
 fn mount_pmem() -> Result<()> {

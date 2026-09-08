@@ -152,6 +152,9 @@ impl RequestFailure {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 enum WorkerEvent {
     VmShutdown,
+    GuestInitStarted,
+    GuestInitReady,
+    AgentStarted,
     VsockServerReady,
     RestoreReady,
     SysStart,
@@ -1490,6 +1493,9 @@ impl From<NotifyEvent> for WorkerEvent {
     fn from(event: NotifyEvent) -> Self {
         match event {
             NotifyEvent::VmShutdown => Self::VmShutdown,
+            NotifyEvent::GuestInitStarted => Self::GuestInitStarted,
+            NotifyEvent::GuestInitReady => Self::GuestInitReady,
+            NotifyEvent::AgentStarted => Self::AgentStarted,
             NotifyEvent::VsockServerReady => Self::VsockServerReady,
             NotifyEvent::RestoreReady => Self::RestoreReady,
             NotifyEvent::SysStart => Self::SysStart,
@@ -1503,6 +1509,9 @@ impl From<WorkerEvent> for NotifyEvent {
     fn from(event: WorkerEvent) -> Self {
         match event {
             WorkerEvent::VmShutdown => Self::VmShutdown,
+            WorkerEvent::GuestInitStarted => Self::GuestInitStarted,
+            WorkerEvent::GuestInitReady => Self::GuestInitReady,
+            WorkerEvent::AgentStarted => Self::AgentStarted,
             WorkerEvent::VsockServerReady => Self::VsockServerReady,
             WorkerEvent::RestoreReady => Self::RestoreReady,
             WorkerEvent::SysStart => Self::SysStart,

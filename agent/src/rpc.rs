@@ -2445,15 +2445,22 @@ pub fn start(s: Arc<Mutex<Sandbox>>, server_address: &str) -> Result<TtrpcServer
     Ok(server)
 }
 
+pub fn notify_agent_started() -> Result<()> {
+    notify_sys_ctrl(1 << 5, "agent started")
+}
+
 pub fn notify_vsock_server_ready() -> Result<()> {
+    notify_sys_ctrl(1 << 3, "vsock server ready")
+}
+
+fn notify_sys_ctrl(data: u8, phase: &str) -> Result<()> {
     #[cfg(target_arch = "x86_64")]
     {
         let port: u16 = 0x680;
-        let data: u8 = 0x8;
         let ret = unsafe { libc::ioperm(port as u64, 5, 1) };
         if ret != 0 {
             return Err(anyhow!(
-                "ioperm for vsock server ready notify port 0x{:x} failed: {}",
+                "ioperm for {phase} notify port 0x{:x} failed: {}",
                 port,
                 std::io::Error::last_os_error()
             ));
@@ -2469,13 +2476,12 @@ pub fn notify_vsock_server_ready() -> Result<()> {
     {
         const SYS_CTRL_MMIO_ADDR: libc::off_t = 0x0903_0000;
         const SYS_CTRL_MMIO_SIZE: usize = 0x1000;
-        const SYS_VSOCK_SERVER: u8 = 1 << 3;
 
         let dev_mem = OpenOptions::new()
             .read(true)
             .write(true)
             .open("/dev/mem")
-            .context("open /dev/mem for sys_ctrl mmio notify")?;
+            .with_context(|| format!("open /dev/mem for {phase} sys_ctrl notify"))?;
         let map = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -2495,7 +2501,7 @@ pub fn notify_vsock_server_ready() -> Result<()> {
         }
 
         unsafe {
-            std::ptr::write_volatile(map as *mut u8, SYS_VSOCK_SERVER);
+            std::ptr::write_volatile(map as *mut u8, data);
             libc::munmap(map, SYS_CTRL_MMIO_SIZE);
         }
     }

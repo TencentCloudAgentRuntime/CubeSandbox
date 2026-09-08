@@ -37,52 +37,60 @@ func Generate() ([]byte, error) {
 
 func panels() []any {
 	return []any{
-		row(1, "运行概览", 0),
+		row(1, "端到端启动定位", 0),
 		timeseriesWidth(30, "Kubelet Pod 启动耗时 P95", 1, 0, 8, "s", false, kubeletPodStartP95()),
 		timeseriesWidth(2, "Sandbox 创建总耗时", 1, 8, 8, "s", false, quantiles("shim", "CreatePodSandbox")),
 		timeseriesWidth(3, "Sandbox 创建结果速率", 1, 16, 8, "ops", true, []query{{"sum by (result) (rate(cube_cri_operations_total{node=~\"$node\",component=\"shim\",operation=\"CreatePodSandbox\"}[$__rate_interval]))", "{{result}}"}}),
 
-		row(4, "节点资源与网络", 9),
-		timeseries(5, "资源准备耗时", 10, 0, "s", false, quantiles("resource", "Prepare|NetworkPrepare")),
-		timeseries(6, "资源准备结果速率", 10, 12, "ops", true, []query{{"sum by (operation, result) (rate(cube_cri_operations_total{node=~\"$node\",component=\"resource\",operation=~\"Prepare|NetworkPrepare\"}[$__rate_interval]))", "{{operation}} {{result}}"}}),
-		timeseries(7, "Sandbox 锁等待 P95", 18, 0, "s", false, []query{{"histogram_quantile(0.95, sum by (le, lock) (rate(cube_cri_lock_wait_duration_seconds_bucket{node=~\"$node\"}[$__rate_interval])))", "{{lock}}"}}),
-		timeseries(29, "资源与 RPC 并发", 18, 12, "short", false, []query{
-			{"sum by (component, operation) (cube_cri_operations_inflight{node=~\"$node\"})", "{{component}} {{operation}}"},
-			{"sum by (method) (cube_cri_rpc_inflight{node=~\"$node\"})", "RPC {{method}}"},
-		}),
+		row(32, "Kubernetes 控制链路", 9),
+		timeseries(34, "Kubelet 同步与 CRI P95", 10, 0, "s", false, kubeletRuntimeP95()),
+		timeseries(39, "API Server Pod POST P95", 10, 12, "s", false, apiserverPodPostP95()),
 
-		row(8, "VMM worker", 26),
-		timeseries(9, "Worker 阶段 P95", 27, 0, "s", false, []query{
+		row(8, "Shim 与 VMM worker", 18),
+		timeseries(9, "Worker 阶段 P95", 19, 0, "s", false, []query{
 			{"histogram_quantile(0.95, sum by (le, operation) (rate(cube_cri_operation_duration_seconds_bucket{node=~\"$node\",component=\"vmm\",operation=~\"prepare-intent|fork-exec|hello|fd-gate|placement|launch\",result=\"ok\"}[$__rate_interval])))", "{{operation}}"},
 			{"histogram_quantile(0.95, sum by (le, operation) (rate(cube_cri_operation_duration_seconds_bucket{node=~\"$node\",component=\"vmm\",operation=~\"LaunchVmm|CreateVm|BootVm\",result=\"ok\"}[$__rate_interval])))", "{{operation}}"},
 		}),
-		timeseries(10, "Worker 阶段结果速率", 27, 12, "ops", true, []query{{"sum by (operation, result) (rate(cube_cri_operations_total{node=~\"$node\",component=\"vmm\"}[$__rate_interval]))", "{{operation}} {{result}}"}}),
+		timeseries(37, "Shim 启动阶段 P95", 19, 12, "s", false, operationP95("shim", "VmmReady|VmConfig|VmmLaunch|VmBoot|GuestKernelBoot|GuestKernelInit|GuestInitSetup|GuestAgentExec|AgentServerStart|VsockReady|AgentConnect|GuestDeviceSetup|MonitorSetup")),
+		timeseries(10, "Worker 阶段结果速率", 27, 0, "ops", true, []query{{"sum by (operation, result) (rate(cube_cri_operations_total{node=~\"$node\",component=\"vmm\"}[$__rate_interval]))", "{{operation}} {{result}}"}}),
+		timeseries(38, "Shim 启动阶段活跃请求", 27, 12, "short", false, []query{{"sum by (operation) (cube_cri_operations_inflight{node=~\"$node\",component=\"shim\",operation=~\"CreatePodSandbox|VmmReady|VmConfig|VmmLaunch|VmBoot|VsockReady|AgentConnect|GuestDeviceSetup|MonitorSetup\"})", "{{operation}}"}}),
 
-		row(11, "Guest Agent 与任务创建", 35),
-		timeseriesWidth(12, "Agent 创建耗时", 36, 0, 8, "s", false, quantiles("agent", "CreateSandbox|CreateContainer")),
-		timeseriesWidth(31, "Task 创建与启动 P95", 36, 8, 8, "s", false, operationP95("shim|agent", "TaskCreate|TaskStart|StartContainer")),
-		timeseriesWidth(13, "任务生命周期结果速率", 36, 16, 8, "ops", true, []query{{"sum by (component, operation, result) (rate(cube_cri_operations_total{node=~\"$node\",component=~\"agent|shim\",operation=~\"CreateSandbox|CreateContainer|TaskCreate|TaskStart|StartContainer\"}[$__rate_interval]))", "{{component}} {{operation}} {{result}}"}}),
+		row(11, "Guest Agent 与任务创建", 36),
+		timeseriesWidth(12, "Agent 创建耗时", 37, 0, 8, "s", false, quantiles("agent", "CreateSandbox|CreateContainer")),
+		timeseriesWidth(31, "Task 创建与启动 P95", 37, 8, 8, "s", false, operationP95("shim|agent", "TaskCreate|TaskStart|StartContainer")),
+		timeseriesWidth(13, "任务生命周期结果速率", 37, 16, 8, "ops", true, []query{{"sum by (component, operation, result) (rate(cube_cri_operations_total{node=~\"$node\",component=~\"agent|shim\",operation=~\"CreateSandbox|CreateContainer|TaskCreate|TaskStart|StartContainer\"}[$__rate_interval]))", "{{component}} {{operation}} {{result}}"}}),
 
-		row(14, "释放、恢复与状态", 44),
-		timeseries(15, "资源释放耗时", 45, 0, "s", false, quantiles("resource", "Release|NetworkRelease|SharedRootCleanup")),
-		timeseries(16, "资源释放结果速率", 45, 12, "ops", true, []query{{"sum by (operation, result) (rate(cube_cri_operations_total{node=~\"$node\",component=\"resource\",operation=~\"Release|NetworkRelease|SharedRootCleanup\"}[$__rate_interval]))", "{{operation}} {{result}}"}}),
-		timeseries(17, "资源租约状态", 53, 0, "short", false, []query{{"sum by (node, phase) (cube_cri_resource_leases{node=~\"$node\"})", "{{node}} {{phase}}"}}),
-		timeseries(18, "Reaper 待处理任务", 53, 12, "short", false, []query{{"sum by (node) (cube_cri_reaper_pending_jobs{node=~\"$node\"})", "{{node}}"}}),
-		timeseries(19, "Reaper 最老任务年龄", 61, 0, "s", false, []query{{"(time() - cube_cri_reaper_oldest_job_timestamp_seconds{node=~\"$node\"}) * (cube_cri_reaper_oldest_job_timestamp_seconds{node=~\"$node\"} > bool 0)", "{{node}}"}}),
+		row(4, "节点资源、网络与并发", 45),
+		timeseries(5, "资源准备耗时", 46, 0, "s", false, quantiles("resource", "Prepare|NetworkPrepare")),
+		timeseries(6, "资源准备结果速率", 46, 12, "ops", true, []query{{"sum by (operation, result) (rate(cube_cri_operations_total{node=~\"$node\",component=\"resource\",operation=~\"Prepare|NetworkPrepare\"}[$__rate_interval]))", "{{operation}} {{result}}"}}),
+		timeseries(7, "Sandbox 锁等待 P95", 54, 0, "s", false, []query{{"histogram_quantile(0.95, sum by (le, lock) (rate(cube_cri_lock_wait_duration_seconds_bucket{node=~\"$node\"}[$__rate_interval])))", "{{lock}}"}}),
+		timeseries(29, "运行时活跃请求", 54, 12, "short", false, []query{
+			{"sum by (component, operation) (cube_cri_operations_inflight{node=~\"$node\",component=~\"resource|shim\"})", "{{component}} {{operation}}"},
+			{"sum by (method) (cube_cri_rpc_inflight{node=~\"$node\"})", "RPC {{method}}"},
+		}),
+		timeseries(35, "Node CPU、内存与 CPU PSI", 62, 0, "percent", false, nodeCPUPressure()),
+		timeseries(36, "Node 磁盘与 IO PSI", 62, 12, "percent", false, nodeIOPressure()),
 
-		row(20, "错误定位", 69),
-		timeseries(21, "内部操作错误速率", 70, 0, "ops", true, []query{{"sum by (component, operation) (rate(cube_cri_operations_total{node=~\"$node\",result=\"error\"}[$__rate_interval]))", "{{component}} {{operation}}"}}),
-		timeseries(22, "错误类别速率", 70, 12, "ops", true, []query{{"sum by (component, operation, error_class) (rate(cube_cri_operation_failures_total{node=~\"$node\"}[$__rate_interval]))", "{{component}} {{operation}} {{error_class}}"}}),
-		timeseries(23, "RuntimeResource RPC 错误速率", 78, 0, "ops", true, []query{{"sum by (method, code) (rate(cube_cri_rpc_requests_total{node=~\"$node\",code!=\"OK\"}[$__rate_interval]))", "{{method}} {{code}}"}}),
+		row(14, "释放、恢复与状态", 71),
+		timeseries(15, "资源释放耗时", 72, 0, "s", false, quantiles("resource", "Release|NetworkRelease|SharedRootCleanup")),
+		timeseries(16, "资源释放结果速率", 72, 12, "ops", true, []query{{"sum by (operation, result) (rate(cube_cri_operations_total{node=~\"$node\",component=\"resource\",operation=~\"Release|NetworkRelease|SharedRootCleanup\"}[$__rate_interval]))", "{{operation}} {{result}}"}}),
+		timeseries(17, "资源租约状态", 80, 0, "short", false, []query{{"sum by (node, phase) (cube_cri_resource_leases{node=~\"$node\"})", "{{node}} {{phase}}"}}),
+		timeseries(18, "Reaper 待处理任务", 80, 12, "short", false, []query{{"sum by (node) (cube_cri_reaper_pending_jobs{node=~\"$node\"})", "{{node}}"}}),
+		timeseries(19, "Reaper 最老任务年龄", 88, 0, "s", false, []query{{"(time() - cube_cri_reaper_oldest_job_timestamp_seconds{node=~\"$node\"}) * (cube_cri_reaper_oldest_job_timestamp_seconds{node=~\"$node\"} > bool 0)", "{{node}}"}}),
 
-		row(24, "节点与采集健康", 86),
-		timeseries(25, "指标端点可达性", 87, 0, "short", false, []query{{"up{job=\"cube-cri\",node=~\"$node\"}", "{{node}}"}}),
-		timeseries(26, "事件链路速率", 87, 12, "ops", true, []query{
+		row(20, "错误定位", 96),
+		timeseries(21, "内部操作错误速率", 97, 0, "ops", true, []query{{"sum by (component, operation) (rate(cube_cri_operations_total{node=~\"$node\",result=\"error\"}[$__rate_interval]))", "{{component}} {{operation}}"}}),
+		timeseries(22, "错误类别速率", 97, 12, "ops", true, []query{{"sum by (component, operation, error_class) (rate(cube_cri_operation_failures_total{node=~\"$node\"}[$__rate_interval]))", "{{component}} {{operation}} {{error_class}}"}}),
+		timeseries(23, "RuntimeResource RPC 错误速率", 105, 0, "ops", true, []query{{"sum by (method, code) (rate(cube_cri_rpc_requests_total{node=~\"$node\",code!=\"OK\"}[$__rate_interval]))", "{{method}} {{code}}"}}),
+
+		row(24, "节点与采集健康", 113),
+		timeseries(25, "指标端点可达性", 114, 0, "short", false, []query{{"up{job=~\"cube-cri|kubelet|node-exporter\",node=~\"$node\"}", "{{job}} {{node}}"}}),
+		timeseries(26, "事件链路速率", 114, 12, "ops", true, []query{
 			{"sum by (node, result) (rate(cube_cri_metric_events_total{node=~\"$node\"}[$__rate_interval]))", "{{node}} {{result}}"},
 			{"sum by (node) (rate(cube_cri_metric_events_dropped_total{node=~\"$node\"}[$__rate_interval]))", "{{node}} dropped"},
 		}),
-		timeseries(27, "状态采样结果", 95, 0, "short", false, []query{{"cube_cri_state_collection_success{node=~\"$node\"}", "{{node}}"}}),
-		timeseries(28, "状态采样年龄", 95, 12, "s", false, []query{{"time() - cube_cri_state_collection_timestamp_seconds{node=~\"$node\"}", "{{node}}"}}),
+		timeseries(27, "状态采样结果", 122, 0, "short", false, []query{{"cube_cri_state_collection_success{node=~\"$node\"}", "{{node}}"}}),
+		timeseries(28, "状态采样年龄", 122, 12, "s", false, []query{{"time() - cube_cri_state_collection_timestamp_seconds{node=~\"$node\"}", "{{node}}"}}),
 	}
 }
 
@@ -102,9 +110,35 @@ func operationP95(component, operation string) []query {
 
 func kubeletPodStartP95() []query {
 	return []query{
-		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_pod_start_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[$__rate_interval])))", "首次见 Pod 到 Running p95"},
-		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_pod_start_sli_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[$__rate_interval])))", "创建到 ContainersStarted p95"},
-		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_pod_start_total_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[$__rate_interval])))", "创建到 ContainersStarted（含镜像）p95"},
+		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_pod_start_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))", "首次见 Pod 到 Running p95"},
+		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_pod_start_sli_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))", "创建到 ContainersStarted p95"},
+		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_pod_start_total_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))", "创建到 ContainersStarted（含镜像）p95"},
+	}
+}
+
+func kubeletRuntimeP95() []query {
+	return []query{
+		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_pod_worker_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))", "pod worker p95"},
+		{"histogram_quantile(0.95, sum by (le, operation_type) (rate(kubelet_runtime_operations_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\",operation_type=~\"run_podsandbox|create_container|start_container\"}[1m])))", "{{operation_type}} p95"},
+	}
+}
+
+func apiserverPodPostP95() []query {
+	return []query{{"histogram_quantile(0.95, sum by (le) (rate(apiserver_request_duration_seconds_bucket{job=\"apiserver\",verb=\"POST\",resource=\"pods\",subresource=\"\"}[1m])))", "POST pods p95"}}
+}
+
+func nodeCPUPressure() []query {
+	return []query{
+		{"100 * (1 - avg by (node) (rate(node_cpu_seconds_total{node=~\"$node\",mode=\"idle\"}[1m])))", "CPU busy"},
+		{"100 * (1 - node_memory_MemAvailable_bytes{node=~\"$node\"} / node_memory_MemTotal_bytes{node=~\"$node\"})", "memory used"},
+		{"100 * rate(node_pressure_cpu_waiting_seconds_total{node=~\"$node\"}[1m])", "CPU PSI waiting"},
+	}
+}
+
+func nodeIOPressure() []query {
+	return []query{
+		{"100 * max by (node) (rate(node_disk_io_time_seconds_total{node=~\"$node\",device!~\"loop.*|ram.*\"}[1m]))", "busiest disk IO"},
+		{"100 * rate(node_pressure_io_waiting_seconds_total{node=~\"$node\"}[1m])", "IO PSI waiting"},
 	}
 }
 

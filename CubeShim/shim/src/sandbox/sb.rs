@@ -619,7 +619,12 @@ impl SandBox {
         let mut total = metrics::OperationTimer::new("shim", "CreatePodSandbox");
         let total_started = Instant::now();
         let phase_started = Instant::now();
-        let snapshot = self.start_vm(worker_placement).await?;
+        let snapshot = {
+            let mut stage = metrics::OperationTimer::new("shim", "VmmReady");
+            let snapshot = self.start_vm(worker_placement).await?;
+            stage.succeed();
+            snapshot
+        };
         crate::cube_perff!(
             self.log,
             "cube_perf component=shim operation=start phase=vm-ready sandbox_id={} ts_mono_us={} duration_us={} restored={}",
@@ -637,7 +642,11 @@ impl SandBox {
         }
 
         let phase_started = Instant::now();
-        self.connect_agent().await?;
+        {
+            let mut stage = metrics::OperationTimer::new("shim", "AgentConnect");
+            self.connect_agent().await?;
+            stage.succeed();
+        }
 
         crate::cube_perff!(
             self.log,
@@ -654,7 +663,9 @@ impl SandBox {
         //add vfio device
         let phase_started = Instant::now();
         if !self.app_snapshot_restore() {
+            let mut stage = metrics::OperationTimer::new("shim", "GuestDeviceSetup");
             self.add_device().await?;
+            stage.succeed();
         }
         crate::cube_perff!(
             self.log,
@@ -722,6 +733,7 @@ impl SandBox {
 
         let phase_started = Instant::now();
         if !self.conf.app_snapshot_create {
+            let mut stage = metrics::OperationTimer::new("shim", "MonitorSetup");
             //watch oom
             let (sender, handle) = self.watch_oom().await?;
             self.tx_oom_exited = Some(sender);
@@ -731,6 +743,7 @@ impl SandBox {
             let (sender, handle) = self.monitor_vm(false).await?;
             self.tx_monitor_exited = Some(sender);
             self.monitor_handle = Some(Arc::new(handle));
+            stage.succeed();
         }
         crate::cube_perff!(
             self.log,
@@ -1093,41 +1106,48 @@ impl SandBox {
         );
         let by_snapshot = self.by_snapshot();
         let phase_started = Instant::now();
-        let runtime_prepared_boot = if self.runtime_tap.is_some() {
-            if by_snapshot {
-                return Err("RuntimeResource network does not support snapshot restore".to_string());
-            }
-            let mut config = self.prepare_resource().await?;
-            let nets = config
-                .nets
-                .as_mut()
-                .ok_or_else(|| "RuntimeResource requires a VM network".to_string())?;
-            if nets.len() != 1 {
-                return Err(format!(
-                    "RuntimeResource requires exactly one VM network, got {}",
-                    nets.len()
-                ));
-            }
-            let tap = self.runtime_tap.as_ref().unwrap();
-            nets[0].tap = None;
-            nets[0].fds = Some(vec![tap.as_raw_fd()]);
-            nets[0].fds_from_other_netns = true;
-            nets[0].num_queues = 2;
-            Some(config)
-        } else {
-            None
-        };
-        let s0_prepared_boot = if runtime_prepared_boot.is_none()
-            && super::s0_cni::PreparedNetwork::requested(&self.spec)
-        {
-            if by_snapshot {
-                return Err("S0 CNI adapter does not support snapshot restore".to_string());
-            }
-            let mut config = self.prepare_resource().await?;
-            let network = super::s0_cni::PreparedNetwork::prepare(&self.spec, &mut config)?;
-            Some((config, network))
-        } else {
-            None
+        let (runtime_prepared_boot, s0_prepared_boot) = {
+            let mut stage = metrics::OperationTimer::new("shim", "VmConfig");
+            let runtime_prepared_boot = if self.runtime_tap.is_some() {
+                if by_snapshot {
+                    return Err(
+                        "RuntimeResource network does not support snapshot restore".to_string()
+                    );
+                }
+                let mut config = self.prepare_resource().await?;
+                let nets = config
+                    .nets
+                    .as_mut()
+                    .ok_or_else(|| "RuntimeResource requires a VM network".to_string())?;
+                if nets.len() != 1 {
+                    return Err(format!(
+                        "RuntimeResource requires exactly one VM network, got {}",
+                        nets.len()
+                    ));
+                }
+                let tap = self.runtime_tap.as_ref().unwrap();
+                nets[0].tap = None;
+                nets[0].fds = Some(vec![tap.as_raw_fd()]);
+                nets[0].fds_from_other_netns = true;
+                nets[0].num_queues = 2;
+                Some(config)
+            } else {
+                None
+            };
+            let s0_prepared_boot = if runtime_prepared_boot.is_none()
+                && super::s0_cni::PreparedNetwork::requested(&self.spec)
+            {
+                if by_snapshot {
+                    return Err("S0 CNI adapter does not support snapshot restore".to_string());
+                }
+                let mut config = self.prepare_resource().await?;
+                let network = super::s0_cni::PreparedNetwork::prepare(&self.spec, &mut config)?;
+                Some((config, network))
+            } else {
+                None
+            };
+            stage.succeed();
+            (runtime_prepared_boot, s0_prepared_boot)
         };
         crate::cube_perff!(
             self.log,
@@ -1139,8 +1159,10 @@ impl SandBox {
         );
         let phase_started = Instant::now();
         {
+            let mut stage = metrics::OperationTimer::new("shim", "VmmLaunch");
             let mut ch = self.ch.as_mut().unwrap().lock().await;
             ch.launch_vmm(worker_placement).await?;
+            stage.succeed();
         }
         crate::cube_perff!(
             self.log,
@@ -1170,6 +1192,7 @@ impl SandBox {
 
         let phase_started = Instant::now();
         if !snapshot {
+            let mut stage = metrics::OperationTimer::new("shim", "VmBoot");
             if let Some(config) = runtime_prepared_boot.as_ref() {
                 self.boot_vm_with_config(config).await?;
             } else if let Some((config, _network)) = s0_prepared_boot.as_ref() {
@@ -1177,6 +1200,7 @@ impl SandBox {
             } else {
                 self.boot_vm().await?;
             }
+            stage.succeed();
         }
         crate::cube_perff!(
             self.log,
@@ -1188,19 +1212,57 @@ impl SandBox {
         );
 
         {
+            let mut stage = metrics::OperationTimer::new("shim", "VsockReady");
             let ch = self.ch.as_mut().unwrap().lock().await;
             let start = Instant::now();
-            let ev = ch
-                .wait_notify(Duration::from_nanos(1000 * 1000 * 1000 * 10 as u64))
-                .await?;
-
-            if CH::NotifyEvent::VsockServerReady != ev {
-                return Err(format!(
-                    "Not an expected event, expected:{:?}, actual:{:?}",
-                    CH::NotifyEvent::VsockServerReady,
-                    ev
-                ));
+            let deadline = Duration::from_secs(10);
+            let mut guest_init_started = None;
+            let mut guest_init_ready = None;
+            let mut agent_started = None;
+            loop {
+                let remaining = deadline.checked_sub(start.elapsed()).ok_or_else(|| {
+                    format!(
+                        "timed out waiting for {:?}",
+                        CH::NotifyEvent::VsockServerReady
+                    )
+                })?;
+                match ch.wait_notify(remaining).await? {
+                    CH::NotifyEvent::GuestInitStarted => {
+                        metrics::observe_shim_stage("GuestKernelBoot", true, start.elapsed());
+                        guest_init_started = Some(Instant::now());
+                    }
+                    CH::NotifyEvent::GuestInitReady => {
+                        metrics::observe_shim_stage("GuestKernelInit", true, start.elapsed());
+                        if let Some(started) = guest_init_started {
+                            metrics::observe_shim_stage("GuestInitSetup", true, started.elapsed());
+                        }
+                        guest_init_ready = Some(Instant::now());
+                    }
+                    CH::NotifyEvent::AgentStarted => {
+                        let started = guest_init_ready.unwrap_or(start);
+                        metrics::observe_shim_stage("GuestAgentExec", true, started.elapsed());
+                        agent_started = Some(Instant::now());
+                    }
+                    CH::NotifyEvent::VsockServerReady => {
+                        if let Some(started) = agent_started {
+                            metrics::observe_shim_stage(
+                                "AgentServerStart",
+                                true,
+                                started.elapsed(),
+                            );
+                        }
+                        break;
+                    }
+                    ev => {
+                        return Err(format!(
+                            "Not an expected event while waiting for {:?}: {:?}",
+                            CH::NotifyEvent::VsockServerReady,
+                            ev
+                        ));
+                    }
+                }
             }
+            stage.succeed();
             let duration = start.elapsed().as_millis();
             crate::cube_perff!(
                 self.log,

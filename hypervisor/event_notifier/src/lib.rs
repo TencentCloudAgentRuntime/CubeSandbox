@@ -15,6 +15,9 @@ lazy_static! {
 #[derive(Debug, PartialEq, Eq)]
 pub enum NotifyEvent {
     VmShutdown,
+    GuestInitStarted,
+    GuestInitReady,
+    AgentStarted,
     VsockServerReady,
     RestoreReady,
     SysStart,

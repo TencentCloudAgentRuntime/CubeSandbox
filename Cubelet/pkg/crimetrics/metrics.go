@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -41,6 +42,8 @@ type Metrics struct {
 	scanTimestamp prometheus.Gauge
 	events        *prometheus.CounterVec
 	eventsDropped prometheus.Counter
+	eventMu       sync.Mutex
+	eventInflight map[string]int
 }
 
 func New(registerer prometheus.Registerer) *Metrics {
@@ -60,6 +63,7 @@ func New(registerer prometheus.Registerer) *Metrics {
 		scanTimestamp: prometheus.NewGauge(prometheus.GaugeOpts{Name: "cube_cri_state_collection_timestamp_seconds", Help: "Unix time of the last successful background state collection."}),
 		events:        prometheus.NewCounterVec(prometheus.CounterOpts{Name: "cube_cri_metric_events_total", Help: "Shim and VMM worker metric events by validation result."}, []string{"result"}),
 		eventsDropped: prometheus.NewCounter(prometheus.CounterOpts{Name: "cube_cri_metric_events_dropped_total", Help: "Metric events dropped by Shim or VMM worker before delivery."}),
+		eventInflight: map[string]int{},
 	}
 	registerer.MustRegister(m.operations, m.durations, m.failures, m.inflight, m.lockWait, m.rpcs, m.rpcDuration, m.rpcInflight, m.leases, m.reaperPending, m.reaperOldest, m.scanSuccess, m.scanTimestamp, m.events, m.eventsDropped)
 	return m
@@ -151,6 +155,7 @@ func rpcMethod(method string) string {
 
 type event struct {
 	Version         int     `json:"version"`
+	EventType       string  `json:"event_type,omitempty"`
 	Component       string  `json:"component"`
 	Operation       string  `json:"operation"`
 	Result          string  `json:"result"`
@@ -198,13 +203,56 @@ func (m *Metrics) ListenEvents(path string) (*net.UnixConn, error) {
 
 func (m *Metrics) acceptEvent(data []byte) {
 	var observation event
-	if len(data) > 1024 || json.Unmarshal(data, &observation) != nil || observation.Version != 1 || !validOperation(observation.Component, observation.Operation) || !validResult(observation.Result) || math.IsNaN(observation.DurationSeconds) || math.IsInf(observation.DurationSeconds, 0) || observation.DurationSeconds < 0 {
+	if len(data) > 1024 || json.Unmarshal(data, &observation) != nil || observation.Version != 1 || !validOperation(observation.Component, observation.Operation) {
 		m.events.WithLabelValues("invalid").Inc()
 		return
 	}
-	m.Observe(observation.Component, observation.Operation, observation.Result, observation.ErrorClass, observation.DurationSeconds)
+	switch observation.EventType {
+	case "start":
+		if observation.Result != "" || observation.DurationSeconds != 0 {
+			m.events.WithLabelValues("invalid").Inc()
+			return
+		}
+		m.startEventOperation(observation.Component, observation.Operation)
+	case "", "observe", "finish": // empty is emitted by pre-inflight Shims.
+		if !validResult(observation.Result) || math.IsNaN(observation.DurationSeconds) || math.IsInf(observation.DurationSeconds, 0) || observation.DurationSeconds < 0 {
+			m.events.WithLabelValues("invalid").Inc()
+			return
+		}
+		m.Observe(observation.Component, observation.Operation, observation.Result, observation.ErrorClass, observation.DurationSeconds)
+		if observation.EventType == "finish" {
+			m.finishEventOperation(observation.Component, observation.Operation)
+		}
+	default:
+		m.events.WithLabelValues("invalid").Inc()
+		return
+	}
 	m.eventsDropped.Add(float64(observation.Dropped))
 	m.events.WithLabelValues("accepted").Inc()
+}
+
+// Start/finish observations come from the same datagram listener. The local
+// count prevents an out-of-order or dropped start from producing a negative
+// Gauge. When event drops are non-zero, the dashboard marks this signal as
+// lossy rather than treating it as an exact queue length.
+func (m *Metrics) startEventOperation(component, operation string) {
+	key := component + "\x00" + operation
+	m.eventMu.Lock()
+	m.eventInflight[key]++
+	m.eventMu.Unlock()
+	m.inflight.WithLabelValues(component, operation).Inc()
+}
+
+func (m *Metrics) finishEventOperation(component, operation string) {
+	key := component + "\x00" + operation
+	m.eventMu.Lock()
+	if m.eventInflight[key] == 0 {
+		m.eventMu.Unlock()
+		return
+	}
+	m.eventInflight[key]--
+	m.eventMu.Unlock()
+	m.inflight.WithLabelValues(component, operation).Dec()
 }
 
 func validResult(value string) bool { return value == "ok" || value == "error" || value == "canceled" }
@@ -218,7 +266,7 @@ func validErrorClass(value string) bool {
 func validOperation(component, operation string) bool {
 	allowed := map[string]map[string]bool{
 		"resource": {"Prepare": true, "Release": true, "NetworkPrepare": true, "NetworkRelease": true, "Persist": true, "SharedRootCleanup": true, "ReaperScan": true, "Inspect": true},
-		"shim":     {"CreatePodSandbox": true, "TaskCreate": true, "TaskStart": true, "StartSandbox": true, "StopSandbox": true, "ShutdownSandbox": true, "CreatePodContainer": true, "Start": true, "DeleteContainer": true, "Exec": true, "Stats": true, "WorkerSpawn": true, "WorkerExit": true},
+		"shim":     {"CreatePodSandbox": true, "TaskCreate": true, "TaskStart": true, "StartSandbox": true, "StopSandbox": true, "ShutdownSandbox": true, "CreatePodContainer": true, "Start": true, "DeleteContainer": true, "Exec": true, "Stats": true, "WorkerSpawn": true, "WorkerExit": true, "VmmReady": true, "VmConfig": true, "VmmLaunch": true, "VmBoot": true, "GuestKernelBoot": true, "GuestKernelInit": true, "GuestInitSetup": true, "GuestAgentExec": true, "AgentServerStart": true, "VsockReady": true, "AgentConnect": true, "GuestDeviceSetup": true, "MonitorSetup": true},
 		"vmm":      {"prepare-intent": true, "fork-exec": true, "hello": true, "fd-gate": true, "placement": true, "launch": true, "LaunchVmm": true, "CreateVm": true, "BootVm": true, "RestoreVm": true},
 		"agent":    {"CreateSandbox": true, "CreateContainer": true, "StartContainer": true},
 	}

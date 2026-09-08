@@ -18,6 +18,11 @@ data:
       evaluation_interval: 5s
     scrape_configs:
     - job_name: cube-cri
+      # Startup bursts are shorter than the default node scrape interval.
+      # This endpoint is node-local and bounded, so retain one-second samples
+      # for queue and active-operation diagnosis without increasing kubelet or
+      # node-exporter collection load.
+      scrape_interval: 1s
       metrics_path: /metrics
       kubernetes_sd_configs:
       - role: node
@@ -49,6 +54,35 @@ data:
         replacement: ${1}:10250
       - source_labels: [__meta_kubernetes_node_name]
         target_label: node
+    - job_name: node-exporter
+      metrics_path: /metrics
+      kubernetes_sd_configs:
+      - role: node
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_node_label_cubesandbox_io_runtime]
+        regex: cube
+        action: keep
+      - source_labels: [__meta_kubernetes_node_address_InternalIP]
+        regex: (.+)
+        target_label: __address__
+        replacement: ${1}:9100
+      - source_labels: [__meta_kubernetes_node_name]
+        target_label: node
+    - job_name: apiserver
+      scheme: https
+      metrics_path: /metrics
+      sample_limit: 5000
+      bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tls_config:
+        insecure_skip_verify: true
+      static_configs:
+      - targets: [kubernetes.default.svc:443]
+      # The full managed-control-plane endpoint has high cardinality. Keep
+      # only the request family that forms the Pod startup API boundary.
+      metric_relabel_configs:
+      - source_labels: [__name__, verb, resource, subresource]
+        regex: apiserver_request_duration_seconds_(bucket|sum|count);POST;pods;
+        action: keep
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -67,6 +101,8 @@ rules:
 - apiGroups: [""]
   resources: [nodes/metrics]
   verbs: [get]
+- nonResourceURLs: ["/metrics"]
+  verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -80,6 +116,44 @@ subjects:
 - kind: ServiceAccount
   name: cube-cri-prometheus
   namespace: __NAMESPACE__
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cube-cri-node-exporter
+  namespace: __NAMESPACE__
+spec:
+  selector:
+    matchLabels: {app: cube-cri-node-exporter}
+  template:
+    metadata:
+      labels: {app: cube-cri-node-exporter}
+    spec:
+      hostNetwork: true
+      hostPID: true
+      nodeSelector: {cubesandbox.io/runtime: cube}
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: node-exporter
+        image: prom/node-exporter:v1.8.2
+        args:
+        - --path.rootfs=/host
+        - --path.procfs=/host/proc
+        - --path.sysfs=/host/sys
+        ports:
+        - {name: metrics, containerPort: 9100, hostPort: 9100}
+        resources:
+          requests: {cpu: 25m, memory: 64Mi}
+          limits: {cpu: 100m, memory: 128Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - {name: root, mountPath: /host, readOnly: true}
+      volumes:
+      - name: root
+        hostPath: {path: /}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -98,6 +172,9 @@ metadata:
   name: cube-cri-prometheus
   namespace: __NAMESPACE__
 spec:
+  # Prometheus uses a single-writer PVC; a rolling surge would contend on its
+  # TSDB lock during every configuration update.
+  strategy: {type: Recreate}
   replicas: 1
   selector:
     matchLabels: {app: cube-cri-prometheus}
@@ -161,7 +238,7 @@ data:
       url: http://cube-cri-prometheus.__NAMESPACE__.svc:9090
       isDefault: true
       editable: true
-      jsonData: {timeInterval: 5s, queryTimeout: 30s}
+      jsonData: {timeInterval: 1s, queryTimeout: 30s}
   dashboards.yaml: |
     apiVersion: 1
     providers:

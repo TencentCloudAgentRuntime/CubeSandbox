@@ -26,7 +26,7 @@ func TestGenerate(t *testing.T) {
 	if err := json.Unmarshal(data, &dashboard); err != nil {
 		t.Fatal(err)
 	}
-	wantRows := []string{"运行概览", "节点资源与网络", "VMM worker", "Guest Agent 与任务创建", "释放、恢复与状态", "错误定位", "节点与采集健康"}
+	wantRows := []string{"端到端启动定位", "Kubernetes 控制链路", "Shim 与 VMM worker", "Guest Agent 与任务创建", "节点资源、网络与并发", "释放、恢复与状态", "错误定位", "节点与采集健康"}
 	var gotRows []string
 	for _, panel := range dashboard.Panels {
 		if panel.Type == "row" {
@@ -44,5 +44,15 @@ func TestGenerate(t *testing.T) {
 	}
 	if strings.Join(gotRows, ",") != strings.Join(wantRows, ",") {
 		t.Fatalf("rows=%v, want %v", gotRows, wantRows)
+	}
+	for _, panel := range dashboard.Panels {
+		if panel.Title != "Kubelet Pod 启动耗时 P95" && panel.Title != "Kubelet 同步与 CRI P95" && panel.Title != "API Server Pod POST P95" {
+			continue
+		}
+		for _, target := range panel.Targets {
+			if !strings.Contains(target.Expr, "[1m]") {
+				t.Fatalf("panel %q must use the fixed 1m rate window: %s", panel.Title, target.Expr)
+			}
+		}
 	}
 }

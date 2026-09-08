@@ -47,10 +47,10 @@ mod fixes;
 mod linux_abi;
 mod metrics;
 mod mount;
-mod overlay;
 mod namespace;
 mod netlink;
 mod network;
+mod overlay;
 mod pci;
 pub mod random;
 mod sandbox;
@@ -312,6 +312,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         "agent start at:{}",
         moniclock::Clock::new().elapsed().as_millis()
     );
+    if let Err(e) = rpc::notify_agent_started() {
+        eprintln!("notify_agent_started failed: {e}");
+    }
 
     compiler_fence(Ordering::SeqCst);
 

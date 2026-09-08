@@ -18,6 +18,9 @@ const SYS_START: u8 = 1 << 0;
 const SYS_RESTORE: u8 = 1 << 1;
 const SYS_PANIC: u8 = 1 << 2;
 const SYS_VSOCK_SERVER: u8 = 1 << 3;
+const SYS_GUEST_INIT_READY: u8 = 1 << 4;
+const SYS_AGENT_STARTED: u8 = 1 << 5;
+const SYS_GUEST_INIT_STARTED: u8 = 1 << 6;
 const SYS_VALID: u8 = SYS_START | SYS_RESTORE;
 
 fn sys_start(sys_state: u8) -> bool {
@@ -90,6 +93,15 @@ impl BusDevice for SysCtrl {
 
         if (code & SYS_PANIC) == SYS_PANIC {
             warn!("Guest paniced and coredump");
+        }
+        if (code & SYS_GUEST_INIT_STARTED) == SYS_GUEST_INIT_STARTED {
+            event_notify!(NotifyEvent::GuestInitStarted);
+        }
+        if (code & SYS_GUEST_INIT_READY) == SYS_GUEST_INIT_READY {
+            event_notify!(NotifyEvent::GuestInitReady);
+        }
+        if (code & SYS_AGENT_STARTED) == SYS_AGENT_STARTED {
+            event_notify!(NotifyEvent::AgentStarted);
         }
         if (code & SYS_VSOCK_SERVER) == SYS_VSOCK_SERVER {
             info!("vsock server ready");
