@@ -14,11 +14,13 @@ for command in python3 crictl tc ip mount nsenter systemctl; do
 done
 ls /etc/cni/net.d/*conf* >/dev/null
 base=/opt/cube-cri
-python3 containerd.py "$src/prepared" --config-path /etc/cube-cri/containerd.toml
+containerd_config=/etc/containerd/config.toml
+test -f "$containerd_config"
+python3 containerd.py "$src/prepared" --config-path "$containerd_config"
 release=$base/releases/$(sha256sum SHA256SUMS | cut -c1-16)
 backup=$base/backups/$(date -u +%Y%m%dT%H%M%S)-$$
 mkdir -p "$release" "$backup" /etc/cube-cri /etc/systemd/system/containerd.service.d
-cp -a /etc/containerd/config.toml "$backup/"
+cp -a "$containerd_config" "$backup/"
 source_config=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_config"])' "$src/prepared/containerd.json")
 cp -a "$source_config" "$backup/source-containerd.toml"
 cp "$src/prepared/containerd.json" "$backup/"
@@ -49,7 +51,7 @@ Delegate=yes
 [Install]
 WantedBy=multi-user.target
 UNIT
-install -m 0644 "$src/prepared/containerd.toml" /etc/cube-cri/containerd.toml
+install -m 0644 "$src/prepared/containerd.toml" "$containerd_config"
 install -m 0644 "$src/prepared/containerd.json" /etc/cube-cri/containerd.json
 install -m 0644 "$src/prepared/containerd.service.conf" /etc/systemd/system/containerd.service.d/90-cube-cri.conf
 bash install-watchdog.sh "$release/bin/containerd-shim-cube-rs" cubesandbox-shim-watchdog.service runtimeclass-overhead.json

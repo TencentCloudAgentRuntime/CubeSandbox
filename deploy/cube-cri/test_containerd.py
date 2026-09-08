@@ -38,6 +38,7 @@ SystemdCgroup = true
             source = self.source(plugin, version)
             result = module.configure(source, major)
             parsed = tomllib.loads(result)
+            self.assertTrue(result.startswith(source))
             self.assertEqual(parsed['plugins'][plugin]['containerd']['runtimes']['cube'][key], 'shim')
             cube = parsed['plugins'][plugin]['containerd']['runtimes']['cube']
             self.assertTrue(cube['privileged_without_host_devices'])
@@ -50,8 +51,14 @@ SystemdCgroup = true
             self.assertEqual(parsed['plugins'][plugin]['cni']['conf_dir'], '/custom/cni')
             self.assertTrue(parsed['plugins'][plugin]['containerd']['runtimes']['runc']['options']['SystemdCgroup'])
             self.assertEqual(module.configure(result, major), result)
-            if major == '2':
-                self.assertEqual(parsed['required_plugins'], ['io.containerd.cri.v1.images', module.CRI2])
+            self.assertEqual(parsed['required_plugins'], ['io.containerd.grpc.v1.cri'])
+
+    def test_containerd2_legacy_config_keeps_legacy_cri_table(self):
+        source = self.source(module.CRI17, 2)
+        result = tomllib.loads(module.configure(source, '2'))
+        cube = result['plugins'][module.CRI17]['containerd']['runtimes']['cube']
+        self.assertEqual(cube['sandbox_mode'], 'shim')
+        self.assertNotIn(module.CRI2, result['plugins'])
 
     def test_replaces_owned_cube_sections_without_removing_adjacent_runtime(self):
         source = self.source(module.CRI17, 2) + f'''

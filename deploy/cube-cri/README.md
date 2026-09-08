@@ -48,7 +48,7 @@ task deploy:prepare -- --node 10.0.244.89
 
 节点要求 TS4 x86_64、Python 3.11+、crictl、可运行的 containerd 1.7.x 或 2.x。PVM 准备会在必要时安装内核并重启，等待 `/dev/kvm` 和 Node Ready；部署前需结束目标节点上的 Cube Pod。
 
-安装器从 `containerd.service` 的 MainPID 读取实际二进制、配置路径和启动参数，保留其 root/state/socket、CNI、镜像源和 runc 配置：
+安装器从 `containerd.service` 的 MainPID 读取实际二进制和启动参数，并直接在默认配置 `/etc/containerd/config.toml` 上增量注入，因此保留其 root/state/socket、CNI、镜像源和 runc 配置：
 
 | 节点版本 | 配置动作 |
 | --- | --- |
@@ -57,7 +57,7 @@ task deploy:prepare -- --node 10.0.244.89
 
 Shim 启动响应按版本适配：1.7 使用 JSON / Task v2，2.0–2.2 使用 JSON / Task v3，2.3 使用 protobuf / Task v3；详见 [2.2 兼容说明](../../docs/zh/dev/cube-shim-containerd22-pr.md)。
 
-生成配置为 `/etc/cube-cri/containerd.toml`，检测结果为同目录 `containerd.json`；原配置保留，systemd drop-in 指向原二进制和生成配置。相对 imports 保持原路径含义，并去除 1.7 `config dump` 附带的源文件自导入；生效配置由原二进制再次校验。
+安装器直接复用 `/etc/containerd/config.toml`，仅追加或更新 `cube` runtime 段及 2.x 必需的 shim manager 环境；不规范化、不迁移整份节点配置，也不改写 `containerd.service` 的 `ExecStart`。1.7 使用 legacy CRI 表和 `sandbox_mode`；2.x 若默认文件仍是 legacy 格式则保持该格式，由 containerd 迁移，若已是 v3 格式则使用 `sandboxer`。
 
 部署默认给 shim 设置 `CUBE_ALLOW_PRIVILEGED=true`（1.7 通过 systemd 环境变量，2.x 通过 shim manager），同时开启 Cube handler 的两个 `privileged_without_host_devices*` 选项，允许 Guest 内 privileged，保留 Host 设备隔离。
 

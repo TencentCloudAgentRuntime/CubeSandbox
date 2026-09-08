@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从运行中的节点服务生成 Cube 配置，不安装或切换 containerd。"""
+"""向节点默认 containerd 配置增量注入 Cube runtime。"""
 import argparse
 import copy
 import json
@@ -58,9 +58,25 @@ def family(version):
     raise ValueError(f"不支持的节点 containerd 版本: {version}")
 
 
+def runtime_table(data, major):
+    plugins = data.get("plugins", {})
+    if major == "1.7":
+        if CRI17 not in plugins:
+            raise ValueError("containerd 1.7 配置缺少 CRI 插件")
+        return CRI17, "sandbox_mode"
+    if CRI2 in plugins:
+        return CRI2, "sandboxer"
+    # containerd 2.x can still be started with a version=2, legacy CRI
+    # configuration. Keep that input format intact; `config dump` migrates it
+    # to io.containerd.cri.v1.runtime at load time.
+    if CRI17 in plugins:
+        return CRI17, "sandbox_mode"
+    raise ValueError("containerd 2.x 配置缺少 CRI 插件")
+
+
 def configure(text, major):
     data = tomllib.loads(text)
-    plugin = CRI17 if major == "1.7" else CRI2
+    plugin, sandbox_key = runtime_table(data, major)
     runtimes = data["plugins"][plugin]["containerd"]["runtimes"]
     existing = runtimes.get("cube", {})
     if existing and existing.get("runtime_type") != "io.containerd.cube.rs":
@@ -71,7 +87,7 @@ def configure(text, major):
     handler = {
         "runtime_type": "io.containerd.cube.rs",
         "runtime_path": "/opt/cube-cri/current/bin/containerd-shim-cube-rs",
-        "sandbox_mode" if major == "1.7" else "sandboxer": "shim",
+        sandbox_key: "shim",
         "privileged_without_host_devices": True,
         "privileged_without_host_devices_all_devices_allowed": True,
     }
@@ -80,15 +96,9 @@ def configure(text, major):
         manager = expected["plugins"].setdefault(SHIM_MANAGER, {})
         manager["env"] = [value for value in manager.get("env", [])
                           if not value.startswith("CUBE_ALLOW_PRIVILEGED=")] + ["CUBE_ALLOW_PRIVILEGED=true"]
-    # config migrate may retain the old required-plugin ID even after migration.
-    required = []
-    for name in data.get("required_plugins", []):
-        required.extend(["io.containerd.cri.v1.images", CRI2] if major == "2" and name == CRI17 else [name])
-    if "required_plugins" in data:
-        expected["required_plugins"] = list(dict.fromkeys(required))
-        text = re.sub(r"^required_plugins\s*=.*$", "required_plugins = " + json.dumps(expected["required_plugins"]), text, flags=re.M)
-    # Work on normalized containerd output. Parse headers instead of relying on
-    # the quote style used by a particular containerd/TOML library version.
+    # Parse headers instead of relying on the quote style used by a particular
+    # containerd/TOML library version. This keeps all unrelated node settings
+    # byte-for-byte intact.
     lines = []
     skip = False
     in_manager = False
@@ -118,6 +128,16 @@ def configure(text, major):
     return result
 
 
+def validation_text(text, source):
+    """Make relative imports keep the source file's meaning during validation."""
+    parsed = tomllib.loads(text)
+    imports = parsed.get("imports", [])
+    absolute_imports = relocate_imports(imports, source)
+    if imports == absolute_imports:
+        return text
+    return re.sub(r"^imports\s*=.*$", "imports = " + json.dumps(absolute_imports), text, flags=re.M)
+
+
 def unit_arg(arg):
     if any(c in arg for c in "\n\r\0"):
         raise ValueError("containerd 启动参数含控制字符")
@@ -131,38 +151,36 @@ def prepare(pid, output, config_path):
         raise ValueError("运行中的 containerd 二进制已被替换，请先恢复节点服务")
     args = (proc / "cmdline").read_bytes().decode().rstrip("\0").split("\0")[1:]
     cwd = str((proc / "cwd").resolve(strict=True))
-    source = pathlib.Path(option(args, ("--config", "-c"), "/etc/containerd/config.toml"))
+    source = config_path
     if not source.is_absolute():
         source = pathlib.Path(cwd) / source
     source = source.resolve(strict=True)
     version = command(binary, "--version")
     major = family(version)
-    normalized = command(binary, *args, "config", "dump" if major == "1.7" else "migrate", cwd=cwd)
-    # Moving a config must not change how its relative import paths resolve.
-    parsed = tomllib.loads(normalized)
-    imports = parsed.get("imports", [])
-    absolute_imports = relocate_imports(imports, source)
-    if imports != absolute_imports:
-        normalized = re.sub(r"^imports\s*=.*$", "imports = " + json.dumps(absolute_imports), normalized, flags=re.M)
-    rendered = configure(normalized, major)
+    source_text = source.read_text()
+    source_data = tomllib.loads(source_text)
+    rendered = configure(source_text, major)
     output.mkdir(parents=True, exist_ok=True)
     (output / "containerd.toml").write_text(rendered)
-    resolved = command(binary, *with_config(args, output / "containerd.toml"), "config", "dump", cwd=cwd)
+    validation = output / "containerd.validation.toml"
+    validation.write_text(validation_text(rendered, source))
+    resolved = command(binary, *with_config(args, validation), "config", "dump", cwd=cwd)
+    effective = tomllib.loads(resolved)
     plugin = CRI17 if major == "1.7" else CRI2
-    expected_handler = tomllib.loads(rendered)["plugins"][plugin]["containerd"]["runtimes"]["cube"]
-    effective_handler = tomllib.loads(resolved)["plugins"][plugin]["containerd"]["runtimes"]["cube"]
-    if any(effective_handler.get(k) != v for k, v in expected_handler.items()):
+    effective_handler = effective["plugins"][plugin]["containerd"]["runtimes"]["cube"]
+    expected_handler = tomllib.loads(rendered)["plugins"][runtime_table(tomllib.loads(rendered), major)[0]]["containerd"]["runtimes"]["cube"]
+    expected_sandbox_key = "sandbox_mode" if major == "1.7" else "sandboxer"
+    if any(effective_handler.get(k) != v for k, v in expected_handler.items() if k != "sandbox_mode") or effective_handler.get(expected_sandbox_key) != "shim":
         raise ValueError("节点 imports 或启动参数覆盖了 Cube handler")
-    if major == "2" and tomllib.loads(resolved)["plugins"][SHIM_MANAGER]["env"] != tomllib.loads(rendered)["plugins"][SHIM_MANAGER]["env"]:
+    if major == "2" and effective["plugins"][SHIM_MANAGER]["env"] != tomllib.loads(rendered)["plugins"][SHIM_MANAGER]["env"]:
         raise ValueError("节点 imports 覆盖了 shim 环境变量")
+    validation.unlink()
     (output / "containerd.resolved.toml").write_text(resolved + "\n")
-    final_args = [binary, *with_config(args, config_path)]
     unit = """[Unit]
+# Managed by Cube CRI. Keep containerd's original ExecStart and config path.
 Requires=cube-cri-runtime-resource.service cubesandbox-shim-watchdog.service
 After=cube-cri-runtime-resource.service cubesandbox-shim-watchdog.service
 [Service]
-ExecStart=
-ExecStart=""" + " ".join(map(unit_arg, final_args)) + """
 Environment=CUBE_RUNTIME_RESOURCE_ENDPOINT=/run/cube-cri/runtime-resource.sock
 Environment=CUBE_RUNTIME_RESOURCE_REAPER_DIR=/data/cubelet/runtime-resource-reaper
 Environment=CUBE_CRI_METRICS_SOCKET=/run/cube-cri/metrics.sock
@@ -170,8 +188,8 @@ Environment=CUBE_VMM_WORKER_PATH=/opt/cube-cri/current/bin/cube-vmm-worker
 """
     unit += "Environment=ENABLE_CRI_SANDBOXES=1\nEnvironment=CUBE_ALLOW_PRIVILEGED=true\n" if major == "1.7" else "UnsetEnvironment=ENABLE_CRI_SANDBOXES\n"
     (output / "containerd.service.conf").write_text(unit)
-    metadata = {"binary": binary, "version": version, "family": major, "source_config": str(source), "exec_argv": final_args,
-                "address": option(args, ("--address", "-a"), parsed.get("grpc", {}).get("address", "/run/containerd/containerd.sock"))}
+    metadata = {"binary": binary, "version": version, "family": major, "source_config": str(source),
+                "address": option(args, ("--address", "-a"), source_data.get("grpc", {}).get("address", "/run/containerd/containerd.sock"))}
     (output / "containerd.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
     print(f"复用节点 containerd: {version}; binary={binary}; config={source}")
 
