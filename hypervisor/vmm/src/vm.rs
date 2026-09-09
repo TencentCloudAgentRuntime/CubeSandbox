@@ -2734,6 +2734,16 @@ impl Snapshottable for Vm {
     }
 
     fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
+        self.restore_with_nets(snapshot, &[])
+    }
+}
+
+impl Vm {
+    pub fn restore_with_nets(
+        &mut self,
+        snapshot: Snapshot,
+        runtime_added_nets: &[NetConfig],
+    ) -> std::result::Result<(), MigratableError> {
         event!("vm", "restoring");
 
         let current_state = self
@@ -2782,6 +2792,13 @@ impl Snapshottable for Vm {
             return Err(MigratableError::Restore(anyhow!(
                 "Missing device manager snapshot"
             )));
+        }
+
+        // The source snapshot has now reclaimed its PCI slots. Add runtime-only
+        // NICs before restored vCPUs can run and observe the ACPI hotplug event.
+        for net in runtime_added_nets {
+            self.add_net(net.clone())
+                .map_err(|e| MigratableError::Restore(anyhow!(e.to_string())))?;
         }
 
         // Now we can start all vCPUs from here.

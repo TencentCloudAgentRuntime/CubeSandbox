@@ -734,13 +734,39 @@ impl Vmm {
         }
         // Safe to unwrap as we checked it was Some(&str).
         let source_url = source_url.unwrap();
+        let mut runtime_added_nets = Vec::new();
         let vm_config = Arc::new(Mutex::new({
             let mut vm_config = recv_vm_config(source_url).map_err(VmError::Restore)?;
             if let Some(disks) = &restore_cfg.disks {
                 vm_config.update_disks(disks);
             }
             if let Some(nets) = &restore_cfg.net {
-                vm_config.update_nets(nets);
+                // A network absent from the source template must be added only
+                // after its snapshotted PCI tree has been restored. Creating it
+                // here lets it claim a slot owned by a source device.
+                let source_net_ids: Vec<String> = vm_config
+                    .net
+                    .as_ref()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|net| net.id.clone())
+                    .collect();
+                let mut restored_nets = Vec::new();
+                for net in nets {
+                    if net.fds.is_some()
+                        && net
+                            .id
+                            .as_deref()
+                            .is_some_and(|id| source_net_ids.iter().all(|source| source != id))
+                    {
+                        runtime_added_nets.push(net.clone());
+                    } else {
+                        restored_nets.push(net.clone());
+                    }
+                }
+                if !restored_nets.is_empty() {
+                    vm_config.update_nets(&restored_nets);
+                }
             }
             if let Some(vsock) = &restore_cfg.vsock {
                 vm_config.update_vsock(vsock);
@@ -799,7 +825,8 @@ impl Vmm {
         )?;
 
         // Now we can restore the rest of the VM.
-        vm.restore(snapshot).map_err(VmError::Restore)?;
+        vm.restore_with_nets(snapshot, &runtime_added_nets)
+            .map_err(VmError::Restore)?;
         vm.resume().map_err(VmError::Resume)?;
 
         self.vm_config = Some(vm_config.clone());
