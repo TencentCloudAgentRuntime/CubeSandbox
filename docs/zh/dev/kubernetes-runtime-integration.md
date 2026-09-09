@@ -162,9 +162,9 @@ handler: cube
 overhead: {} # 首版暂不声明，测量后补充
 scheduling:
   nodeSelector:
-    cubesandbox.io/runtime: "true"
+    agc.cloud.tencent.com/cube-ready: "true"
   tolerations:
-    - key: cubesandbox.io/runtime
+    - key: agc.cloud.tencent.com/cube
       operator: Equal
       value: "true"
       effect: NoSchedule

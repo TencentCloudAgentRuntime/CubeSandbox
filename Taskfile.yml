@@ -1,7 +1,7 @@
 version: '3'
 vars:
   BUILD: bash ./deploy/cube-cri/build.sh
-  NODE_TASK: bash ./deploy/cube-cri/node.sh
+  HELM_TASK: bash ./deploy/cube-cri/helm.sh
   ARGS: '{{.CLI_ARGS | default ""}}'
 tasks:
   default:
@@ -41,21 +41,21 @@ tasks:
   package:
     desc: 校验并打包已有制品。
     cmds: [bash ./deploy/cube-cri/package.sh]
-  deploy:prepare:
-    desc: 通过 DaemonSet 安装 PVM 内核，必要时重启并等待恢复。
-    cmds: ['{{.NODE_TASK}} prepare {{.ARGS}}']
   deploy:runtime:
     aliases: [deploy]
-    desc: 通过 DaemonSet 准备 PVM 内核并安装 Cube 运行时。
-    cmds: ['{{.NODE_TASK}} install {{.ARGS}}']
+    desc: 通过 Helm DaemonSet 在带 Cube 标签的节点安装 Cube 运行时。
+    cmds: ['{{.HELM_TASK}}']
   deploy:all:
-    desc: 构建运行时代码、准备 PVM、部署并验证 Pod，默认支持 Guest 特权容器（基础制品须已准备）。
+    desc: 构建运行时代码并通过 Helm DaemonSet 部署到带 Cube 标签的节点（基础制品须已准备）。
     cmds:
       - '{{.BUILD}} runtime'
       - task: deploy:runtime
-        vars:
-          CLI_ARGS: '{{.CLI_ARGS}}'
-      - bash ./deploy/cube-cri/smoke.sh {{.ARGS}}
+  package:helm:
+    desc: 校验并打包 Cube CRI Helm Chart。
+    cmds:
+      - mkdir -p ./_output/cube-cri/chart
+      - helm lint ./deploy/cube-cri/chart --set image.repository=example.invalid/cube-cri-installer --set image.digest=0000000000000000000000000000000000000000000000000000000000000000
+      - helm package ./deploy/cube-cri/chart --destination ./_output/cube-cri/chart
   deploy:monitoring:
     desc: 部署 Cube CRI Prometheus 与 Grafana 监控栈。
     cmds: [bash ./deploy/cube-cri/monitoring.sh]

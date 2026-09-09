@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["nodeSelector", "image", "daemonSet", "runtimeClass"],
+  "properties": {
+    "nodeSelector": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "image": {
+      "type": "object",
+      "required": ["repository", "digest", "pullPolicy"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "daemonSet": {
+      "type": "object",
+      "required": ["hostStatePath", "updateStrategy", "resources", "tolerations"],
+      "properties": {
+        "hostStatePath": { "type": "string", "pattern": "^/" },
+        "updateStrategy": {
+          "type": "object",
+          "required": ["maxUnavailable"],
+          "properties": { "maxUnavailable": { "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "string", "minLength": 1 }] } }
+        },
+        "resources": { "type": "object" },
+        "tolerations": { "type": "array" }
+      }
+    },
+    "runtimeClass": {
+      "type": "object",
+      "required": ["enabled", "name", "handler", "nodeSelector", "overhead"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "name": { "type": "string", "minLength": 1 },
+        "handler": { "type": "string", "minLength": 1 },
+        "nodeSelector": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
+        "overhead": {
+          "type": "object",
+          "required": ["cpu", "memory"],
+          "properties": {
+            "cpu": { "type": "string", "minLength": 1 },
+            "memory": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

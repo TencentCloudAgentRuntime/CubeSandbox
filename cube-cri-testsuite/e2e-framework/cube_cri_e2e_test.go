@@ -1211,7 +1211,7 @@ func resolvedCubeNode(ctx context.Context, t *testing.T, client *kubernetes.Clie
 	if *cubeNodeName != "" {
 		return *cubeNodeName
 	}
-	nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: "cubesandbox.io/runtime=cube"})
+	nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: "agc.cloud.tencent.com/cube-ready=true"})
 	if err != nil {
 		t.Fatalf("list cube physical nodes: %v", err)
 	}

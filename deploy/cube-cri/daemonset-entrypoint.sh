@@ -4,6 +4,19 @@ host() { nsenter -t 1 -m -u -i -n -p -- "$@"; }
 state=/var/lib/cube-cri/installer
 version=$(cat /installer/version)
 mode=${CUBE_CRI_MODE:-runtime}
+node_name=${NODE_NAME:?NODE_NAME is required}
+api_server="https://${KUBERNETES_SERVICE_HOST:?KUBERNETES_SERVICE_HOST is required}:${KUBERNETES_SERVICE_PORT_HTTPS:-443}"
+token_file=/var/run/secrets/kubernetes.io/serviceaccount/token
+ca_file=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+set_ready_label() {
+  value=${1:?label value}
+  test -r "$token_file" && test -r "$ca_file"
+  curl --fail --silent --show-error --cacert "$ca_file" \
+    -H "Authorization: Bearer $(cat "$token_file")" \
+    -H 'Content-Type: application/merge-patch+json' \
+    -X PATCH "$api_server/api/v1/nodes/$node_name" \
+    --data "{\"metadata\":{\"labels\":{\"agc.cloud.tencent.com/cube-ready\":$value}}}" >/dev/null
+}
 pvm_ready() {
   host bash -c '[[ $(uname -r) == *cubesandbox.pvm.host* ]] && test -d /sys/module/kvm_pvm && test -c /dev/kvm'
 }
@@ -20,7 +33,10 @@ ready() {
   done
   host test -S /run/cube-cri/runtime-resource.sock
 }
-if [ "${1:-}" = check ]; then ready; exit; fi
+case "${1:-}" in
+  check) ready; exit ;;
+esac
+set_ready_label null
 src=$state/$POD_UID
 unit=cube-cri-install-$POD_UID
 if ! pvm_ready || host test -f /var/lib/cube-cri/pvm/reboot-request || { [ "$mode" != prepare ] && [ "$(cat /host-state/installed 2>/dev/null || true)" != "$version" ]; }; then
@@ -42,5 +58,6 @@ if ! pvm_ready || host test -f /var/lib/cube-cri/pvm/reboot-request || { [ "$mod
   ready
 fi
 if ! running; then rm -rf "/host-state/$POD_UID"; fi
+if [ "$mode" = runtime ]; then set_ready_label '"true"'; fi
 echo "Cube CRI DaemonSet installed: $version"
 exec sleep infinity

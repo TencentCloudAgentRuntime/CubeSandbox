@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "cube-cri.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cube-cri.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "cube-cri.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.daemonSet.updateStrategy.maxUnavailable }}
+  template:
+    metadata:
+      labels:
+        {{- include "cube-cri.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "cube-cri.fullname" . }}
+      automountServiceAccountToken: true
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.daemonSet.tolerations | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: installer
+          image: {{ include "cube-cri.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+          env:
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: CUBE_CRI_MODE
+              value: runtime
+          resources:
+            {{- toYaml .Values.daemonSet.resources | nindent 12 }}
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "/installer/daemonset-entrypoint.sh", "check"]
+            periodSeconds: 5
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: state
+              mountPath: /host-state
+      volumes:
+        - name: state
+          hostPath:
+            path: {{ .Values.daemonSet.hostStatePath }}
+            type: DirectoryOrCreate

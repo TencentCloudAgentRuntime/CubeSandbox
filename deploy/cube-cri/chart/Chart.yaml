@@ -1,0 +1,7 @@
+apiVersion: v2
+name: cube-cri
+description: 在指定 Cube 节点安装 Cube CRI 的 DaemonSet
+type: application
+version: 0.1.0
+appVersion: "1.0"
+kubeVersion: ">=1.24.0-0"

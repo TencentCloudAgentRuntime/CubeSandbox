@@ -131,7 +131,7 @@ spec:
     spec:
       hostNetwork: true
       hostPID: true
-      nodeSelector: {cubesandbox.io/runtime: cube}
+      nodeSelector: {agc.cloud.tencent.com/cube-ready: "true"}
       tolerations:
       - operator: Exists
       containers:

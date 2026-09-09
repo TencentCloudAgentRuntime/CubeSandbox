@@ -9,7 +9,7 @@ UTILITY_IMAGE=mirror.ccs.tencentyun.com/library/busybox:1.36.1 \
   task test:e2e-framework -- --cube-node 10.0.244.112 --runc-node 10.0.244.2
 ```
 
-目标 cube 节点须已部署运行时并使用 TS4；省略 `--cube-node` 时选择带 `cubesandbox.io/runtime=cube` 标签的可调度 Ready TS4 节点。`--runc-node` 指定另一台物理节点；AWV CSI 用例要求两台节点均已部署对应 CSI 插件和 `awv-btrfs` StorageClass。
+目标 cube 节点须已部署运行时并使用 TS4；省略 `--cube-node` 时选择带 `agc.cloud.tencent.com/cube-ready=true` 标签的可调度 Ready TS4 节点。`--runc-node` 指定另一台物理节点；AWV CSI 用例要求两台节点均已部署对应 CSI 插件和 `awv-btrfs` StorageClass。
 
 privileged 正向用例要求节点已配置 `CUBE_ALLOW_PRIVILEGED=true`，当前部署脚本默认开启；旧节点需更新配置，测试本身不修改开关。模板路径会先以同规格 Pod 预热，且每个用例通过 Prometheus 的 `TemplateDerivedSandbox`/`ColdStartSandbox` 增量验证实际路径；因此须先执行 `task deploy:monitoring`，默认读取 `cube-cri-monitoring` 命名空间中 `app=cube-cri-prometheus` Pod。框架遇到致命断言会中止同组剩余用例，可通过 `--assess` 单独补跑。
 
