@@ -19,7 +19,7 @@ case "${1:-runtime}" in
     (cd Cubelet; CGO_ENABLED=0 go build -trimpath -o "$out/bin/cubelet-cri" ./cmd/cubelet-cri) ;;
   shim)
     (cd CubeShim; cargo build --release --locked -p containerd-shim-cube-rs)
-    install CubeShim/target/release/{containerd-shim-cube-rs,cube-vmm-worker} "$out/bin/" ;;
+    install CubeShim/target/release/{containerd-shim-cube-rs,cube-vmm-worker,cube-template-builder} "$out/bin/" ;;
   agent)
     builder 'cd agent && make && cd /workspace && OUTPUT_DIR=/workspace/_output/cube-agent ONE_CLICK_CUBE_AGENT_BIN=/workspace/agent/target/x86_64-unknown-linux-musl/release/cube-agent bash deploy/one-click/build-agent-ext4.sh'
     cp _output/cube-agent/cube-agent.ext4 "$out/assets/agent" ;;

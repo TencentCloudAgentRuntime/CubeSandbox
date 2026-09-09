@@ -31,7 +31,7 @@ if [[ -f $release/SHA256SUMS ]]; then
   (cd "$release"; sha256sum -c SHA256SUMS)
 else
   mkdir -p "$release/bin" "$release/assets"
-  for file in bin/cubelet-cri bin/containerd-shim-cube-rs bin/cube-vmm-worker assets/kernel assets/agent assets/guest.img; do
+  for file in bin/cubelet-cri bin/containerd-shim-cube-rs bin/cube-vmm-worker bin/cube-template-builder assets/kernel assets/agent assets/guest.img; do
     cp -a "$file" "$release/$file"
   done
   cp SHA256SUMS "$release/"

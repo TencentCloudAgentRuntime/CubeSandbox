@@ -39,6 +39,8 @@ func run() error {
 	root := flag.String("root", "/data/cubelet/cri", "persistent state and shared mounts")
 	socket := flag.String("address", "/run/cube-cri/runtime-resource.sock", "RuntimeResource Unix socket")
 	assets := flag.String("assets", "/opt/cube-cri/current/assets", "kernel, agent and guest.img directory")
+	templateRoot := flag.String("template-root", "/data/cubelet/cri/templates", "published CRI VM template manifests")
+	templateBuilder := flag.String("template-builder", "", "command that builds and publishes a missing template profile; empty uses cube-template-builder")
 	reaper := flag.String("reaper", runtime.DefaultReaperRoot, "durable cleanup queue")
 	metricsAddress := flag.String("metrics-address", ":10098", "Prometheus HTTP listen address; empty disables metrics")
 	flag.Parse()
@@ -93,9 +95,17 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	builderCommand := *templateBuilder
+	if builderCommand == "" {
+		builderCommand = fmt.Sprintf(
+			"/opt/cube-cri/current/bin/cube-template-builder --kernel %s --os-image %s --agent %s",
+			filepath.Join(*assets, "kernel"), filepath.Join(*assets, "guest.img"), filepath.Join(*assets, "agent"),
+		)
+	}
 	node, err := adapter.NewNodeAdapter(filepath.Join(*root, "resources"), adapter.Assets{
 		KernelPath: filepath.Join(*assets, "kernel"), AgentPath: filepath.Join(*assets, "agent"),
 		GuestImagePath: filepath.Join(*assets, "guest.img"), SharedRootBase: filepath.Join(*root, "shared"),
+		TemplateRoot: *templateRoot, TemplateBuilder: builderCommand,
 	}, metrics)
 	if err != nil {
 		return err

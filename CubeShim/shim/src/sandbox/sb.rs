@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self as stdfs, File};
 use std::net::IpAddr;
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -753,6 +753,13 @@ impl SandBox {
             phase_started.elapsed().as_micros(),
             total_started.elapsed().as_micros()
         );
+        // Count actual paths, not merely template selection. A restore that
+        // falls back to boot remains a cold start in the capacity dashboard.
+        if snapshot && self.runtime_template_requested() {
+            metrics::observe_sandbox_start_path(true, total_started.elapsed());
+        } else if !snapshot {
+            metrics::observe_sandbox_start_path(false, total_started.elapsed());
+        }
         stat.set_ok();
         total.succeed();
         Ok(())
@@ -1082,6 +1089,17 @@ impl SandBox {
             return false;
         }
 
+        // RuntimeResource only supplies this annotation after the node has
+        // validated a published template. It must not depend on the legacy
+        // node-wide snapshot marker, which is an opportunistic cold-create
+        // optimization and is absent on clean CRI-only nodes.
+        if anno
+            .get(config::ANNO_SNAPSHOT_BASE)
+            .is_some_and(|base| !base.trim().is_empty())
+        {
+            return true;
+        }
+
         if let Some(proc) = self.spec.process() {
             if proc.selinux_label().is_some() && !proc.selinux_label().clone().unwrap().is_empty() {
                 return false;
@@ -1092,6 +1110,14 @@ impl SandBox {
         }
 
         !self.conf.app_snapshot_create
+    }
+
+    fn runtime_template_requested(&self) -> bool {
+        self.spec
+            .annotations()
+            .as_ref()
+            .and_then(|annotations| annotations.get(config::ANNO_RUNTIME_TEMPLATE_KEY))
+            .is_some_and(|key| !key.trim().is_empty())
     }
     async fn start_vm(
         &mut self,
@@ -1108,12 +1134,7 @@ impl SandBox {
         let phase_started = Instant::now();
         let (runtime_prepared_boot, s0_prepared_boot) = {
             let mut stage = metrics::OperationTimer::new("shim", "VmConfig");
-            let runtime_prepared_boot = if self.runtime_tap.is_some() {
-                if by_snapshot {
-                    return Err(
-                        "RuntimeResource network does not support snapshot restore".to_string()
-                    );
-                }
+            let runtime_prepared_boot = if self.runtime_tap.is_some() && !by_snapshot {
                 let mut config = self.prepare_resource().await?;
                 let nets = config
                     .nets
@@ -1134,12 +1155,10 @@ impl SandBox {
             } else {
                 None
             };
-            let s0_prepared_boot = if runtime_prepared_boot.is_none()
+            let s0_prepared_boot = if !by_snapshot
+                && runtime_prepared_boot.is_none()
                 && super::s0_cni::PreparedNetwork::requested(&self.spec)
             {
-                if by_snapshot {
-                    return Err("S0 CNI adapter does not support snapshot restore".to_string());
-                }
                 let mut config = self.prepare_resource().await?;
                 let network = super::s0_cni::PreparedNetwork::prepare(&self.spec, &mut config)?;
                 Some((config, network))
@@ -1304,9 +1323,15 @@ impl SandBox {
         )?;
 
         let mut ss_req = SnapshotInfo::new(self.conf.vm_res.cpu, self.conf.vm_res.snap_memory);
-        ss_req.set_image_version_for_path(self.conf.os_image_path.as_str())?;
-        ss_req.set_agent_version(self.conf.agent_path.as_str())?;
-        ss_req.set_kernel_version(self.conf.kernel.as_str())?;
+        if has_asset_version(self.conf.os_image_path.as_str()) {
+            ss_req.set_image_version_for_path(self.conf.os_image_path.as_str())?;
+        }
+        if has_asset_version(self.conf.agent_path.as_str()) {
+            ss_req.set_agent_version(self.conf.agent_path.as_str())?;
+        }
+        if has_asset_version(self.conf.kernel.as_str()) {
+            ss_req.set_kernel_version(self.conf.kernel.as_str())?;
+        }
         ss_req.set_disks(&self.conf.disk);
 
         let align_pmem = ss_file.align_pmems(&self.conf.pmem);
@@ -1329,8 +1354,27 @@ impl SandBox {
             let f = Utils::restore_fs_configs(fs);
             fss.push(f);
         }
-        fss.extend(Utils::restore_virtiofs_configs(&self.conf.virtiofs));
-        let nets = Utils::restore_nets_config(&self.conf.net.interfaces)?;
+        // The base image contains no Pod-private volume device. Hotplug each
+        // such virtiofs after restore, otherwise it has no snapshot state and
+        // is silently absent from the guest PCI topology.
+        let runtime_virtiofs = Utils::restore_virtiofs_configs(&self.conf.virtiofs);
+        let mut nets = Utils::restore_nets_config(&self.conf.net.interfaces)?;
+        let runtime_net = if let Some(tap) = self.runtime_tap.as_ref() {
+            if nets.len() != 1 {
+                return Err(format!(
+                    "RuntimeResource requires exactly one restored VM network, got {}",
+                    nets.len()
+                ));
+            }
+            nets[0].tap = None;
+            nets[0].id = Some("tap-0".to_string());
+            nets[0].fds = Some(vec![tap.as_raw_fd()]);
+            nets[0].fds_from_other_netns = true;
+            nets[0].num_queues = 2;
+            Some(nets.remove(0))
+        } else {
+            None
+        };
         let disks = Utils::restore_disks_config(&self.conf.disk);
         // Always rebuild builtin pmem0/pmem1 then append business pmems (order is guest device order).
         let mut pmems = VmConfig::builtin_pmems(&self.conf.os_image_path, &self.conf.agent_path);
@@ -1341,6 +1385,8 @@ impl SandBox {
         let config = RestoreConfig {
             source_url: PathBuf::from(snapshot),
             fs: Some(fss),
+            // Runtime templates have no NIC. Restore first, then hotplug the
+            // Pod TAP so the guest driver negotiates a fresh virtio-net queue.
             net: Some(nets),
             disks: Some(disks),
             pmem: Some(pmems),
@@ -1355,6 +1401,12 @@ impl SandBox {
         };
 
         ch.restore_vm(config).await?;
+        if let Some(net) = runtime_net {
+            ch.add_net(net).await?;
+        }
+        for fs in runtime_virtiofs {
+            ch.add_fs(fs).await?;
+        }
         /*
         let ev = ch
             .wait_notify(Duration::from_nanos(self.ctx.timeout_nano as u64))
@@ -2009,6 +2061,12 @@ impl SandBox {
     }
 }
 
+fn has_asset_version(asset: &str) -> bool {
+    Path::new(asset)
+        .parent()
+        .is_some_and(|parent| parent.join("version").is_file())
+}
+
 fn recreate_dir(path: &str, context: &str) -> CResult<()> {
     let _ = std::fs::remove_dir_all(path);
     if let Err(e) = std::fs::create_dir_all(path) {
@@ -2122,6 +2180,29 @@ mod tests {
         sandbox.conf.app_snapshot_restore = true;
 
         assert!(sandbox.by_snapshot());
+    }
+
+    #[test]
+    fn published_runtime_template_does_not_require_node_snapshot_flag() {
+        let log = Log::default();
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(1);
+        let mut sandbox = SandBox::new("template-ut".to_string(), log, false, tx);
+        sandbox.spec = SpecBuilder::default()
+            .annotations(HashMap::from([
+                (
+                    config::ANNO_SNAPSHOT_BASE.to_string(),
+                    "/data/cubelet/cri/templates/profile".to_string(),
+                ),
+                (
+                    config::ANNO_RUNTIME_TEMPLATE_KEY.to_string(),
+                    "profile".to_string(),
+                ),
+            ]))
+            .build()
+            .unwrap();
+
+        assert!(sandbox.by_snapshot());
+        assert!(sandbox.runtime_template_requested());
     }
 
     #[tokio::test]

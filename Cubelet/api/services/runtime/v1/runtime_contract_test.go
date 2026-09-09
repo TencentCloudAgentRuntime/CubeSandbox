@@ -44,7 +44,7 @@ func requireFields(t *testing.T, message protoreflect.MessageDescriptor, names .
 
 func TestRuntimeResourceV1KeepsRetryIdentityAndFDsOutOfProtobuf(t *testing.T) {
 	prepare := (&PrepareSandboxRequest{}).ProtoReflect().Descriptor()
-	requireFields(t, prepare, "sandbox_id", "idempotency_key", "generation")
+	requireFields(t, prepare, "sandbox_id", "idempotency_key", "generation", "template_mode")
 
 	attachment := (&NetworkAttachment{}).ProtoReflect().Descriptor()
 	requireFields(t, attachment, "tap_name", "network_handle", "fd_handoff")

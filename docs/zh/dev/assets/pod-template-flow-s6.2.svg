@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="1290" viewBox="0 0 960 1290" role="img" aria-labelledby="title desc">
+  <title id="title">Cube CRI Pod 模板选择、创建与回收流程</title>
+  <desc id="desc">Cube Pod 经 CNI 和 Prepare 校验语义及规格。非法语义报错。已就绪且兼容的基础模板可建立共享引用、恢复独立 VM，并热插本 Pod 的 TAP 与私有 virtiofs；普通未命中走冷启动，策略允许时按 key 去重并异步准备模板，已有制品就下载，没有才用独立构建 VM 制作。模板就绪后供后续请求派生。两路均执行新 Pod 初始化及标准 Task 启动。容器重启复用同一 VM；沙箱重建清理旧实例后重新 Prepare。实例依赖清理完成才能释放模板引用，随后由模板 GC 独立判断回收条件。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 1 1 L 9 5 L 1 9 Z" fill="#52657d"/>
+    </marker>
+    <style>
+      text { font-family: "Noto Sans CJK SC", "Microsoft YaHei", "Droid Sans Fallback", sans-serif; fill: #182b45; }
+      .title { font-size: 28px; font-weight: 700; }
+      .label { font-size: 22px; font-weight: 700; text-anchor: middle; }
+      .detail { font-size: 18px; text-anchor: middle; fill: #43566f; }
+      .note { font-size: 18px; fill: #43566f; }
+      .card { fill: #eff5ff; stroke: #8aa9d5; stroke-width: 1.6; }
+      .hit { fill: #eaf8f0; stroke: #65a787; stroke-width: 1.6; }
+      .branch { fill: #fff7e8; stroke: #c5a165; stroke-width: 1.6; }
+      .error { fill: #fff0f0; stroke: #cf8585; stroke-width: 1.6; }
+      .edge { fill: none; stroke: #52657d; stroke-width: 2.2; stroke-linejoin: round; marker-end: url(#arrow); }
+      .return { stroke-dasharray: 7 5; }
+    </style>
+  </defs>
+  <rect x="1" y="1" width="958" height="1288" rx="18" fill="#ffffff" stroke="#dce4ee"/>
+  <text class="title" x="40" y="50">Pod：选择模板 → 独立初始化 → 运行与回收</text>
+  <rect x="822" y="24" width="98" height="34" rx="17" fill="#eff2f6"/>
+  <text class="note" x="871" y="47" text-anchor="middle">方案草案</text>
+
+  <!-- 主路径在左；右侧仅放冷启动、错误和重启分支。 -->
+  <path class="edge" d="M 260 176 V 220"/>
+  <path class="edge" d="M 260 320 V 360"/>
+  <path class="edge" d="M 260 490 V 535"/>
+  <path class="edge" d="M 260 625 V 700"/>
+  <path class="edge" d="M 260 788 V 850"/>
+  <path class="edge" d="M 260 940 V 1030"/>
+  <path class="edge" d="M 450 245 H 520 V 138 H 580"/>
+  <path class="edge" d="M 450 420 H 865 V 535"/>
+  <path class="edge" d="M 735 625 V 665 H 260"/>
+  <path class="edge return" d="M 835 625 V 680"/>
+  <circle cx="260" cy="665" r="4" fill="#52657d"/>
+  <path class="edge" d="M 450 895 H 580" marker-start="url(#arrow)"/>
+  <path class="edge" d="M 450 1080 H 580"/>
+  <path class="edge return" d="M 890 1080 H 932 V 270 H 450"/>
+
+  <g id="pod-request">
+    <rect class="card" x="70" y="100" width="380" height="76" rx="12"/>
+    <text class="label" x="260" y="131">Pod 调度到 Cube 节点</text>
+    <text class="detail" x="260" y="160">RunPodSandbox：准备 netns / CNI</text>
+  </g>
+  <g id="prepare-sandbox">
+    <rect class="card" x="70" y="220" width="380" height="100" rx="12"/>
+    <text class="label" x="260" y="250">Shim CreateSandbox / Prepare</text>
+    <text class="detail" x="260" y="279">校验 CRI 语义，按既有规则计算规格</text>
+    <text class="detail" x="260" y="305">复用现有 lease / generation 所有权</text>
+  </g>
+  <g id="reject-invalid">
+    <rect class="error" x="580" y="100" width="310" height="76" rx="12"/>
+    <text class="label" x="735" y="131">明确报错</text>
+    <text class="detail" x="735" y="160">非法语义 / 安全配置错误</text>
+  </g>
+  <text class="note" x="534" y="212">拒绝</text>
+  <text class="note" x="677" y="253">新沙箱重新 Prepare</text>
+
+  <g id="template-eligibility">
+    <rect class="card" x="70" y="360" width="380" height="130" rx="22"/>
+    <text class="label" x="260" y="392">能否安全命中基础模板？</text>
+    <text class="detail" x="260" y="423">开关启用 · 本地就绪 · 来源可信</text>
+    <text class="detail" x="260" y="449">版本 / 规格 / 设备 / 能力匹配</text>
+    <text class="detail" x="260" y="475">可独立初始化 · 可建立共享引用</text>
+  </g>
+  <text class="note" x="282" y="520" fill="#28704d">命中</text>
+  <text class="note" x="506" y="404">普通 miss / 未启用</text>
+  <text class="note" x="580" y="465">业务镜像不必相同</text>
+  <text class="note" x="580" y="493">不为命中而修改资源规格</text>
+
+  <g id="restore-instance">
+    <rect class="hit" x="70" y="535" width="380" height="90" rx="12"/>
+    <text class="label" x="260" y="565">固定版本并引用 → Start / restore</text>
+    <text class="detail" x="260" y="592">Prepare 先持久化引用、准备私有后代</text>
+    <text class="detail" x="260" y="615">Start：placement → restore / 热插 TAP 与私有 FS</text>
+  </g>
+  <g id="cold-start">
+    <rect class="branch" x="580" y="535" width="310" height="90" rx="12"/>
+    <text class="label" x="735" y="565">现有冷启动</text>
+    <text class="detail" x="735" y="592">仅限冷路径本身支持的配置</text>
+    <text class="detail" x="735" y="615">不等待制模 / 下载，不持模板引用</text>
+  </g>
+  <g id="initialize-guest">
+    <rect class="card" x="70" y="700" width="380" height="88" rx="12"/>
+    <text class="label" x="260" y="731">新 Pod 初始化 → 沙箱 Ready</text>
+    <text class="detail" x="260" y="759">恢复路径先校时、重置熵、建立新连接</text>
+    <text class="detail" x="260" y="781">普通 Agent CreateSandbox 注入身份</text>
+  </g>
+  <text class="note" x="845" y="654">异步</text>
+  <g id="async-template-prepare">
+    <rect class="branch" x="580" y="680" width="310" height="120" rx="12"/>
+    <text class="label" x="735" y="710">按策略异步准备模板</text>
+    <text class="detail" x="735" y="739">按 key 去重，独立预算执行</text>
+    <text class="detail" x="735" y="764">先拉已有制品，无制品再制模</text>
+    <text class="detail" x="735" y="789">就绪后供后续请求命中（图 1）</text>
+  </g>
+
+  <g id="run-tasks">
+    <rect class="card" x="70" y="850" width="380" height="90" rx="12"/>
+    <text class="label" x="260" y="881">标准 Task 路径 → Pod Ready</text>
+    <text class="detail" x="260" y="909">镜像 / volume / init / app / sidecar</text>
+    <text class="detail" x="260" y="931">按探针就绪；模板路径持续持有引用</text>
+  </g>
+  <g id="restart-container">
+    <rect class="card" x="580" y="850" width="310" height="90" rx="12"/>
+    <text class="label" x="735" y="881">业务容器按策略重启</text>
+    <text class="detail" x="735" y="909">同一 VM 内重新 Create / Start</text>
+    <text class="detail" x="735" y="931">不重恢复 VM，不增加模板引用</text>
+  </g>
+  <text class="note" x="282" y="991">删除 / 沙箱失效</text>
+  <g id="cleanup-instance">
+    <rect class="branch" x="70" y="1030" width="380" height="110" rx="12"/>
+    <text class="label" x="260" y="1063">清理实例 → 释放模板引用</text>
+    <text class="detail" x="260" y="1093">确认 VM 退出，FD / 映射 / 后代清理</text>
+    <text class="detail" x="260" y="1121">仅释放本实例资源；模板 GC 独立判断</text>
+  </g>
+  <g id="recreate-sandbox">
+    <rect class="branch" x="580" y="1030" width="310" height="110" rx="12"/>
+    <text class="label" x="735" y="1063">创建新沙箱实例</text>
+    <text class="detail" x="735" y="1093">可重新选择兼容模板版本</text>
+    <text class="detail" x="735" y="1121">不恢复旧业务进程状态</text>
+  </g>
+  <text class="note" x="480" y="1063">需重建</text>
+
+  <path d="M 40 1172 H 920" stroke="#dce4ee"/>
+  <text class="note" x="40" y="1205">异常统一走现有 fence / reaper：清理确认且 lease 有效，才允许 restore 失败后冷回退。</text>
+  <text class="note" x="40" y="1237">所有权 / 清理状态不确定则报错并保留依赖；显式业务快照恢复不适用空白模板回退。</text>
+  <text class="note" x="40" y="1269">绿色为模板快路径；虚线为异步准备 / 沙箱重建。沙箱 Ready ≠ Pod Ready，性能口径见第 9 节。</text>
+</svg>

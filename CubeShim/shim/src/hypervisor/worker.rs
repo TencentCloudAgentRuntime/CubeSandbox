@@ -5,7 +5,7 @@ use crate::common::utils::Utils;
 use crate::common::CResult;
 use crate::metrics;
 use cube_hypervisor::config::RestoreConfig;
-use cube_hypervisor::vm_config::{DeviceConfig, FsConfig, VmConfig};
+use cube_hypervisor::vm_config::{DeviceConfig, FsConfig, NetConfig, VmConfig};
 use cube_hypervisor::{
     ApiRequest, ApiResponsePayload, NotifyEvent, SnapshotConfig, SnapshotType, VmRemoveDeviceData,
 };
@@ -93,6 +93,8 @@ pub(crate) enum WorkerCommand {
     PauseVm,
     ResumeVm,
     RestoreVm(RestoreConfig),
+    AddNet(NetConfig),
+    AddFs(FsConfig),
     SetFs(FsConfig),
     AddDevice(DeviceConfig),
     RemoveDevice(VmRemoveDeviceData),
@@ -479,7 +481,10 @@ impl WorkerClient {
                 fds.len()
             )));
         }
-        let expects_action_payload = matches!(&command, WorkerCommand::AddDevice(_));
+        let expects_action_payload = matches!(
+            &command,
+            WorkerCommand::AddDevice(_) | WorkerCommand::AddNet(_) | WorkerCommand::AddFs(_)
+        );
         let request_id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
         let request = WorkerRequest {
             magic: PROTOCOL_MAGIC.to_string(),
@@ -760,8 +765,13 @@ fn run_worker(
             }
             _ => {}
         }
-        if !matches!(&request.command, WorkerCommand::CreateVm(_)) && !descriptors.is_empty() {
-            let error = "descriptors are only valid with CreateVm".to_string();
+        if !matches!(
+            &request.command,
+            WorkerCommand::CreateVm(_) | WorkerCommand::RestoreVm(_) | WorkerCommand::AddNet(_)
+        ) && !descriptors.is_empty()
+        {
+            let error =
+                "descriptors are only valid with CreateVm, RestoreVm, or AddNet".to_string();
             close_descriptors(descriptors);
             notify_protocol_error(&event, &error);
             return Err(error);
@@ -943,9 +953,29 @@ fn execute_command(
             send_vmm(vmm, ApiRequest::VmResume, "resume VM")?;
             Ok(WorkerReply::Empty)
         }
-        WorkerCommand::RestoreVm(config) => {
+        WorkerCommand::RestoreVm(mut config) => {
+            install_restore_fds(&mut config, &descriptors)?;
             send_vmm(vmm, ApiRequest::VmRestore(Arc::new(config)), "restore VM")?;
             Ok(WorkerReply::Empty)
+        }
+        WorkerCommand::AddNet(mut config) => {
+            install_net_fds(&mut config, &descriptors, "AddNet")?;
+            let response = send_vmm(
+                vmm,
+                ApiRequest::VmAddNet(Arc::new(config)),
+                "add VM network",
+            )?;
+            match response {
+                ApiResponsePayload::VmAction(payload) => Ok(WorkerReply::ActionPayload(payload)),
+                _ => Ok(WorkerReply::ActionPayload(None)),
+            }
+        }
+        WorkerCommand::AddFs(config) => {
+            let response = send_vmm(vmm, ApiRequest::VmAddFs(Arc::new(config)), "add VM fs")?;
+            match response {
+                ApiResponsePayload::VmAction(payload) => Ok(WorkerReply::ActionPayload(payload)),
+                _ => Ok(WorkerReply::ActionPayload(None)),
+            }
         }
         WorkerCommand::SetFs(config) => {
             send_vmm(vmm, ApiRequest::VmSetFs(Arc::new(config)), "set VM fs")?;
@@ -1034,6 +1064,60 @@ pub(crate) fn extract_vm_fds(config: &mut VmConfig) -> Vec<RawFd> {
     descriptors
 }
 
+/// Replace raw TAP descriptors in a restore request with stable IPC slots and
+/// return the caller-owned descriptors to transfer through SCM_RIGHTS.  The
+/// worker installs its received descriptor numbers before handing the config
+/// to VMM; a raw descriptor number from CubeShim is meaningless after fork.
+pub(crate) fn extract_restore_fds(config: &mut RestoreConfig) -> Vec<RawFd> {
+    let mut descriptors = Vec::new();
+    if let Some(networks) = config.net.as_mut() {
+        for network in networks {
+            if let Some(fds) = network.fds.as_mut() {
+                for fd in fds {
+                    descriptors.push(*fd);
+                    *fd = (descriptors.len() - 1) as RawFd;
+                }
+            }
+        }
+    }
+    descriptors
+}
+
+pub(crate) fn extract_net_fds(config: &mut NetConfig) -> Vec<RawFd> {
+    let mut descriptors = Vec::new();
+    if let Some(fds) = config.fds.as_mut() {
+        for fd in fds {
+            descriptors.push(*fd);
+            *fd = (descriptors.len() - 1) as RawFd;
+        }
+    }
+    descriptors
+}
+
+fn install_net_fds(config: &mut NetConfig, descriptors: &[OwnedFd], action: &str) -> CResult<()> {
+    let expected = config.fds.as_ref().map_or(0, Vec::len);
+    if expected != descriptors.len() {
+        return Err(format!(
+            "{action} expected {expected} descriptors but received {}",
+            descriptors.len()
+        ));
+    }
+    if let Some(fds) = config.fds.as_mut() {
+        for fd in fds {
+            let slot =
+                usize::try_from(*fd).map_err(|_| format!("negative {action} FD slot {fd}"))?;
+            let descriptor = descriptors.get(slot).ok_or_else(|| {
+                format!(
+                    "{action} FD slot {slot} exceeds {} rights",
+                    descriptors.len()
+                )
+            })?;
+            *fd = descriptor.as_raw_fd();
+        }
+    }
+    Ok(())
+}
+
 fn install_vm_fds(config: &mut VmConfig, descriptors: &[OwnedFd]) -> CResult<()> {
     let expected = config
         .net
@@ -1072,6 +1156,48 @@ fn install_vm_fds(config: &mut VmConfig, descriptors: &[OwnedFd]) -> CResult<()>
     }
     if used_slots.len() != descriptors.len() {
         return Err("CreateVm FD slots do not cover every received descriptor".to_string());
+    }
+    Ok(())
+}
+
+fn install_restore_fds(config: &mut RestoreConfig, descriptors: &[OwnedFd]) -> CResult<()> {
+    let expected = config
+        .net
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .filter_map(|network| network.fds.as_ref())
+        .map(Vec::len)
+        .sum::<usize>();
+    if expected != descriptors.len() {
+        return Err(format!(
+            "RestoreVm expected {expected} descriptors but received {}",
+            descriptors.len()
+        ));
+    }
+    let mut used_slots = std::collections::BTreeSet::new();
+    if let Some(networks) = config.net.as_mut() {
+        for network in networks {
+            if let Some(fds) = network.fds.as_mut() {
+                for fd in fds {
+                    let slot = usize::try_from(*fd)
+                        .map_err(|_| format!("negative RestoreVm FD slot {fd}"))?;
+                    if !used_slots.insert(slot) {
+                        return Err(format!("duplicate RestoreVm FD slot {slot}"));
+                    }
+                    let descriptor = descriptors.get(slot).ok_or_else(|| {
+                        format!(
+                            "RestoreVm FD slot {slot} exceeds {} rights",
+                            descriptors.len()
+                        )
+                    })?;
+                    *fd = descriptor.as_raw_fd();
+                }
+            }
+        }
+    }
+    if used_slots.len() != descriptors.len() {
+        return Err("RestoreVm FD slots do not cover every received descriptor".to_string());
     }
     Ok(())
 }
@@ -1573,6 +1699,25 @@ mod tests {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::EBADF)
         );
+    }
+
+    #[test]
+    fn restore_fd_slots_round_trip_over_worker_handoff() {
+        let donated: OwnedFd = File::open("/dev/null").unwrap().into();
+        let donated_fd = donated.as_raw_fd();
+        let mut config = RestoreConfig::default();
+        config.net = Some(vec![cube_hypervisor::vm_config::NetConfig {
+            fds: Some(vec![donated_fd]),
+            fds_from_other_netns: true,
+            ..Default::default()
+        }]);
+
+        assert_eq!(extract_restore_fds(&mut config), vec![donated_fd]);
+        assert_eq!(config.net.as_ref().unwrap()[0].fds.as_ref().unwrap(), &[0]);
+        let descriptors = vec![donated];
+        install_restore_fds(&mut config, &descriptors).unwrap();
+        let restored_fd = config.net.as_ref().unwrap()[0].fds.as_ref().unwrap()[0];
+        assert!(unsafe { libc::fcntl(restored_fd, libc::F_GETFD) } >= 0);
     }
 
     #[test]

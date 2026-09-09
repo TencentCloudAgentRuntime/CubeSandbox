@@ -36,6 +36,24 @@ func TestLatencyPercentiles(t *testing.T) {
 	}
 }
 
+func TestApplySandboxPath(t *testing.T) {
+	pod := &corev1.Pod{Spec: corev1.PodSpec{RuntimeClassName: stringPtr("cube")}}
+	applySandboxPath(context.WithValue(context.Background(), sandboxPathContextKey{}, sandboxPathCold), pod)
+	if got := pod.Annotations[templateModeAnnotation]; got != "cold" {
+		t.Fatalf("cold annotation=%q", got)
+	}
+	applySandboxPath(context.WithValue(context.Background(), sandboxPathContextKey{}, sandboxPathTemplate), pod)
+	if got := pod.Annotations[templateModeAnnotation]; got != "auto" {
+		t.Fatalf("template annotation=%q", got)
+	}
+	pod.Spec.RuntimeClassName = stringPtr("runc")
+	delete(pod.Annotations, templateModeAnnotation)
+	applySandboxPath(context.WithValue(context.Background(), sandboxPathContextKey{}, sandboxPathCold), pod)
+	if _, ok := pod.Annotations[templateModeAnnotation]; ok {
+		t.Fatal("runc pod received a Cube template annotation")
+	}
+}
+
 func TestLatencyObservationsAndPartialSummary(t *testing.T) {
 	start := time.Now()
 	r := latencyPodResult{Created: true, CreateStart: start, CreateReturn: start.Add(4 * time.Millisecond), Observed: map[string]time.Time{}, Server: map[string]time.Time{}}

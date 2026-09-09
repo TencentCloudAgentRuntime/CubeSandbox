@@ -368,6 +368,17 @@ fn export_host_bind_mounts(
                 mount.destination().display()
             )
         })?;
+        // containerd's sandboxer can leave its per-sandbox resolv.conf path
+        // as a directory. Exporting that directory makes a later container
+        // fail when its image already has the ordinary /etc/resolv.conf file.
+        // The Agent has already rendered the Pod DNS file in the Guest, so use
+        // that stable file instead of treating the malformed host source as a
+        // workload volume. Keep valid explicit resolver-file binds unchanged.
+        if mount.destination() == Path::new(GUEST_SANDBOX_RESOLV_CONF) && metadata.is_dir() {
+            mount.set_source(Some(PathBuf::from(GUEST_SANDBOX_RESOLV_CONF)));
+            mount.set_options(Some(vec!["bind".to_string(), "ro".to_string()]));
+            continue;
+        }
         let export_target = host_bind_export_target(target, managed_volume_root, export_id, index);
         if metadata.is_dir() {
             fs::create_dir_all(&export_target).map_err(|error| {
@@ -884,6 +895,50 @@ mod tests {
             mounts[0].options().as_ref().unwrap(),
             &["rbind".to_string(), "ro".to_string()]
         );
+    }
+
+    #[test]
+    fn managed_rootfs_replaces_directory_resolver_source_with_guest_dns() {
+        let root = std::env::temp_dir().join(format!(
+            "cubesandbox-directory-resolver-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let source = root.join("resolv.conf");
+        let volume_root = root.join("volumes");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&volume_root).unwrap();
+
+        let mut resolver = oci_spec::runtime::Mount::default();
+        resolver.set_destination(PathBuf::from(GUEST_SANDBOX_RESOLV_CONF));
+        resolver.set_typ(Some("bind".to_string()));
+        resolver.set_source(Some(source));
+        resolver.set_options(Some(vec!["rbind".to_string(), "rw".to_string()]));
+        let mut spec = Spec::default();
+        spec.set_mounts(Some(vec![resolver]));
+        let mut mounted = Vec::new();
+
+        export_host_bind_mounts(
+            "sb-generation",
+            "task-a-42-7",
+            &root.join("rootfs"),
+            Some(&volume_root),
+            &mut spec,
+            &mut mounted,
+        )
+        .unwrap();
+
+        let mount = &spec.mounts().as_ref().unwrap()[0];
+        assert_eq!(
+            mount.source(),
+            &Some(PathBuf::from(GUEST_SANDBOX_RESOLV_CONF))
+        );
+        assert_eq!(
+            mount.options().as_ref().unwrap(),
+            &["bind".to_string(), "ro".to_string()]
+        );
+        assert!(mounted.is_empty());
+        assert!(!volume_root.join("task-a-42-7").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

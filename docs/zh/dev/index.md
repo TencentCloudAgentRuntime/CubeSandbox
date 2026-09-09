@@ -8,6 +8,7 @@
 
 - [CubeSandbox 对接 Kubernetes RuntimeClass 总体技术方案](./kubernetes-runtime-integration)——定义 Sandbox API/Task API 主架构、OCI rootfs、多容器、网络、存储、安全、恢复、测试以及二期快照设计。
 - [Kubernetes RuntimeClass PoC 开发计划](./kubernetes-runtime-integration-development)——按 S0～S6 拆分实现目标、验收标准、代码组织、handoff 和未决问题记录方式。
+- [Cube CRI 复用现有 Template 的一秒启动方案](./kubernetes-runtime-template-fastpath-s6.2)——模板全生命周期、Pod 复用条件与生命周期、CRI 快路径改造及验收。
 - [Cube CRI 运行时监控方案](./cube-cri-observability)——定义内部指标、Shim 上报、Prometheus 采集、看板、告警和实施验收。
 
 ## 约定

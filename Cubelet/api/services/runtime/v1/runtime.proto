@@ -72,6 +72,9 @@ message PrepareSandboxRequest {
   PodIdentity pod = 4;
   ResourceRequest resources = 5;
   NetworkIntent network = 6;
+  // Resolved from agc.cloud.tencent.com/cube-template-mode. Empty and "auto"
+  // permit template reuse; "cold" forces a cold VM start.
+  string template_mode = 7;
 }
 
 message RuntimeAssets {
@@ -79,6 +82,12 @@ message RuntimeAssets {
   string agent_path = 2;
   string guest_image_path = 3;
   string shared_root = 4;
+  // Empty means a cold start. A non-empty path is a published template base.
+  string snapshot_base = 5;
+  // Optional CubeCow clone URL for the template memory image.
+  string snapshot_memory_vol_url = 6;
+  // Immutable template profile key, used only for diagnostics and accounting.
+  string template_key = 7;
 }
 
 message Route {

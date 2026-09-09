@@ -61,9 +61,22 @@ pub struct SnapshotArgs {
     )]
     pub kernel: String,
 
+    /// Guest root image used for the dedicated template VM.
+    #[arg(long = "os-image", value_name = "guest image", required = false)]
+    pub os_image: Option<String>,
+
+    /// Agent ext4 image used for the dedicated template VM.
+    #[arg(long = "agent", value_name = "agent image", required = false)]
+    pub agent: Option<String>,
+
     /// Don't create tap
     #[arg(long = "notap", help = "don't create tap", action = ArgAction::SetTrue, required = false)]
     pub notap: bool,
+
+    /// Build the network device with the same cross-network-namespace TAP
+    /// contract used by RuntimeResource restores.
+    #[arg(long = "runtime-template-network", action = ArgAction::SetTrue, required = false)]
+    pub runtime_template_network: bool,
 
     /// Force
     #[arg(long = "force", help = "force", action = ArgAction::SetTrue, required = false)]
@@ -139,7 +152,18 @@ impl TryFrom<SnapshotArgs> for Snapshot {
         snapshot.pmem = Utils::anno_to_obj::<Vec<Pmem>>(&args.pmem)?;
         snapshot.path = args.path;
         snapshot.kernel = args.kernel;
+        if let Some(os_image) = args.os_image {
+            snapshot.os_image_path = os_image;
+        } else {
+            snapshot.os_image_path = crate::hypervisor::config::IMAGE_PATH.to_string();
+        }
+        if let Some(agent) = args.agent {
+            snapshot.agent_path = agent;
+        } else {
+            snapshot.agent_path = crate::hypervisor::config::DEFAULT_AGENT_PATH.to_string();
+        }
         snapshot.tap = !args.notap;
+        snapshot.runtime_template_network = args.runtime_template_network;
         snapshot.force = args.force;
         snapshot.app_snapshot = args.app_snapshot;
         snapshot.snapshot_type = args

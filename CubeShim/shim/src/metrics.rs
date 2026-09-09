@@ -58,6 +58,21 @@ pub fn observe_shim_stage(operation: &'static str, succeeded: bool, duration: Du
     observe("shim", operation, succeeded, duration);
 }
 
+/// Records the actual VM start path for a successfully created CRI sandbox.
+/// This is intentionally separate from CreatePodSandbox: a template restore
+/// and a cold boot have different capacity and latency characteristics.
+pub fn observe_sandbox_start_path(template_derived: bool, duration: Duration) {
+    observe_shim_stage(
+        if template_derived {
+            "TemplateDerivedSandbox"
+        } else {
+            "ColdStartSandbox"
+        },
+        true,
+        duration,
+    );
+}
+
 /// Times one bounded internal operation without adding latency to the path.
 pub struct OperationTimer {
     component: &'static str,

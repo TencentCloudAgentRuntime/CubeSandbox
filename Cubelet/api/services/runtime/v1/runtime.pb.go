@@ -558,10 +558,13 @@ type PrepareSandboxRequest struct {
 	// Stable across retries of the same desired generation.
 	IdempotencyKey string `protobuf:"bytes,2,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
 	// Monotonically increases when the caller replaces a sandbox with the same ID.
-	Generation    uint64           `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
-	Pod           *PodIdentity     `protobuf:"bytes,4,opt,name=pod,proto3" json:"pod,omitempty"`
-	Resources     *ResourceRequest `protobuf:"bytes,5,opt,name=resources,proto3" json:"resources,omitempty"`
-	Network       *NetworkIntent   `protobuf:"bytes,6,opt,name=network,proto3" json:"network,omitempty"`
+	Generation uint64           `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
+	Pod        *PodIdentity     `protobuf:"bytes,4,opt,name=pod,proto3" json:"pod,omitempty"`
+	Resources  *ResourceRequest `protobuf:"bytes,5,opt,name=resources,proto3" json:"resources,omitempty"`
+	Network    *NetworkIntent   `protobuf:"bytes,6,opt,name=network,proto3" json:"network,omitempty"`
+	// Resolved from agc.cloud.tencent.com/cube-template-mode. Empty and "auto"
+	// permit template reuse; "cold" forces a cold VM start.
+	TemplateMode  string `protobuf:"bytes,7,opt,name=template_mode,json=templateMode,proto3" json:"template_mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -638,14 +641,27 @@ func (x *PrepareSandboxRequest) GetNetwork() *NetworkIntent {
 	return nil
 }
 
+func (x *PrepareSandboxRequest) GetTemplateMode() string {
+	if x != nil {
+		return x.TemplateMode
+	}
+	return ""
+}
+
 type RuntimeAssets struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	KernelPath     string                 `protobuf:"bytes,1,opt,name=kernel_path,json=kernelPath,proto3" json:"kernel_path,omitempty"`
 	AgentPath      string                 `protobuf:"bytes,2,opt,name=agent_path,json=agentPath,proto3" json:"agent_path,omitempty"`
 	GuestImagePath string                 `protobuf:"bytes,3,opt,name=guest_image_path,json=guestImagePath,proto3" json:"guest_image_path,omitempty"`
 	SharedRoot     string                 `protobuf:"bytes,4,opt,name=shared_root,json=sharedRoot,proto3" json:"shared_root,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Empty means a cold start. A non-empty path is a published template base.
+	SnapshotBase string `protobuf:"bytes,5,opt,name=snapshot_base,json=snapshotBase,proto3" json:"snapshot_base,omitempty"`
+	// Optional CubeCow clone URL for the template memory image.
+	SnapshotMemoryVolUrl string `protobuf:"bytes,6,opt,name=snapshot_memory_vol_url,json=snapshotMemoryVolUrl,proto3" json:"snapshot_memory_vol_url,omitempty"`
+	// Immutable template profile key, used only for diagnostics and accounting.
+	TemplateKey   string `protobuf:"bytes,7,opt,name=template_key,json=templateKey,proto3" json:"template_key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RuntimeAssets) Reset() {
@@ -702,6 +718,27 @@ func (x *RuntimeAssets) GetGuestImagePath() string {
 func (x *RuntimeAssets) GetSharedRoot() string {
 	if x != nil {
 		return x.SharedRoot
+	}
+	return ""
+}
+
+func (x *RuntimeAssets) GetSnapshotBase() string {
+	if x != nil {
+		return x.SnapshotBase
+	}
+	return ""
+}
+
+func (x *RuntimeAssets) GetSnapshotMemoryVolUrl() string {
+	if x != nil {
+		return x.SnapshotMemoryVolUrl
+	}
+	return ""
+}
+
+func (x *RuntimeAssets) GetTemplateKey() string {
+	if x != nil {
+		return x.TemplateKey
 	}
 	return ""
 }
@@ -1710,7 +1747,7 @@ const file_api_services_runtime_v1_runtime_proto_rawDesc = "" +
 	"netns_path\x18\x01 \x01(\tR\tnetnsPath\x12%\n" +
 	"\x0einterface_name\x18\x02 \x01(\tR\rinterfaceName\x12\x15\n" +
 	"\x06pod_ip\x18\x03 \x01(\tR\x05podIp\x12\x10\n" +
-	"\x03dns\x18\x04 \x03(\tR\x03dns\"\xcd\x02\n" +
+	"\x03dns\x18\x04 \x03(\tR\x03dns\"\xf2\x02\n" +
 	"\x15PrepareSandboxRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12'\n" +
@@ -1720,7 +1757,8 @@ const file_api_services_runtime_v1_runtime_proto_rawDesc = "" +
 	"generation\x12:\n" +
 	"\x03pod\x18\x04 \x01(\v2(.cubelet.services.runtime.v1.PodIdentityR\x03pod\x12J\n" +
 	"\tresources\x18\x05 \x01(\v2,.cubelet.services.runtime.v1.ResourceRequestR\tresources\x12D\n" +
-	"\anetwork\x18\x06 \x01(\v2*.cubelet.services.runtime.v1.NetworkIntentR\anetwork\"\x9a\x01\n" +
+	"\anetwork\x18\x06 \x01(\v2*.cubelet.services.runtime.v1.NetworkIntentR\anetwork\x12#\n" +
+	"\rtemplate_mode\x18\a \x01(\tR\ftemplateMode\"\x99\x02\n" +
 	"\rRuntimeAssets\x12\x1f\n" +
 	"\vkernel_path\x18\x01 \x01(\tR\n" +
 	"kernelPath\x12\x1d\n" +
@@ -1728,7 +1766,10 @@ const file_api_services_runtime_v1_runtime_proto_rawDesc = "" +
 	"agent_path\x18\x02 \x01(\tR\tagentPath\x12(\n" +
 	"\x10guest_image_path\x18\x03 \x01(\tR\x0eguestImagePath\x12\x1f\n" +
 	"\vshared_root\x18\x04 \x01(\tR\n" +
-	"sharedRoot\"\x89\x01\n" +
+	"sharedRoot\x12#\n" +
+	"\rsnapshot_base\x18\x05 \x01(\tR\fsnapshotBase\x125\n" +
+	"\x17snapshot_memory_vol_url\x18\x06 \x01(\tR\x14snapshotMemoryVolUrl\x12!\n" +
+	"\ftemplate_key\x18\a \x01(\tR\vtemplateKey\"\x89\x01\n" +
 	"\x05Route\x12 \n" +
 	"\vdestination\x18\x01 \x01(\tR\vdestination\x12\x18\n" +
 	"\agateway\x18\x02 \x01(\tR\agateway\x12\x16\n" +

@@ -165,8 +165,8 @@ func assessConcurrentLatency(ctx context.Context, t *testing.T, cfg *envconf.Con
 		}
 		t.Logf("%s=%s", artifact.suffix, path)
 	}
-	encoded, _ := json.Marshal(summary)
-	t.Logf("SUMMARY_JSON %s", encoded)
+	// encoded, _ := json.Marshal(summary)
+	// t.Logf("SUMMARY_JSON %s", encoded)
 	for _, name := range sortedLatencyKeys(summary.Metrics) {
 		m := summary.Metrics[name]
 		t.Logf("%s: n=%d p50=%.3fms p95=%.3fms p99=%.3fms min=%.3fms max=%.3fms", name, m.Count, m.P50MS, m.P95MS, m.P99MS, m.MinMS, m.MaxMS)
@@ -277,6 +277,7 @@ func measureLatencyBatch(ctx context.Context, client kubernetes.Interface, pods 
 				if ctx.Err() != nil {
 					return
 				}
+				applySandboxPath(ctx, pods[i])
 				start := time.Now()
 				created, err := api.Create(ctx, pods[i], metav1.CreateOptions{})
 				returned := time.Now()

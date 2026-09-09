@@ -26,12 +26,13 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::client;
 use hyper_util::rt::TokioIo;
+use net_util::Tap;
 use std::fs;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 pub mod cmd;
 
 pub const SUB_CMD: &str = "snapshot";
@@ -78,7 +79,10 @@ pub struct Snapshot {
     id: String,
     path: String,
     kernel: String,
+    os_image_path: String,
+    agent_path: String,
     tap: bool,
+    runtime_template_network: bool,
     force: bool,
     ch_rx: Option<Receiver<NotifyEvent>>,
     ch: Option<VmmInstance>,
@@ -98,7 +102,7 @@ impl Snapshot {
         Snapshot::default()
     }
 
-    pub(self) async fn handle(&mut self) -> CResult<()> {
+    pub async fn handle(&mut self) -> CResult<()> {
         self.check_path()?;
 
         if self.app_snapshot {
@@ -251,11 +255,12 @@ impl Snapshot {
     }
 
     fn boot_vm(&mut self) -> CResult<()> {
-        let mut vm_config = VmConfig::default();
+        let mut vm_config = VmConfig::new(&self.os_image_path, &self.agent_path);
         vm_config
             .set_kernel(self.kernel.clone())
             .set_vcpus(self.res.cpu)
             .set_memory(self.res.memory, true);
+        let mut template_tap = None;
 
         if self.tap {
             let net = Net {
@@ -266,6 +271,31 @@ impl Snapshot {
                 ..Default::default()
             };
             let _ = vm_config.add_nets(&net)?;
+
+            // RuntimeResource restores receive a TAP FD whose interface lives
+            // in the Pod netns.  Build a template with the same fd-scoped
+            // vnet-header and no-offload contract, otherwise the guest can
+            // retain an offload negotiation tied to the builder's local TAP.
+            // The local descriptor remains alive until VmBoot has completed;
+            // the VMM duplicates it while creating the virtio-net device.
+            template_tap = if self.runtime_template_network {
+                let tap = Tap::new(1).map_err(|error| format!("create template TAP: {error}"))?;
+                tap.prepare_for_cross_netns()
+                    .map_err(|error| format!("prepare template TAP: {error}"))?;
+                let networks = vm_config
+                    .nets
+                    .as_mut()
+                    .ok_or_else(|| "template VM has no network configuration".to_string())?;
+                let runtime_net = networks
+                    .last_mut()
+                    .ok_or_else(|| "template VM has no network device".to_string())?;
+                runtime_net.tap = None;
+                runtime_net.fds = Some(vec![tap.as_raw_fd()]);
+                runtime_net.fds_from_other_netns = true;
+                Some(tap)
+            } else {
+                None
+            };
 
             //don't disable highres in eks, temporarily use tap to identify this situation
             vm_config.add_cmdline("highres=off".to_string());
@@ -302,6 +332,10 @@ impl Snapshot {
         vm_config.add_vsock(self.id.clone());
         vm_config.add_cmdline("quiet".to_string());
         vm_config.add_cmdline("snapshot-mode".to_string());
+        // Keep the template Guest's cgroup mount contract identical to the
+        // normal CRI boot path. The mount is established only at Guest init,
+        // so it cannot be repaired after snapshot restore.
+        vm_config.add_cmdline("agent.unified_cgroup_hierarchy=true".to_string());
         if self.res.preserve_memory > 0 {
             vm_config.add_cmdline(format!("cubemem_pages_nr={}", self.res.preserve_memory));
             vm_config.add_cmdline(format!(
@@ -327,27 +361,36 @@ impl Snapshot {
             .send_request(ApiRequest::VmBoot)
             .map_err(|e| format!("Boot vm failed:{}", e))?
             .map_err(|e| format!("Boot vm failed:{}", e))?;
+        drop(template_tap);
         Ok(())
     }
 
     fn wait_vm_ready(&self) -> CResult<()> {
-        let ev = self
-            .ch_rx
-            .as_ref()
-            .unwrap()
-            .recv_timeout(Duration::from_nanos(1000 * 1000 * 1000 * 3));
-        if let Err(e) = ev {
-            return Err(format!("Wait vm ready err:{}", e));
+        let started = Instant::now();
+        loop {
+            let remaining = Duration::from_secs(10)
+                .checked_sub(started.elapsed())
+                .ok_or_else(|| "Wait agent ready timed out".to_string())?;
+            match self
+                .ch_rx
+                .as_ref()
+                .unwrap()
+                .recv_timeout(remaining)
+                .map_err(|e| format!("Wait agent ready err:{e}"))?
+            {
+                NotifyEvent::AgentStarted | NotifyEvent::VsockServerReady => break,
+                // 事件来源有并发性：SysStart 可能在 GuestInitStarted 后才被消费。
+                // 模板只要求 Agent 已就绪，忽略此前的启动阶段事件即可。
+                NotifyEvent::SysStart
+                | NotifyEvent::GuestInitStarted
+                | NotifyEvent::GuestInitReady => {}
+                event => {
+                    return Err(format!(
+                        "Unexpected event while waiting for agent: {event:?}"
+                    ))
+                }
+            }
         }
-        let ev = ev.unwrap();
-        if ev != NotifyEvent::SysStart {
-            return Err(format!(
-                "Not an expected event, expected:{:?}, actual:{:?}",
-                NotifyEvent::SysStart,
-                ev
-            ));
-        }
-        thread::sleep(Duration::from_secs(3));
         Ok(())
     }
 
@@ -388,11 +431,20 @@ impl Snapshot {
 
     fn store_metadata(&self) -> CResult<()> {
         let mut snap_info = SnapshotInfo::new(self.res.cpu, self.res.memory);
-        snap_info.image_version = Utils::get_image_version()?;
-        snap_info.agent_version = Some(Utils::get_agent_version(
-            crate::hypervisor::config::DEFAULT_AGENT_PATH,
-        )?);
-        snap_info.kernel_version = Utils::get_kernel_version(self.kernel.as_str())?;
+        if let Ok(version) = Utils::get_image_version_for_path(&self.os_image_path) {
+            snap_info.image_version = version;
+        }
+        if let Ok(version) = Utils::get_agent_version(&self.agent_path) {
+            snap_info.agent_version = Some(version);
+        }
+        // CRI 运行时的 assets 允许没有 legacy `version` 文件；缺失时
+        // 使用空版本，并由 restore 侧的同一规则跳过版本比较。
+        let has_kernel_version = Path::new(&self.kernel)
+            .parent()
+            .is_some_and(|parent| parent.join("version").is_file());
+        if has_kernel_version {
+            snap_info.kernel_version = Utils::get_kernel_version(self.kernel.as_str())?;
+        }
         snap_info.app_snapshot_container_id = self.container_id.clone();
         for d in &self.disk {
             let disk = snapshot::Disk {

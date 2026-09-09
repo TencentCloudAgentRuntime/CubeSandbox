@@ -2303,36 +2303,61 @@ impl VmConfig {
     }
 
     pub fn update_nets(&mut self, net_cfgs: &Vec<NetConfig>) {
-        if let Some(nets) = &mut self.net {
-            let mut devices: HashMap<String, String> = HashMap::default();
-            let mut rate_limiter: HashMap<String, RateLimiterConfig> = HashMap::default();
-            for net_cfg in net_cfgs.iter() {
-                if net_cfg.id.is_none() {
+        let nets = self.net.get_or_insert_with(Vec::new);
+        let mut devices: HashMap<String, String> = HashMap::default();
+        let mut rate_limiter: HashMap<String, RateLimiterConfig> = HashMap::default();
+        for net_cfg in net_cfgs.iter() {
+            if net_cfg.id.is_none() {
+                continue;
+            }
+            if net_cfg.tap.is_some() {
+                devices.insert(
+                    net_cfg.id.as_ref().unwrap().clone(),
+                    net_cfg.tap.as_ref().unwrap().clone(),
+                );
+            }
+            if net_cfg.rate_limiter_config.is_some() {
+                rate_limiter.insert(
+                    net_cfg.id.as_ref().unwrap().clone(),
+                    net_cfg.rate_limiter_config.as_ref().unwrap().clone(),
+                );
+            }
+        }
+
+        for net in nets.iter_mut() {
+            if let Some(id) = &net.id {
+                if let Some(runtime_net) = net_cfgs.iter().find(|runtime_net| {
+                    runtime_net.id.as_ref() == Some(id) && runtime_net.fds.is_some()
+                }) {
+                    // The source template owns the virtio queue state;
+                    // only the runtime TAP and its Pod-specific link
+                    // properties may be replaced during restore.
+                    *net = runtime_net.clone();
                     continue;
                 }
-                if net_cfg.tap.is_some() {
-                    devices.insert(
-                        net_cfg.id.as_ref().unwrap().clone(),
-                        net_cfg.tap.as_ref().unwrap().clone(),
-                    );
+                if let Some(tap) = devices.get(&id.clone()) {
+                    net.tap = Some(tap.clone());
                 }
-                if net_cfg.rate_limiter_config.is_some() {
-                    rate_limiter.insert(
-                        net_cfg.id.as_ref().unwrap().clone(),
-                        net_cfg.rate_limiter_config.as_ref().unwrap().clone(),
-                    );
+                if let Some(rate_limit) = rate_limiter.get(&id.clone()) {
+                    net.rate_limiter_config = Some(*rate_limit);
                 }
             }
+        }
 
-            for net in nets.iter_mut() {
-                if let Some(id) = &net.id {
-                    if let Some(tap) = devices.get(&id.clone()) {
-                        net.tap = Some(tap.clone());
-                    }
-                    if let Some(rate_limit) = rate_limiter.get(&id.clone()) {
-                        net.rate_limiter_config = Some(*rate_limit);
-                    }
-                }
+        // Templates intentionally omit the Pod network device.  A runtime
+        // TAP with no matching source device is therefore a new device,
+        // not an incomplete update to the snapshot configuration.  It is
+        // created before vCPUs resume and has no snapshot state to replay.
+        for runtime_net in net_cfgs.iter() {
+            if runtime_net.fds.is_none() {
+                continue;
+            }
+            let exists = runtime_net
+                .id
+                .as_ref()
+                .is_some_and(|id| nets.iter().any(|net| net.id.as_ref() == Some(id)));
+            if !exists {
+                nets.push(runtime_net.clone());
             }
         }
     }

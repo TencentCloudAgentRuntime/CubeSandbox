@@ -4470,6 +4470,20 @@ impl DeviceManager {
         device_groups: (Vec<DeviceNode>, Vec<DeviceNode>),
         snapshot: Snapshot,
     ) -> std::result::Result<(), MigratableError> {
+        // Restore may add a Pod-specific network to a network-less template.
+        // The device has been created from the incoming runtime config and
+        // deliberately has no template snapshot state to replay.
+        let restore_added_nets: BTreeSet<String> = self
+            .config
+            .lock()
+            .unwrap()
+            .net
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter_map(|net| net.id.clone())
+            .filter(|id| !snapshot.snapshots.contains_key(id))
+            .collect();
         let total_nodes = device_groups.0.len() + device_groups.1.len();
         let work_thread_num = if total_nodes > MAX_WORKER_THREADS {
             MAX_WORKER_THREADS
@@ -4499,6 +4513,8 @@ impl DeviceManager {
                                 guard.restore(*snapshot)?;
                                 Ok(())
                             }));
+                        } else if restore_added_nets.contains(&node.id) {
+                            debug!("Skipping state restore for added network {}", node.id);
                         } else {
                             return Err(MigratableError::Restore(anyhow!(
                                 "Missing device {}",

@@ -3,6 +3,7 @@ package e2eframework
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +37,13 @@ import (
 
 var testEnv env.Environment
 
+const templateModeAnnotation = "agc.cloud.tencent.com/cube-template-mode"
+
+const (
+	sandboxPathCold     = "cold"
+	sandboxPathTemplate = "template"
+)
+
 var (
 	runID        = flag.String("run-id", envString("RUN_ID", fmt.Sprintf("cube-kri-e2e-%s", time.Now().Format("20060102150405"))), "test run id used in pod labels")
 	cubeNodeName = flag.String("cube-node", envString("CUBE_NODE_NAME", ""), "cube physical node name; auto-detected when empty")
@@ -57,12 +66,23 @@ var (
 	probeTimeout       = flag.Duration("probe-timeout", envDuration("PROBE_TIMEOUT", 90*time.Second), "probe case timeout")
 	cleanupTimeout     = flag.Duration("cleanup-timeout", envDuration("CLEANUP_TIMEOUT", 60*time.Second), "pod cleanup timeout")
 
-	awvStorageClass = flag.String("awv-csi-storage-class", envString("AWV_CSI_STORAGE_CLASS", "awv-btrfs"), "awv-csi StorageClass used by PVC tests")
-	awvCSIDriver    = flag.String("awv-csi-driver", envString("AWV_CSI_DRIVER", "agent-workspace.tke.cloud.tencent.com"), "expected awv-csi PV driver")
-	awvPVCSize      = flag.String("awv-csi-pvc-size", envString("AWV_CSI_PVC_SIZE", "1Gi"), "awv-csi PVC request size")
+	awvStorageClass        = flag.String("awv-csi-storage-class", envString("AWV_CSI_STORAGE_CLASS", "awv-btrfs"), "awv-csi StorageClass used by PVC tests")
+	awvCSIDriver           = flag.String("awv-csi-driver", envString("AWV_CSI_DRIVER", "agent-workspace.tke.cloud.tencent.com"), "expected awv-csi PV driver")
+	awvPVCSize             = flag.String("awv-csi-pvc-size", envString("AWV_CSI_PVC_SIZE", "1Gi"), "awv-csi PVC request size")
+	prometheusNamespace    = flag.String("prometheus-namespace", envString("CUBE_CRI_PROMETHEUS_NAMESPACE", "cube-cri-monitoring"), "Prometheus namespace used to verify Cube sandbox paths")
+	prometheusSelector     = flag.String("prometheus-selector", envString("CUBE_CRI_PROMETHEUS_SELECTOR", "app=cube-cri-prometheus"), "Prometheus Pod selector used to verify Cube sandbox paths")
+	templatePrepareTimeout = flag.Duration("template-prepare-timeout", envDuration("TEMPLATE_PREPARE_TIMEOUT", 15*time.Minute), "maximum wait for an auto-created template to become a real restore path")
+	pathVerifyTimeout      = flag.Duration("sandbox-path-verify-timeout", envDuration("SANDBOX_PATH_VERIFY_TIMEOUT", 30*time.Second), "maximum wait for Prometheus to observe a sandbox start path")
 )
 
 const runLabelKey = "khaos.tencentcloud.com/test-run"
+
+type sandboxPathContextKey struct{}
+
+var templatePathPreparation struct {
+	sync.Mutex
+	ready bool
+}
 
 func TestMain(m *testing.M) {
 	cfg, err := envconf.NewFromFlags()
@@ -77,70 +97,218 @@ func TestMain(m *testing.M) {
 	os.Exit(testEnv.Run(m))
 }
 
-func TestProbeSemantics(t *testing.T) {
-	feature := features.New("cube-kri probe semantics").
-		WithLabel("scope", "probe").
-		Assess("semantic-liveness-exec-restart", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
-			runProbeRestartCase(ctx, t, cfg, "semantic-liveness-exec-restart", probePodSpec{
-				NameSuffix: "liveness-exec",
-				Command:    []string{"/bin/sh", "-c", "touch /tmp/healthy; sleep 5; rm -f /tmp/healthy; sleep 3600"},
-				Liveness: &corev1.Probe{
-					ProbeHandler:        corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", "test -f /tmp/healthy"}}},
-					InitialDelaySeconds: 1,
-					PeriodSeconds:       2,
-					FailureThreshold:    1,
-					TimeoutSeconds:      1,
-				},
-			})
-			return ctx
-		}).
-		Assess("semantic-liveness-http-restart", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
-			runProbeRestartCase(ctx, t, cfg, "semantic-liveness-http-restart", probePodSpec{
-				NameSuffix: "liveness-http",
-				Command:    []string{"/bin/sh", "-c", "mkdir -p /www; echo ok > /www/healthz; httpd -f -p 8080 -h /www & sleep 5; rm -f /www/healthz; sleep 3600"},
-				Ports:      []corev1.ContainerPort{{ContainerPort: 8080}},
-				Liveness: &corev1.Probe{
-					ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(8080)}},
-					InitialDelaySeconds: 1,
-					PeriodSeconds:       2,
-					FailureThreshold:    1,
-					TimeoutSeconds:      1,
-				},
-			})
-			return ctx
-		}).
-		Assess("semantic-liveness-tcp-restart", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
-			runProbeRestartCase(ctx, t, cfg, "semantic-liveness-tcp-restart", probePodSpec{
-				NameSuffix: "liveness-tcp",
-				Command:    []string{"/bin/sh", "-c", "mkdir -p /www; httpd -f -p 8081 -h /www & pid=$!; sleep 5; kill ${pid}; sleep 3600"},
-				Ports:      []corev1.ContainerPort{{ContainerPort: 8081}},
-				Liveness: &corev1.Probe{
-					ProbeHandler:        corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(8081)}},
-					InitialDelaySeconds: 1,
-					PeriodSeconds:       2,
-					FailureThreshold:    1,
-					TimeoutSeconds:      1,
-				},
-			})
-			return ctx
-		}).
-		Assess("semantic-readiness-exec-not-ready", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
-			runReadinessNegativeCase(ctx, t, cfg, probePodSpec{
-				NameSuffix: "ready-exec",
-				Command:    []string{"/bin/sh", "-c", "sleep 3600"},
-				Readiness: &corev1.Probe{
-					ProbeHandler:        corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", "test -f /tmp/ready"}}},
-					InitialDelaySeconds: 1,
-					PeriodSeconds:       2,
-					FailureThreshold:    1,
-					TimeoutSeconds:      1,
-				},
-			})
-			return ctx
-		}).
-		Feature()
+func addCubePathAssessments(builder *features.FeatureBuilder, name string, assessment features.Func) {
+	builder.Assess(name+"-cold", assessCubeSandboxPath(sandboxPathCold, assessment))
+	builder.Assess(name+"-template", assessCubeSandboxPath(sandboxPathTemplate, assessment))
+}
 
-	testEnv.Test(t, feature)
+func assessCubeSandboxPath(path string, assessment features.Func) features.Func {
+	return func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		client := clientset(t, cfg)
+		node := resolvedCubeNode(ctx, t, client)
+		if path == sandboxPathTemplate {
+			ensureTemplateRestoreReady(ctx, t, cfg, client, node)
+		}
+		before := readSandboxPathCounters(ctx, t, client, node)
+		result := assessment(context.WithValue(ctx, sandboxPathContextKey{}, path), t, cfg)
+		waitSandboxPath(ctx, t, client, node, path, before)
+		return result
+	}
+}
+
+type sandboxPathCounters struct {
+	Template float64
+	Cold     float64
+}
+
+func ensureTemplateRestoreReady(ctx context.Context, t *testing.T, cfg *envconf.Config, client *kubernetes.Clientset, node string) {
+	t.Helper()
+	templatePathPreparation.Lock()
+	defer templatePathPreparation.Unlock()
+	if templatePathPreparation.ready {
+		return
+	}
+	if *templatePrepareTimeout <= 0 {
+		t.Fatal("template-prepare-timeout must be > 0")
+	}
+	before := readSandboxPathCounters(ctx, t, client, node)
+	deadline := time.Now().Add(*templatePrepareTimeout)
+	templateCtx := context.WithValue(ctx, sandboxPathContextKey{}, sandboxPathTemplate)
+	for attempt := 1; time.Now().Before(deadline); attempt++ {
+		pod := cubePod(t, templateCtx, cfg, client, fmt.Sprintf("template-prime-%d", attempt), corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers:    []corev1.Container{pauseContainer("main")},
+		})
+		createPod(templateCtx, t, client, pod)
+		waitPodReady(templateCtx, t, client, pod.Namespace, pod.Name, *semanticTimeout)
+		cleanupPod(templateCtx, t, client, pod)
+
+		current := readSandboxPathCounters(templateCtx, t, client, node)
+		if current.Template > before.Template {
+			templatePathPreparation.ready = true
+			return
+		}
+		if err := sleepWithContext(templateCtx, time.Second); err != nil {
+			t.Fatalf("wait for template restore readiness: %v", err)
+		}
+	}
+	t.Fatalf("template path did not become ready within %s; before=%+v current=%+v", *templatePrepareTimeout, before, readSandboxPathCounters(ctx, t, client, node))
+}
+
+func waitSandboxPath(ctx context.Context, t *testing.T, client *kubernetes.Clientset, node, path string, before sandboxPathCounters) {
+	t.Helper()
+	if *pathVerifyTimeout <= 0 {
+		t.Fatal("sandbox-path-verify-timeout must be > 0")
+	}
+	var last sandboxPathCounters
+	err := wait.PollUntilContextTimeout(ctx, time.Second, *pathVerifyTimeout, true, func(ctx context.Context) (bool, error) {
+		last = readSandboxPathCounters(ctx, t, client, node)
+		switch path {
+		case sandboxPathCold:
+			if last.Template > before.Template {
+				return false, fmt.Errorf("unexpected template-derived sandbox: before=%+v current=%+v", before, last)
+			}
+			return last.Cold > before.Cold, nil
+		case sandboxPathTemplate:
+			if last.Cold > before.Cold {
+				return false, fmt.Errorf("template path fell back to cold start: before=%+v current=%+v", before, last)
+			}
+			return last.Template > before.Template, nil
+		default:
+			return false, fmt.Errorf("unknown sandbox path %q", path)
+		}
+	})
+	if err != nil {
+		t.Fatalf("verify %s sandbox path within %s: %v; before=%+v current=%+v", path, *pathVerifyTimeout, err, before, last)
+	}
+}
+
+func readSandboxPathCounters(ctx context.Context, t *testing.T, client *kubernetes.Clientset, node string) sandboxPathCounters {
+	t.Helper()
+	pods, err := client.CoreV1().Pods(*prometheusNamespace).List(ctx, metav1.ListOptions{LabelSelector: *prometheusSelector})
+	if err != nil || len(pods.Items) != 1 {
+		t.Fatalf("find Prometheus pod namespace=%q selector=%q: pods=%d err=%v", *prometheusNamespace, *prometheusSelector, len(pods.Items), err)
+	}
+	query := fmt.Sprintf(`sum by (operation) (cube_cri_operations_total{node=%q,component="shim",operation=~"TemplateDerivedSandbox|ColdStartSandbox",result="ok"})`, node)
+	raw, err := client.CoreV1().RESTClient().Get().
+		Namespace(*prometheusNamespace).
+		Resource("pods").
+		Name(pods.Items[0].Name).
+		SubResource("proxy").
+		Suffix("api", "v1", "query").
+		Param("query", query).
+		DoRaw(ctx)
+	if err != nil {
+		t.Fatalf("query Prometheus sandbox path counters: %v", err)
+	}
+	var response struct {
+		Status string `json:"status"`
+		Data   struct {
+			Result []struct {
+				Metric map[string]string `json:"metric"`
+				Value  []json.RawMessage `json:"value"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil || response.Status != "success" {
+		t.Fatalf("decode Prometheus sandbox path counters: status=%q err=%v body=%s", response.Status, err, raw)
+	}
+	var counters sandboxPathCounters
+	for _, result := range response.Data.Result {
+		if len(result.Value) != 2 {
+			t.Fatalf("invalid Prometheus sample for %q: %s", result.Metric["operation"], result.Value)
+		}
+		var value string
+		if err := json.Unmarshal(result.Value[1], &value); err != nil {
+			t.Fatalf("decode Prometheus counter %q: %v", result.Metric["operation"], err)
+		}
+		count, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			t.Fatalf("parse Prometheus counter %q=%q: %v", result.Metric["operation"], value, err)
+		}
+		switch result.Metric["operation"] {
+		case "TemplateDerivedSandbox":
+			counters.Template = count
+		case "ColdStartSandbox":
+			counters.Cold = count
+		}
+	}
+	return counters
+}
+
+func sleepWithContext(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func TestProbeSemantics(t *testing.T) {
+	builder := features.New("cube-kri probe semantics").WithLabel("scope", "probe")
+	addCubePathAssessments(builder, "semantic-liveness-exec-restart", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		runProbeRestartCase(ctx, t, cfg, "semantic-liveness-exec-restart", probePodSpec{
+			NameSuffix: "liveness-exec",
+			Command:    []string{"/bin/sh", "-c", "touch /tmp/healthy; sleep 5; rm -f /tmp/healthy; sleep 3600"},
+			Liveness: &corev1.Probe{
+				ProbeHandler:        corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", "test -f /tmp/healthy"}}},
+				InitialDelaySeconds: 1,
+				PeriodSeconds:       2,
+				FailureThreshold:    1,
+				TimeoutSeconds:      1,
+			},
+		})
+		return ctx
+	})
+	addCubePathAssessments(builder, "semantic-liveness-http-restart", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		runProbeRestartCase(ctx, t, cfg, "semantic-liveness-http-restart", probePodSpec{
+			NameSuffix: "liveness-http",
+			Command:    []string{"/bin/sh", "-c", "mkdir -p /www; echo ok > /www/healthz; httpd -f -p 8080 -h /www & sleep 5; rm -f /www/healthz; sleep 3600"},
+			Ports:      []corev1.ContainerPort{{ContainerPort: 8080}},
+			Liveness: &corev1.Probe{
+				ProbeHandler:        corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(8080)}},
+				InitialDelaySeconds: 1,
+				PeriodSeconds:       2,
+				FailureThreshold:    1,
+				TimeoutSeconds:      1,
+			},
+		})
+		return ctx
+	})
+	addCubePathAssessments(builder, "semantic-liveness-tcp-restart", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		runProbeRestartCase(ctx, t, cfg, "semantic-liveness-tcp-restart", probePodSpec{
+			NameSuffix: "liveness-tcp",
+			Command:    []string{"/bin/sh", "-c", "mkdir -p /www; httpd -f -p 8081 -h /www & pid=$!; sleep 5; kill ${pid}; sleep 3600"},
+			Ports:      []corev1.ContainerPort{{ContainerPort: 8081}},
+			Liveness: &corev1.Probe{
+				ProbeHandler:        corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(8081)}},
+				InitialDelaySeconds: 1,
+				PeriodSeconds:       2,
+				FailureThreshold:    1,
+				TimeoutSeconds:      1,
+			},
+		})
+		return ctx
+	})
+	addCubePathAssessments(builder, "semantic-readiness-exec-not-ready", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+		runReadinessNegativeCase(ctx, t, cfg, probePodSpec{
+			NameSuffix: "ready-exec",
+			Command:    []string{"/bin/sh", "-c", "sleep 3600"},
+			Readiness: &corev1.Probe{
+				ProbeHandler:        corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", "test -f /tmp/ready"}}},
+				InitialDelaySeconds: 1,
+				PeriodSeconds:       2,
+				FailureThreshold:    1,
+				TimeoutSeconds:      1,
+			},
+		})
+		return ctx
+	})
+
+	testEnv.Test(t, builder.Feature())
 }
 
 func TestLatency(t *testing.T) {
@@ -148,12 +316,10 @@ func TestLatency(t *testing.T) {
 		t.Skip("probe-only=true")
 	}
 
-	feature := features.New("cube-kri latency").
-		WithLabel("scope", "latency").
-		Assess("latency-concurrent-cube-pods", assessConcurrentLatency).
-		Feature()
+	builder := features.New("cube-kri latency").WithLabel("scope", "latency")
+	addCubePathAssessments(builder, "latency-concurrent-cube-pods", assessConcurrentLatency)
 
-	testEnv.Test(t, feature)
+	testEnv.Test(t, builder.Feature())
 }
 
 func TestCoreSemantics(t *testing.T) {
@@ -161,35 +327,49 @@ func TestCoreSemantics(t *testing.T) {
 		t.Skip("probe-only=true")
 	}
 
-	feature := features.New("cube-kri core pod semantics").
-		WithLabel("scope", "core").
-		Assess("semantic-securitycontext-privileged", assessReadyPod("semantic-securitycontext-privileged", corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
-			Containers: []corev1.Container{baseContainer("main", []string{"/bin/sh", "-c", "sleep 3600"}, func(c *corev1.Container) {
-				c.SecurityContext = &corev1.SecurityContext{Privileged: boolPtr(true)}
-			})},
-		})).
-		Assess("semantic-initcontainer-emptydir", assessReadyPod("semantic-initcontainer-emptydir", corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
-			Volumes:       []corev1.Volume{{Name: "work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
-			InitContainers: []corev1.Container{baseContainer("init-one", []string{"/bin/sh", "-c", "echo init > /work/init.done"}, func(c *corev1.Container) {
-				c.VolumeMounts = []corev1.VolumeMount{{Name: "work", MountPath: "/work"}}
-			})},
-			Containers: []corev1.Container{baseContainer("main", []string{"/bin/sh", "-c", "test -f /work/init.done && sleep 3600"}, func(c *corev1.Container) {
-				c.VolumeMounts = []corev1.VolumeMount{{Name: "work", MountPath: "/work"}}
-			})},
-		})).
-		Assess("semantic-multicontainer", assessReadyPod("semantic-multicontainer", corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
-			Containers: []corev1.Container{
-				baseContainer("one", []string{"/bin/sh", "-c", "sleep 3600"}),
-				baseContainer("two", []string{"/bin/sh", "-c", "sleep 3600"}),
-			},
-		})).
-		Assess("semantic-lifecycle-poststart-prestop-exec", assessLifecyclePod).
-		Feature()
+	builder := features.New("cube-kri core pod semantics").WithLabel("scope", "core")
+	addCubePathAssessments(builder, "semantic-securitycontext-privileged", assessReadyPod("semantic-securitycontext-privileged", corev1.PodSpec{
+		RestartPolicy: corev1.RestartPolicyNever,
+		Containers: []corev1.Container{baseContainer("main", []string{"/bin/sh", "-c", "sleep 3600"}, func(c *corev1.Container) {
+			c.SecurityContext = &corev1.SecurityContext{Privileged: boolPtr(true)}
+		})},
+	}))
+	addCubePathAssessments(builder, "semantic-initcontainer-emptydir", assessReadyPod("semantic-initcontainer-emptydir", corev1.PodSpec{
+		RestartPolicy: corev1.RestartPolicyNever,
+		Volumes:       []corev1.Volume{{Name: "work", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+		InitContainers: []corev1.Container{baseContainer("init-one", []string{"/bin/sh", "-c", "echo init > /work/init.done"}, func(c *corev1.Container) {
+			c.VolumeMounts = []corev1.VolumeMount{{Name: "work", MountPath: "/work"}}
+		})},
+		Containers: []corev1.Container{baseContainer("main", []string{"/bin/sh", "-c", "test -f /work/init.done && sleep 3600"}, func(c *corev1.Container) {
+			c.VolumeMounts = []corev1.VolumeMount{{Name: "work", MountPath: "/work"}}
+		})},
+	}))
+	addCubePathAssessments(builder, "semantic-multicontainer", assessReadyPod("semantic-multicontainer", corev1.PodSpec{
+		RestartPolicy: corev1.RestartPolicyNever,
+		Containers: []corev1.Container{
+			baseContainer("one", []string{"/bin/sh", "-c", "sleep 3600"}),
+			baseContainer("two", []string{"/bin/sh", "-c", "sleep 3600"}),
+		},
+	}))
+	addCubePathAssessments(builder, "semantic-multicontainer-dns-bind", assessReadyPod("semantic-multicontainer-dns-bind", corev1.PodSpec{
+		RestartPolicy: corev1.RestartPolicyNever,
+		Containers: []corev1.Container{
+			pauseContainer("main"),
+			baseContainer("worker", nil, func(c *corev1.Container) {
+				// nginx keeps an ordinary /etc/resolv.conf in its image. This
+				// catches a directory DNS source being bind-mounted over a file
+				// in the second container.
+				c.Image = "ccr.ccs.tencentyun.com/journeyyou/nginx:latest"
+			}),
+		},
+	}))
+	addCubePathAssessments(builder, "semantic-template-mode", assessReadyPod("semantic-template-mode", corev1.PodSpec{
+		RestartPolicy: corev1.RestartPolicyNever,
+		Containers:    []corev1.Container{pauseContainer("main")},
+	}))
+	addCubePathAssessments(builder, "semantic-lifecycle-poststart-prestop-exec", assessLifecyclePod)
 
-	testEnv.Test(t, feature)
+	testEnv.Test(t, builder.Feature())
 }
 
 func TestRuntimeMix(t *testing.T) {
@@ -214,12 +394,10 @@ func TestAWVCSIPVC(t *testing.T) {
 		t.Skip("probe-only=true")
 	}
 
-	feature := features.New("cube-kri awv-csi pvc").
-		WithLabel("scope", "storage").
-		Assess("awv-csi-pvc-cube-pod-read-write", assessAWVCSIPVCCubePod).
-		Feature()
+	builder := features.New("cube-kri awv-csi pvc").WithLabel("scope", "storage")
+	addCubePathAssessments(builder, "awv-csi-pvc-cube-pod-read-write", assessAWVCSIPVCCubePod)
 
-	testEnv.Test(t, feature)
+	testEnv.Test(t, builder.Feature())
 }
 
 type probePodSpec struct {
@@ -730,6 +908,7 @@ func createPod(ctx context.Context, t *testing.T, client *kubernetes.Clientset, 
 }
 
 func createPodErr(ctx context.Context, client *kubernetes.Clientset, pod *corev1.Pod) error {
+	applySandboxPath(ctx, pod)
 	if err := client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete stale pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
@@ -741,6 +920,22 @@ func createPodErr(ctx context.Context, client *kubernetes.Clientset, pod *corev1
 		return fmt.Errorf("create pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 	return nil
+}
+
+func applySandboxPath(ctx context.Context, pod *corev1.Pod) {
+	path, ok := ctx.Value(sandboxPathContextKey{}).(string)
+	if !ok || pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "cube" {
+		return
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = make(map[string]string)
+	}
+	switch path {
+	case sandboxPathCold:
+		pod.Annotations[templateModeAnnotation] = "cold"
+	case sandboxPathTemplate:
+		pod.Annotations[templateModeAnnotation] = "auto"
+	}
 }
 
 func cleanupPods(ctx context.Context, t *testing.T, client *kubernetes.Clientset, pods []*corev1.Pod) {

@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="760" viewBox="0 0 960 760" role="img" aria-labelledby="title desc">
+  <title id="title">Cube CRI 基础模板生命周期（方案草案）</title>
+  <desc id="desc">运行时发布、新增规格，或普通 miss 的异步需求在确认没有可复用制品后触发制作。复用 Cube 工具，在 Agent 就绪但未 CreateSandbox 时封存，验证后发布不可变制品；已有制品则跳过制作，直接后台准备。节点准备完成后，多个 Pod 可并发引用同一版本。退役先停止新增引用，等待全部实例依赖解除，满足保留策略后才能 GC；更新不重启存量 Pod。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 1 1 L 9 5 L 1 9 Z" fill="#52657d"/>
+    </marker>
+    <style>
+      text { font-family: "Noto Sans CJK SC", "Microsoft YaHei", "Droid Sans Fallback", sans-serif; fill: #182b45; }
+      .title { font-size: 28px; font-weight: 700; }
+      .phase { font-size: 19px; font-weight: 700; fill: #52657d; }
+      .label { font-size: 22px; font-weight: 700; text-anchor: middle; }
+      .detail { font-size: 18px; text-anchor: middle; fill: #43566f; }
+      .note { font-size: 18px; fill: #43566f; }
+      .card { fill: #eff5ff; stroke: #8aa9d5; stroke-width: 1.6; }
+      .ready { fill: #eaf8f0; stroke: #65a787; stroke-width: 1.6; }
+      .retire { fill: #fff7e8; stroke: #c5a165; stroke-width: 1.6; }
+      .edge { fill: none; stroke: #52657d; stroke-width: 2.2; stroke-linejoin: round; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect x="1" y="1" width="958" height="758" rx="18" fill="#ffffff" stroke="#dce4ee"/>
+  <text class="title" x="40" y="50">基础模板：按需制作，并发复用，按依赖回收</text>
+  <rect x="822" y="24" width="98" height="34" rx="17" fill="#eff2f6"/>
+  <text class="note" x="871" y="47" text-anchor="middle">方案草案</text>
+
+  <!-- 第一行：发布流程。手工布局，顺箭头按蛇形阅读。 -->
+  <text class="phase" x="40" y="102">01 / 异步制作与验证 · 不进入 Pod 请求路径</text>
+  <path class="edge" d="M 300 176 H 350"/>
+  <path class="edge" d="M 610 176 H 660"/>
+  <path class="edge" d="M 790 230 V 320"/>
+  <g id="release-trigger">
+    <rect class="card" x="40" y="122" width="260" height="108" rx="12"/>
+    <text class="label" x="170" y="155">预制 / 合规 miss 触发</text>
+    <text class="detail" x="170" y="185">运行时发布 / 新规格</text>
+    <text class="detail" x="170" y="211">或 miss 后无现成制品</text>
+  </g>
+  <g id="build-base">
+    <rect class="card" x="350" y="122" width="260" height="108" rx="12"/>
+    <text class="label" x="480" y="155">复用 Cube 工具制模</text>
+    <text class="detail" x="480" y="185">Agent 已就绪</text>
+    <text class="detail" x="480" y="211">尚未执行 CreateSandbox</text>
+  </g>
+  <g id="seal-verify">
+    <rect class="card" x="660" y="122" width="260" height="108" rx="12"/>
+    <text class="label" x="790" y="155">一致性封存与验证</text>
+    <text class="detail" x="790" y="185">无业务状态、身份或凭证</text>
+    <text class="detail" x="790" y="211">验证恢复、隔离和源不变</text>
+  </g>
+  <text class="note" x="810" y="278">通过</text>
+
+  <!-- 第二行：从已发布版本到节点可选，方向从右向左。 -->
+  <text class="phase" x="40" y="300">02 / 发布与节点准备 · 同一源版本可被多个 Pod 引用</text>
+  <path class="edge" d="M 660 374 H 610"/>
+  <path class="edge" d="M 350 374 H 300"/>
+  <path class="edge" d="M 170 428 V 466 H 20 V 572 H 40"/>
+  <g id="publish-immutable">
+    <rect class="card" x="660" y="320" width="260" height="108" rx="12"/>
+    <text class="label" x="790" y="353">发布不可变制品</text>
+    <text class="detail" x="790" y="383">版本 / digest + 全部依赖</text>
+    <text class="detail" x="790" y="409">新版本不覆盖旧版本</text>
+  </g>
+  <g id="node-prepare">
+    <rect class="card" x="350" y="320" width="260" height="108" rx="12"/>
+    <text class="label" x="480" y="353">节点后台准备</text>
+    <text class="detail" x="480" y="383">下载、校验、恢复探测</text>
+    <text class="detail" x="480" y="409">就绪后原子切换候选</text>
+  </g>
+  <g id="node-ready">
+    <rect class="ready" x="40" y="320" width="260" height="108" rx="12"/>
+    <text class="label" x="170" y="353">可用 · 并发共享引用</text>
+    <text class="detail" x="170" y="383">每个沙箱固定具体版本</text>
+    <text class="detail" x="170" y="409">独立 VM / 私有可写状态</text>
+  </g>
+  <text class="note" x="190" y="469">退役 / 淘汰</text>
+
+  <!-- 第三行：停止新增引用后等待存量实例退出，不能按 Pod API 状态删除。 -->
+  <text class="phase" x="40" y="498">03 / 退役与回收 · 更新不重启存量 Pod</text>
+  <path class="edge" d="M 300 572 H 350"/>
+  <path class="edge" d="M 610 572 H 660"/>
+  <g id="retire-version">
+    <rect class="retire" x="40" y="518" width="260" height="108" rx="12"/>
+    <text class="label" x="170" y="551">停止新增引用</text>
+    <text class="detail" x="170" y="581">新请求选兼容版本</text>
+    <text class="detail" x="170" y="607">否则按规则冷启动</text>
+  </g>
+  <g id="drain-dependencies">
+    <rect class="retire" x="350" y="518" width="260" height="108" rx="12"/>
+    <text class="label" x="480" y="551">等待全部依赖解除</text>
+    <text class="detail" x="480" y="581">存量 VM 继续运行</text>
+    <text class="detail" x="480" y="607">实例清理后释放引用</text>
+  </g>
+  <g id="template-gc">
+    <rect class="retire" x="660" y="518" width="260" height="108" rx="12"/>
+    <text class="label" x="790" y="551">按保留策略 GC</text>
+    <text class="detail" x="790" y="581">CRI + legacy 依赖归零</text>
+    <text class="detail" x="790" y="607">回收本地制品及依赖</text>
+  </g>
+
+  <path d="M 40 658 H 920" stroke="#dce4ee"/>
+  <text class="note" x="40" y="691">补齐：已有制品则跳过制作、直接后台下载；同 key 去重。验证失败或半成品不可选。</text>
+  <text class="note" x="40" y="723">保护：引用建立与 GC 互斥；重启后先对账，引用不确定时禁止 GC。远端制品单独保留。</text>
+</svg>

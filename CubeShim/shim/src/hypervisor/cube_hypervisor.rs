@@ -22,8 +22,8 @@ pub use cube_hypervisor::NotifyEvent;
 
 use super::config::PciDeviceInfo;
 use super::worker::{
-    extract_vm_fds, worker_backend_enabled, LaunchConfig, WorkerClient, WorkerCommand,
-    WorkerPlacement, WorkerReply,
+    extract_net_fds, extract_vm_fds, worker_backend_enabled, LaunchConfig, WorkerClient,
+    WorkerCommand, WorkerPlacement, WorkerReply,
 };
 
 const CALLE_ACTION_ADD_DEV_PRE: &str = "AddDevice";
@@ -271,9 +271,12 @@ impl CubeHypervisor {
         Ok(())
     }
 
-    pub async fn restore_vm(&self, config: config::RestoreConfig) -> CResult<()> {
+    /// Restore a VM. Fresh TAP descriptors are transferred to a worker with
+    /// SCM_RIGHTS because worker processes cannot use CubeShim's raw FD numbers.
+    pub async fn restore_vm(&self, mut config: config::RestoreConfig) -> CResult<()> {
         if let Some(worker) = &self.worker {
-            worker.request(WorkerCommand::RestoreVm(config), &[])?;
+            let fds = super::worker::extract_restore_fds(&mut config);
+            worker.request(WorkerCommand::RestoreVm(config), &fds)?;
             return Ok(());
         }
         let ch = self.ch.as_ref().unwrap().lock().await;
@@ -284,6 +287,31 @@ impl CubeHypervisor {
             .map_err(|e| self.status_err(format!("Restore vm failed:{}", e)))?
             .map_err(|e| self.status_err(format!("Restore vm failed:{}", e)))?;
         stat.set_ok();
+        Ok(())
+    }
+
+    pub async fn add_net(&self, mut config: cube_hypervisor::vm_config::NetConfig) -> CResult<()> {
+        if let Some(worker) = &self.worker {
+            let fds = extract_net_fds(&mut config);
+            worker.request(WorkerCommand::AddNet(config), &fds)?;
+            return Ok(());
+        }
+        let ch = self.ch.as_ref().unwrap().lock().await;
+        ch.send_request(ApiRequest::VmAddNet(Arc::new(config)))
+            .map_err(|e| self.status_err(format!("Add network failed:{e}")))?
+            .map_err(|e| self.status_err(format!("Add network failed:{e}")))?;
+        Ok(())
+    }
+
+    pub async fn add_fs(&self, config: FsConfig) -> CResult<()> {
+        if let Some(worker) = &self.worker {
+            worker.request(WorkerCommand::AddFs(config), &[])?;
+            return Ok(());
+        }
+        let ch = self.ch.as_ref().unwrap().lock().await;
+        ch.send_request(ApiRequest::VmAddFs(Arc::new(config)))
+            .map_err(|e| self.status_err(format!("Add fs failed:{e}")))?
+            .map_err(|e| self.status_err(format!("Add fs failed:{e}")))?;
         Ok(())
     }
 

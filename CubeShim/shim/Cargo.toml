@@ -12,6 +12,10 @@ path = "src/main.rs"
 name = "cube-vmm-worker"
 path = "src/bin/cube-vmm-worker.rs"
 
+[[bin]]
+name = "cube-template-builder"
+path = "src/bin/cube-template-builder.rs"
+
 [features]
 default = ["async"]
 async =["async-trait","containerd-shim-protos/async", "containerd-shim/async", "futures"]

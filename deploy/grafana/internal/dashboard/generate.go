@@ -40,7 +40,10 @@ func panels() []any {
 		row(1, "端到端启动定位", 0),
 		timeseriesWidth(30, "Kubelet Pod 启动耗时 P95", 1, 0, 8, "s", false, kubeletPodStartP95()),
 		timeseriesWidth(2, "Sandbox 创建总耗时", 1, 8, 8, "s", false, quantiles("shim", "CreatePodSandbox")),
-		timeseriesWidth(3, "Sandbox 创建结果速率", 1, 16, 8, "ops", true, []query{{"sum by (result) (rate(cube_cri_operations_total{node=~\"$node\",component=\"shim\",operation=\"CreatePodSandbox\"}[$__rate_interval]))", "{{result}}"}}),
+		timeseriesWidth(3, "模板派生与冷启动沙箱事件速率", 1, 16, 8, "ops", true, []query{
+			{"sum(rate(cube_cri_operations_total{node=~\"$node\",component=\"shim\",operation=\"TemplateDerivedSandbox\",result=\"ok\"}[$__rate_interval]))", "模板派生"},
+			{"sum(rate(cube_cri_operations_total{node=~\"$node\",component=\"shim\",operation=\"ColdStartSandbox\",result=\"ok\"}[$__rate_interval]))", "冷启动"},
+		}),
 
 		row(32, "Kubernetes 控制链路", 9),
 		timeseries(34, "Kubelet 与 CRI（RunPodSandbox 含 CNI）P95", 10, 0, "s", false, kubeletRuntimeP95()),

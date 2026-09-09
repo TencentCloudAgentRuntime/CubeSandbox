@@ -1,6 +1,6 @@
 # Cube CRI e2e-framework 测试
 
-迁移自 `agc-cubesandbox-beta/testsuite/e2e-framework`，包含 15 个集群用例：探针 4 个、并发启动延迟 1 个、基础语义 4 个、cube/runc 混跑 5 个、AWV CSI 跨运行时读写 1 个。
+迁移自 `agc-cubesandbox-beta/testsuite/e2e-framework`。所有 Cube 用例均执行 `cold` 和 `auto` 两次；runc 对照用例只执行一次。
 
 从仓库根目录运行（自动加载 `local.env`，可用 `CUBE_CRI_ENV` 指定配置文件）：
 
@@ -11,12 +11,13 @@ UTILITY_IMAGE=mirror.ccs.tencentyun.com/library/busybox:1.36.1 \
 
 目标 cube 节点须已部署运行时并使用 TS4；省略 `--cube-node` 时选择带 `cubesandbox.io/runtime=cube` 标签的可调度 Ready TS4 节点。`--runc-node` 指定另一台物理节点；AWV CSI 用例要求两台节点均已部署对应 CSI 插件和 `awv-btrfs` StorageClass。
 
-privileged 正向用例要求节点已配置 `CUBE_ALLOW_PRIVILEGED=true`，当前部署脚本默认开启；旧节点需更新配置，测试本身不修改开关。框架遇到致命断言会中止同组剩余用例，可通过 `--assess` 单独补跑。
+privileged 正向用例要求节点已配置 `CUBE_ALLOW_PRIVILEGED=true`，当前部署脚本默认开启；旧节点需更新配置，测试本身不修改开关。模板路径会先以同规格 Pod 预热，且每个用例通过 Prometheus 的 `TemplateDerivedSandbox`/`ColdStartSandbox` 增量验证实际路径；因此须先执行 `task deploy:monitoring`，默认读取 `cube-cri-monitoring` 命名空间中 `app=cube-cri-prometheus` Pod。框架遇到致命断言会中止同组剩余用例，可通过 `--assess` 单独补跑。
 
 ```bash
 task test:e2e-framework -- --probe-only --cube-node 10.0.244.112
 task test:e2e-framework -- --feature runtime --cube-node 10.0.244.112
 task test:e2e-framework -- --feature probe --assess 'http|tcp' --cube-node 10.0.244.112
+task test:e2e-framework -- --feature core --assess 'multicontainer.*-(cold|template)' --cube-node 10.0.244.112
 task test:e2e-framework -- --help
 ```
 
@@ -30,7 +31,7 @@ task test:e2e-framework -- --help
 task test:e2e-framework -- --feature latency --cube-node 10.0.244.241
 ```
 
-`--latency-count` 为 Pod 总数，`--latency-concurrency` 限制同时进行的 Create 请求数，二者默认均为 100。提交后不等待 Ready 即继续提交。对应环境变量为 `LATENCY_COUNT`、`LATENCY_CONCURRENCY`、`LATENCY_TIMEOUT`、`LATENCY_OUTPUT_DIR`。
+`--latency-count` 为每条路径的 Pod 总数，`--latency-concurrency` 限制同时进行的 Create 请求数，二者默认均为 100。提交后不等待 Ready 即继续提交。用例依次输出 `…-cold` 和 `…-template` 两组结果，不能混合计算分位数。对应环境变量为 `LATENCY_COUNT`、`LATENCY_CONCURRENCY`、`LATENCY_TIMEOUT`、`LATENCY_OUTPUT_DIR`、`TEMPLATE_PREPARE_TIMEOUT`、`SANDBOX_PATH_VERIFY_TIMEOUT`。
 
 Pod 总数须按节点剩余资源及 RuntimeClass 的 `overhead` 选择，降低 Create 并发度不会减少最终驻留的 Pod 数。
 

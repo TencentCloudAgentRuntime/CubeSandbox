@@ -29,10 +29,12 @@ import (
 )
 
 type Assets struct {
-	KernelPath     string
-	AgentPath      string
-	GuestImagePath string
-	SharedRootBase string
+	KernelPath      string
+	AgentPath       string
+	GuestImagePath  string
+	SharedRootBase  string
+	TemplateRoot    string
+	TemplateBuilder string
 }
 
 type NetworkOps interface {
@@ -77,6 +79,7 @@ type adapter struct {
 	metrics     *crimetrics.Metrics
 	stateDir    string
 	assets      Assets
+	templates   *templateResolver
 	network     NetworkOps
 	persistHook func(prepareStage, *diskRecord) error
 	tapFiles    map[string]*os.File
@@ -152,8 +155,12 @@ func newAdapter(stateDir string, assets Assets, network NetworkOps) (*adapter, e
 		return nil, fmt.Errorf("runtime resource shared root must resolve absolute: %q", sharedRootBase)
 	}
 	assets.SharedRootBase = filepath.Clean(sharedRootBase)
+	templates, err := newTemplateResolver(assets.TemplateRoot, assets.TemplateBuilder)
+	if err != nil {
+		return nil, err
+	}
 	return &adapter{
-		operations: kmutex.New(), stateDir: stateDir, assets: assets, network: network, tapFiles: make(map[string]*os.File),
+		operations: kmutex.New(), stateDir: stateDir, assets: assets, templates: templates, network: network, tapFiles: make(map[string]*os.File),
 		closeTap: func(file *os.File) error { return file.Close() }, cleanup: defaultSharedRootCleanupOps(),
 	}, nil
 }
@@ -192,11 +199,22 @@ func (a *adapter) Prepare(ctx context.Context, request *runtimev1.PrepareSandbox
 	tapName := nameFor("cb", request.GetSandboxId(), request.GetGeneration())
 	sharedRoot := filepath.Join(a.assets.SharedRootBase, nameFor("sb-", request.GetSandboxId(), request.GetGeneration()))
 	handle := nameFor("net-", request.GetSandboxId()+lease.LeaseID, request.GetGeneration())
+	runtimeAssets := &runtimev1.RuntimeAssets{KernelPath: a.assets.KernelPath, AgentPath: a.assets.AgentPath, GuestImagePath: a.assets.GuestImagePath, SharedRoot: sharedRoot}
+	if request.GetTemplateMode() != "" && request.GetTemplateMode() != templateModeAuto && request.GetTemplateMode() != templateModeCold {
+		return nil, fmt.Errorf("invalid template mode %q", request.GetTemplateMode())
+	}
+	if template, err := a.templates.resolveForMode(request.GetTemplateMode(), request.GetResources(), a.assets); err != nil {
+		return nil, err
+	} else if template != nil {
+		runtimeAssets.SnapshotBase = template.SnapshotBase
+		runtimeAssets.SnapshotMemoryVolUrl = template.SnapshotMemoryVolURL
+		runtimeAssets.TemplateKey = template.TemplateKey
+	}
 	record := &diskRecord{
 		Stage: stageIntent, SandboxID: request.GetSandboxId(), Generation: request.GetGeneration(), LeaseID: lease.LeaseID,
 		NetworkHandle: handle, NetNSPath: request.GetNetwork().GetNetnsPath(), InterfaceName: request.GetNetwork().GetInterfaceName(), TapName: tapName,
 		PodUID: request.GetPod().GetUid(), OperationID: request.GetSandboxId(),
-		Assets:  &runtimev1.RuntimeAssets{KernelPath: a.assets.KernelPath, AgentPath: a.assets.AgentPath, GuestImagePath: a.assets.GuestImagePath, SharedRoot: sharedRoot},
+		Assets:  runtimeAssets,
 		Network: &runtimev1.NetworkAttachment{NetworkHandle: handle, TapName: tapName, GuestInterfaceName: "eth0"},
 	}
 	if err := a.persistStage(record, stageIntent, trace); err != nil {

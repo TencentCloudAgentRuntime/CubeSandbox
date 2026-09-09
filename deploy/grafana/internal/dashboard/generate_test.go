@@ -45,6 +45,21 @@ func TestGenerate(t *testing.T) {
 	if strings.Join(gotRows, ",") != strings.Join(wantRows, ",") {
 		t.Fatalf("rows=%v, want %v", gotRows, wantRows)
 	}
+	startPathPanelFound := false
+	for i := range dashboard.Panels {
+		if dashboard.Panels[i].Title == "模板派生与冷启动沙箱事件速率" {
+			if len(dashboard.Panels[i].Targets) != 2 ||
+				!strings.Contains(dashboard.Panels[i].Targets[0].Expr, "TemplateDerivedSandbox") ||
+				!strings.Contains(dashboard.Panels[i].Targets[1].Expr, "ColdStartSandbox") {
+				t.Fatal("template-derived and cold-start panel targets are invalid")
+			}
+			startPathPanelFound = true
+			break
+		}
+	}
+	if !startPathPanelFound {
+		t.Fatal("missing template-derived and cold-start sandbox event panel")
+	}
 	for _, panel := range dashboard.Panels {
 		if panel.Title != "Kubelet Pod 启动耗时 P95" && panel.Title != "Kubelet 同步与 CRI P95" && panel.Title != "API Server Pod POST P95" {
 			continue

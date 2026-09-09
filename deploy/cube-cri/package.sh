@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 out=$PWD/_output/cube-cri
-files=(bin/cubelet-cri bin/containerd-shim-cube-rs bin/cube-vmm-worker assets/kernel assets/agent assets/guest.img)
+files=(bin/cubelet-cri bin/containerd-shim-cube-rs bin/cube-vmm-worker bin/cube-template-builder assets/kernel assets/agent assets/guest.img)
 for file in "${files[@]}"; do
   test -s "$out/$file" || { echo "缺少制品: $out/$file" >&2; exit 1; }
 done

@@ -30,6 +30,8 @@ pub const ANNO_VM_AGENT: &str = "cube.vm.agent.path";
 pub const ANNO_VM_OS_IMAGE: &str = "cube.vm.os-image.path";
 pub const ANNO_SNAPSHOT_BASE: &str = "cube.vm.snapshot.base.path";
 pub const ANNO_SNAPSHOT_MEMORY_VOL_URL: &str = "cube.vm.snapshot.memory_vol_url";
+/// Set only by RuntimeResource after it has selected a published CRI template.
+pub const ANNO_RUNTIME_TEMPLATE_KEY: &str = "cube.runtime.template.key";
 pub const ANNO_APP_SNAPSHOT_CREATE: &str = "cube.appsnapshot.create";
 pub const ANNO_APP_SNAPSHOT_RESTORE: &str = "cube.appsnapshot.restore";
 /// Present on CoW pause/resume recreates. Guest virtiofs mounts are already

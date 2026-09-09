@@ -385,7 +385,7 @@ func validatePrepare(request *runtimev1.PrepareSandboxRequest) error {
 }
 
 func desiredDigest(request *runtimev1.PrepareSandboxRequest) (string, error) {
-	desired := &runtimev1.PrepareSandboxRequest{SandboxId: request.GetSandboxId(), Generation: request.GetGeneration(), Pod: request.GetPod(), Resources: request.GetResources(), Network: request.GetNetwork()}
+	desired := &runtimev1.PrepareSandboxRequest{SandboxId: request.GetSandboxId(), Generation: request.GetGeneration(), Pod: request.GetPod(), Resources: request.GetResources(), Network: request.GetNetwork(), TemplateMode: request.GetTemplateMode()}
 	wire, err := proto.MarshalOptions{Deterministic: true}.Marshal(desired)
 	if err != nil {
 		return "", fmt.Errorf("encode normalized desired state: %w", err)

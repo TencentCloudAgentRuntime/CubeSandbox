@@ -34,6 +34,14 @@ Options:
   --latency-output-dir DIR
                            Write summary JSON and per-pod JSON to DIR.
   --latency-timeout DUR   Latency test timeout.
+  --prometheus-namespace NAME
+                           Prometheus namespace for sandbox-path verification.
+  --prometheus-selector SELECTOR
+                           Prometheus Pod selector for sandbox-path verification.
+  --template-prepare-timeout DUR
+                           Wait limit for a real template-restore path.
+  --sandbox-path-verify-timeout DUR
+                           Wait limit for each sandbox-path metric assertion.
   --awv-csi-storage-class NAME
                            StorageClass used by awv-csi PVC tests.
   --awv-csi-driver NAME    Expected CSI driver for awv-csi PVs.
@@ -57,6 +65,10 @@ while [[ $# -gt 0 ]]; do
     --latency-output-dir) extra_args+=("-latency-output-dir=$2"); shift 2 ;;
     --latency-concurrency) extra_args+=("-latency-concurrency=$2"); shift 2 ;;
     --latency-timeout) extra_args+=("-latency-timeout=$2"); shift 2 ;;
+    --prometheus-namespace) extra_args+=("-prometheus-namespace=$2"); shift 2 ;;
+    --prometheus-selector) extra_args+=("-prometheus-selector=$2"); shift 2 ;;
+    --template-prepare-timeout) extra_args+=("-template-prepare-timeout=$2"); shift 2 ;;
+    --sandbox-path-verify-timeout) extra_args+=("-sandbox-path-verify-timeout=$2"); shift 2 ;;
     --awv-csi-storage-class) extra_args+=("-awv-csi-storage-class=$2"); shift 2 ;;
     --awv-csi-driver) extra_args+=("-awv-csi-driver=$2"); shift 2 ;;
     --awv-csi-pvc-size) extra_args+=("-awv-csi-pvc-size=$2"); shift 2 ;;

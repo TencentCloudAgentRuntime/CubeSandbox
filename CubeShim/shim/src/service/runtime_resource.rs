@@ -45,6 +45,9 @@ const ANNO_VMM_FS: &str = "cube.fs";
 const ANNO_VIRTIOFS: &str = "cube.virtiofs";
 const ANNO_NET: &str = "cube.net";
 const ANNO_SNAPSHOT_DISABLE: &str = "cube.snapshot.disable";
+const ANNO_SNAPSHOT_BASE: &str = "cube.vm.snapshot.base.path";
+const ANNO_SNAPSHOT_MEMORY_VOL_URL: &str = "cube.vm.snapshot.memory_vol_url";
+const ANNO_RUNTIME_TEMPLATE_KEY: &str = "cube.runtime.template.key";
 const ANNO_USE_PASSFD_IO: &str = "cube.use_passfd_io";
 const ANNO_SANDBOX_UID: &str = "io.kubernetes.cri.sandbox-uid";
 const ANNO_SANDBOX_NAMESPACE: &str = "io.kubernetes.cri.sandbox-namespace";
@@ -53,6 +56,9 @@ const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const ANNO_SANDBOX_HOSTNAME: &str = "cube.sandbox.hostname";
 const ANNO_SANDBOX_PIDNS: &str = "cube.sandbox.pidns";
 const ANNO_SANDBOX_SYSCTLS: &str = "cube.sandbox.sysctls";
+const ANNO_TEMPLATE_MODE: &str = "agc.cloud.tencent.com/cube-template-mode";
+const TEMPLATE_MODE_AUTO: &str = "auto";
+const TEMPLATE_MODE_COLD: &str = "cold";
 const CRI_V1_POD_SANDBOX_CONFIG: &str = "runtime.v1.PodSandboxConfig";
 const RUNTIME_CLEANUP_RECORD: &str = "cube-runtime-resource.json";
 const RUNTIME_REAPER_ROOT_ENV: &str = "CUBE_RUNTIME_RESOURCE_REAPER_DIR";
@@ -287,6 +293,8 @@ struct PrepareSandboxRequest {
     resources: Option<ResourceRequest>,
     #[prost(message, optional, tag = "6")]
     network: Option<NetworkIntent>,
+    #[prost(string, tag = "7")]
+    template_mode: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -299,6 +307,12 @@ pub(crate) struct RuntimeAssets {
     pub(crate) guest_image_path: String,
     #[prost(string, tag = "4")]
     pub(crate) shared_root: String,
+    #[prost(string, tag = "5")]
+    pub(crate) snapshot_base: String,
+    #[prost(string, tag = "6")]
+    pub(crate) snapshot_memory_vol_url: String,
+    #[prost(string, tag = "7")]
+    pub(crate) template_key: String,
 }
 
 #[derive(Clone, PartialEq, Message, Serialize)]
@@ -1396,6 +1410,7 @@ async fn prepare_inner(
     let phase_started = Instant::now();
     let metadata = pod_metadata(config)?;
     let resources = plan.resources.clone();
+    let template_mode = template_mode(config)?;
     let generation = u64::from(metadata.attempt) + 1;
     let dns = cri_dns_entries(config.dns_config.as_ref())?;
     let idempotency_key = prepare_key(sandbox_id, generation);
@@ -1449,6 +1464,7 @@ async fn prepare_inner(
             pod_ip: String::new(),
             dns,
         }),
+        template_mode,
     };
     if let Some(lifecycle) = lifecycle.as_ref() {
         lifecycle.wait_test_failpoint("pre-runtime-prepare").await;
@@ -1617,6 +1633,20 @@ fn pod_metadata(config: &CriPodSandboxConfig) -> Result<&CriPodSandboxMetadata, 
         return Err("CRI PodSandboxConfig identity fields must be non-empty".to_string());
     }
     Ok(metadata)
+}
+
+fn template_mode(config: &CriPodSandboxConfig) -> Result<String, String> {
+    match config
+        .annotations
+        .get(ANNO_TEMPLATE_MODE)
+        .map(|mode| mode.trim())
+    {
+        None | Some("") | Some(TEMPLATE_MODE_AUTO) => Ok(TEMPLATE_MODE_AUTO.to_string()),
+        Some(TEMPLATE_MODE_COLD) => Ok(TEMPLATE_MODE_COLD.to_string()),
+        Some(mode) => Err(format!(
+            "invalid {ANNO_TEMPLATE_MODE}={mode:?}; expected {TEMPLATE_MODE_AUTO:?} or {TEMPLATE_MODE_COLD:?}"
+        )),
+    }
 }
 
 fn validate_capabilities(response: &GetCapabilitiesResponse) -> Result<(), String> {
@@ -1794,6 +1824,8 @@ fn inject_annotations(
         serde_json::json!({
             "cpu": resources.vcpu_count,
             "memory": resources.memory_bytes.div_ceil(1024 * 1024),
+            "preserve_memory": resources.memory_bytes.div_ceil(1024 * 1024),
+            "snap_memory": resources.memory_bytes.div_ceil(1024 * 1024),
         })
         .to_string(),
     );
@@ -1831,10 +1863,39 @@ fn inject_annotations(
         .to_string(),
     );
     annotations.insert(ANNO_NET.to_string(), network_json(network)?);
-    annotations.insert(ANNO_SNAPSHOT_DISABLE.to_string(), "true".to_string());
+    inject_template_annotations(&mut annotations, assets);
     annotations.insert(ANNO_USE_PASSFD_IO.to_string(), "true".to_string());
     spec.set_annotations(Some(annotations));
     Ok(())
+}
+
+fn inject_template_annotations(
+    annotations: &mut std::collections::HashMap<String, String>,
+    assets: &RuntimeAssets,
+) {
+    if assets.snapshot_base.trim().is_empty() {
+        annotations.remove(ANNO_SNAPSHOT_BASE);
+        annotations.remove(ANNO_SNAPSHOT_MEMORY_VOL_URL);
+        annotations.remove(ANNO_RUNTIME_TEMPLATE_KEY);
+        annotations.insert(ANNO_SNAPSHOT_DISABLE.to_string(), "true".to_string());
+    } else {
+        annotations.remove(ANNO_SNAPSHOT_DISABLE);
+        annotations.insert(ANNO_SNAPSHOT_BASE.to_string(), assets.snapshot_base.clone());
+        if !assets.snapshot_memory_vol_url.trim().is_empty() {
+            annotations.insert(
+                ANNO_SNAPSHOT_MEMORY_VOL_URL.to_string(),
+                assets.snapshot_memory_vol_url.clone(),
+            );
+        }
+        if assets.template_key.trim().is_empty() {
+            annotations.remove(ANNO_RUNTIME_TEMPLATE_KEY);
+        } else {
+            annotations.insert(
+                ANNO_RUNTIME_TEMPLATE_KEY.to_string(),
+                assets.template_key.clone(),
+            );
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -2471,6 +2532,7 @@ mod tests {
                 agent_path: root.join("agent").display().to_string(),
                 guest_image_path: root.join("guest.img").display().to_string(),
                 shared_root: root.join("shared").display().to_string(),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -2577,6 +2639,34 @@ mod tests {
         assert_eq!(volume[0]["backendfs_config"]["announce_submounts"], false);
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn runtime_template_assets_enable_restore() {
+        let assets = RuntimeAssets {
+            snapshot_base: "/data/cubelet/cri/templates/profile/snapshot".to_string(),
+            snapshot_memory_vol_url: "cubecow://template-memory".to_string(),
+            template_key: "profile".to_string(),
+            ..Default::default()
+        };
+        let mut annotations = std::collections::HashMap::new();
+        inject_template_annotations(&mut annotations, &assets);
+        assert_eq!(
+            annotations.get(ANNO_SNAPSHOT_BASE),
+            Some(&"/data/cubelet/cri/templates/profile/snapshot".to_string())
+        );
+        assert_eq!(
+            annotations.get(ANNO_SNAPSHOT_MEMORY_VOL_URL),
+            Some(&"cubecow://template-memory".to_string())
+        );
+        assert_eq!(
+            annotations.get(ANNO_RUNTIME_TEMPLATE_KEY),
+            Some(&"profile".to_string())
+        );
+        assert!(!annotations.contains_key(ANNO_SNAPSHOT_DISABLE));
+        inject_template_annotations(&mut annotations, &RuntimeAssets::default());
+        assert!(annotations.contains_key(ANNO_SNAPSHOT_DISABLE));
+        assert!(!annotations.contains_key(ANNO_RUNTIME_TEMPLATE_KEY));
     }
 
     #[cfg(target_family = "unix")]
@@ -2787,6 +2877,7 @@ mod tests {
                 agent_path: "/agent".to_string(),
                 guest_image_path: "/rootfs".to_string(),
                 shared_root: "/data/cubelet/shared/a".to_string(),
+                ..Default::default()
             }),
             network: Some(sample_network()),
         };
@@ -2924,6 +3015,21 @@ mod tests {
                 }),
             }),
         }
+    }
+
+    #[test]
+    fn template_mode_accepts_auto_and_cold_only() {
+        let mut config = sample_cri();
+        assert_eq!(template_mode(&config).unwrap(), TEMPLATE_MODE_AUTO);
+        config.annotations.insert(
+            ANNO_TEMPLATE_MODE.to_string(),
+            TEMPLATE_MODE_COLD.to_string(),
+        );
+        assert_eq!(template_mode(&config).unwrap(), TEMPLATE_MODE_COLD);
+        config
+            .annotations
+            .insert(ANNO_TEMPLATE_MODE.to_string(), "restore".to_string());
+        assert!(template_mode(&config).is_err());
     }
 
     #[test]

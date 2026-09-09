@@ -463,10 +463,24 @@ impl Net {
 
         let (avail_features, acked_features, config, queue_sizes) = if let Some(state) = state {
             debug!("Restoring virtio-net {}", id);
+            // The template and runtime TAP are both prepared for the same
+            // cross-netns, no-offload contract. Keep the negotiated features
+            // exactly as the guest snapshot expects.
+            // The template uses a deterministic placeholder MAC.  The CNI
+            // attachment is Pod-specific, so keep the snapshotted queue and
+            // negotiated-feature state but expose the runtime link identity
+            // through the restored device configuration.
+            let mut config = state.config;
+            if fds_from_other_netns {
+                if let Some(mac) = guest_mac {
+                    config.mac.copy_from_slice(mac.get_bytes());
+                }
+                config.mtu = mtu;
+            }
             (
                 state.avail_features,
                 state.acked_features,
-                state.config,
+                config,
                 state.queue_size,
             )
         } else {
