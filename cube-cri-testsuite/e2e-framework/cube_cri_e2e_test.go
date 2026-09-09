@@ -45,7 +45,7 @@ const (
 )
 
 var (
-	runID        = flag.String("run-id", envString("RUN_ID", fmt.Sprintf("cube-kri-e2e-%s", time.Now().Format("20060102150405"))), "test run id used in pod labels")
+	runID        = flag.String("run-id", envString("RUN_ID", fmt.Sprintf("cube-cri-e2e-%s", time.Now().Format("20060102150405"))), "test run id used in pod labels")
 	cubeNodeName = flag.String("cube-node", envString("CUBE_NODE_NAME", ""), "cube physical node name; auto-detected when empty")
 	hostNodeName = flag.String("host-node", envString("HOST_NODE_NAME", ""), "physical host node name for host checks; defaults to cube node")
 	runcNodeName = flag.String("runc-node", envString("RUNC_NODE_NAME", ""), "native runc node name for control test")
@@ -248,7 +248,7 @@ func sleepWithContext(ctx context.Context, duration time.Duration) error {
 }
 
 func TestProbeSemantics(t *testing.T) {
-	builder := features.New("cube-kri probe semantics").WithLabel("scope", "probe")
+	builder := features.New("cube-cri probe semantics").WithLabel("scope", "probe")
 	addCubePathAssessments(builder, "semantic-liveness-exec-restart", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
 		runProbeRestartCase(ctx, t, cfg, "semantic-liveness-exec-restart", probePodSpec{
 			NameSuffix: "liveness-exec",
@@ -316,7 +316,7 @@ func TestLatency(t *testing.T) {
 		t.Skip("probe-only=true")
 	}
 
-	builder := features.New("cube-kri latency").WithLabel("scope", "latency")
+	builder := features.New("cube-cri latency").WithLabel("scope", "latency")
 	addCubePathAssessments(builder, "latency-concurrent-cube-pods", assessConcurrentLatency)
 
 	testEnv.Test(t, builder.Feature())
@@ -327,7 +327,7 @@ func TestCoreSemantics(t *testing.T) {
 		t.Skip("probe-only=true")
 	}
 
-	builder := features.New("cube-kri core pod semantics").WithLabel("scope", "core")
+	builder := features.New("cube-cri core pod semantics").WithLabel("scope", "core")
 	addCubePathAssessments(builder, "semantic-securitycontext-privileged", assessReadyPod("semantic-securitycontext-privileged", corev1.PodSpec{
 		RestartPolicy: corev1.RestartPolicyNever,
 		Containers: []corev1.Container{baseContainer("main", []string{"/bin/sh", "-c", "sleep 3600"}, func(c *corev1.Container) {
@@ -377,12 +377,12 @@ func TestRuntimeMix(t *testing.T) {
 		t.Skip("probe-only=true")
 	}
 
-	feature := features.New("cube-kri runtime mix").
+	feature := features.New("cube-cri runtime mix").
 		WithLabel("scope", "runtime").
-		Assess("runtime-mix-khaoslet-default-runc", assessRuncPodOnCubeNode("runtime-mix-default-runc", "")).
-		Assess("runtime-mix-khaoslet-runtimeclass-runc", assessRuncPodOnCubeNode("runtime-mix-rc-runc", "runc")).
-		Assess("runtime-mix-khaoslet-runc-hostpath", assessRuncHostPathPod).
-		Assess("runtime-mix-khaoslet-runc-daemonset", assessRuncDaemonSet).
+		Assess("runtime-mix-node-default-runc", assessRuncPodOnCubeNode("runtime-mix-default-runc", "")).
+		Assess("runtime-mix-node-runtimeclass-runc", assessRuncPodOnCubeNode("runtime-mix-rc-runc", "runc")).
+		Assess("runtime-mix-node-runc-hostpath", assessRuncHostPathPod).
+		Assess("runtime-mix-node-runc-daemonset", assessRuncDaemonSet).
 		Assess("runtime-mix-native-runc-node-control", assessNativeRuncPod).
 		Feature()
 
@@ -394,7 +394,7 @@ func TestAWVCSIPVC(t *testing.T) {
 		t.Skip("probe-only=true")
 	}
 
-	builder := features.New("cube-kri awv-csi pvc").WithLabel("scope", "storage")
+	builder := features.New("cube-cri awv-csi pvc").WithLabel("scope", "storage")
 	addCubePathAssessments(builder, "awv-csi-pvc-cube-pod-read-write", assessAWVCSIPVCCubePod)
 
 	testEnv.Test(t, builder.Feature())
@@ -556,7 +556,7 @@ func assessRuncHostPathPod(ctx context.Context, t *testing.T, cfg *envconf.Confi
 	if _, _, err := execInPod(ctx, cfg, pod.Namespace, pod.Name, "main", []string{"/bin/sh", "-c", `test "$(cat /host/pod.txt)" = from-pod`}); err != nil {
 		t.Fatalf("hostPath content not observed: %v; %s; events=%s", err, podSummary(got), podEvents(ctx, client, pod.Namespace, pod.Name))
 	}
-	t.Logf("runtime-mix-khaoslet-runc-hostpath: %s", podSummary(got))
+	t.Logf("runtime-mix-node-runc-hostpath: %s", podSummary(got))
 	return ctx
 }
 
@@ -597,7 +597,7 @@ func assessRuncDaemonSet(ctx context.Context, t *testing.T, cfg *envconf.Config)
 	defer cleanupDaemonSet(ctx, t, client, ns, name)
 
 	pod := waitDaemonSetPodReady(ctx, t, client, ns, labels.SelectorFromSet(caseLabels).String(), *semanticTimeout)
-	t.Logf("runtime-mix-khaoslet-runc-daemonset: %s", podSummary(pod))
+	t.Logf("runtime-mix-node-runc-daemonset: %s", podSummary(pod))
 	return ctx
 }
 
@@ -1234,17 +1234,18 @@ func resolvedRuncNode(ctx context.Context, t *testing.T, client *kubernetes.Clie
 	t.Helper()
 	cubeNode := resolvedCubeNode(ctx, t, client)
 	if *runcNodeName != "" {
-		if *runcNodeName == cubeNode {
-			t.Skip("runc node equals cube node")
-		}
 		return *runcNodeName
 	}
-	nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{LabelSelector: "node.kubernetes.io/instance-type!=khaoslet"})
+	nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		t.Fatalf("list physical nodes: %v", err)
 	}
 	for _, node := range nodes.Items {
 		if node.Name == cubeNode {
+			continue
+		}
+		// eklet 节点不运行 AWV CSI node 插件，不能作为本用例的 runc 对照节点。
+		if node.Labels["node.kubernetes.io/instance-type"] == "eklet" || strings.HasPrefix(node.Status.NodeInfo.ContainerRuntimeVersion, "eks://") {
 			continue
 		}
 		for _, condition := range node.Status.Conditions {
@@ -1254,8 +1255,10 @@ func resolvedRuncNode(ctx context.Context, t *testing.T, client *kubernetes.Clie
 			}
 		}
 	}
-	t.Skip("no secondary Ready physical node for native runc control")
-	return ""
+	// 单节点测试集群中，Cube 节点同时支持 cube 和 runc handler。复用该节点
+	// 仍可验证两个运行时及 AWV CSI 的跨运行时读写，避免把用例误跳过。
+	*runcNodeName = cubeNode
+	return cubeNode
 }
 
 func clientset(t *testing.T, cfg *envconf.Config) *kubernetes.Clientset {
@@ -1264,7 +1267,11 @@ func clientset(t *testing.T, cfg *envconf.Config) *kubernetes.Clientset {
 	if err != nil {
 		t.Fatalf("new e2e-framework client: %v", err)
 	}
-	cs, err := kubernetes.NewForConfig(client.RESTConfig())
+	restCfg := rest.CopyConfig(client.RESTConfig())
+	// e2e-framework 默认限流会在短时的 Pod 状态轮询后耗尽令牌，使
+	// Prometheus 查询在 assessment 的截止时间前无法发送。测试自身已控制并发。
+	restCfg.QPS, restCfg.RateLimiter = -1, nil
+	cs, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		t.Fatalf("new kubernetes clientset: %v", err)
 	}
@@ -1439,7 +1446,7 @@ func dnsName(value string) string {
 		out = strings.Trim(out[:63], "-")
 	}
 	if out == "" {
-		return "cube-kri-e2e"
+		return "cube-cri-e2e"
 	}
 	return out
 }

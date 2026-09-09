@@ -27,8 +27,8 @@ data:
       kubernetes_sd_configs:
       - role: node
       relabel_configs:
-      - source_labels: [__meta_kubernetes_node_label_cubesandbox_io_runtime]
-        regex: cube
+      - source_labels: [__meta_kubernetes_node_label_agc_cloud_tencent_com_cube_ready]
+        regex: "true"
         action: keep
       - source_labels: [__meta_kubernetes_node_address_InternalIP]
         regex: (.+)
@@ -45,8 +45,8 @@ data:
       kubernetes_sd_configs:
       - role: node
       relabel_configs:
-      - source_labels: [__meta_kubernetes_node_label_cubesandbox_io_runtime]
-        regex: cube
+      - source_labels: [__meta_kubernetes_node_label_agc_cloud_tencent_com_cube_ready]
+        regex: "true"
         action: keep
       - source_labels: [__meta_kubernetes_node_address_InternalIP]
         regex: (.+)
@@ -59,8 +59,8 @@ data:
       kubernetes_sd_configs:
       - role: node
       relabel_configs:
-      - source_labels: [__meta_kubernetes_node_label_cubesandbox_io_runtime]
-        regex: cube
+      - source_labels: [__meta_kubernetes_node_label_agc_cloud_tencent_com_cube_ready]
+        regex: "true"
         action: keep
       - source_labels: [__meta_kubernetes_node_address_InternalIP]
         regex: (.+)

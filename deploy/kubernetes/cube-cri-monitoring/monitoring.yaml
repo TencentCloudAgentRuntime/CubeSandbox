@@ -19,8 +19,8 @@ data:
       kubernetes_sd_configs:
       - role: node
       relabel_configs:
-      - source_labels: [__meta_kubernetes_node_label_cubesandbox_io_runtime]
-        regex: cube
+      - source_labels: [__meta_kubernetes_node_label_agc_cloud_tencent_com_cube_ready]
+        regex: "true"
         action: keep
       - source_labels: [__meta_kubernetes_node_address_InternalIP]
         regex: (.+)
@@ -37,8 +37,8 @@ data:
       kubernetes_sd_configs:
       - role: node
       relabel_configs:
-      - source_labels: [__meta_kubernetes_node_label_cubesandbox_io_runtime]
-        regex: cube
+      - source_labels: [__meta_kubernetes_node_label_agc_cloud_tencent_com_cube_ready]
+        regex: "true"
         action: keep
       - source_labels: [__meta_kubernetes_node_address_InternalIP]
         regex: (.+)
@@ -51,8 +51,8 @@ data:
       kubernetes_sd_configs:
       - role: node
       relabel_configs:
-      - source_labels: [__meta_kubernetes_node_label_cubesandbox_io_runtime]
-        regex: cube
+      - source_labels: [__meta_kubernetes_node_label_agc_cloud_tencent_com_cube_ready]
+        regex: "true"
         action: keep
       - source_labels: [__meta_kubernetes_node_address_InternalIP]
         regex: (.+)
@@ -480,13 +480,24 @@ data:
                 "uid": "cube-cri-prometheus"
               },
               "editorMode": "code",
-              "expr": "sum by (result) (rate(cube_cri_operations_total{node=~\"$node\",component=\"shim\",operation=\"CreatePodSandbox\"}[$__rate_interval]))",
-              "legendFormat": "{{result}}",
+              "expr": "sum(rate(cube_cri_operations_total{node=~\"$node\",component=\"shim\",operation=\"TemplateDerivedSandbox\",result=\"ok\"}[$__rate_interval]))",
+              "legendFormat": "模板派生",
               "range": true,
               "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate(cube_cri_operations_total{node=~\"$node\",component=\"shim\",operation=\"ColdStartSandbox\",result=\"ok\"}[$__rate_interval]))",
+              "legendFormat": "冷启动",
+              "range": true,
+              "refId": "B"
             }
           ],
-          "title": "Sandbox 创建结果速率",
+          "title": "模板派生与冷启动沙箱事件速率",
           "type": "timeseries"
         },
         {
