@@ -38,5 +38,10 @@ pub const ANNO_CONTAINER_LOG_FORWARDING: &str = "cube.container.log_forwarding";
 
 pub const CUBE_BIND_SHARE_TYPE: &str = "bind-share";
 pub const CUBE_BIND_SHARE_GUEST_BASE_DIR: &str = "/run/cube-bind-share/";
+/// Private OCI mount type used between standard-rootfs preparation and the
+/// shim's Agent storage translation for Kubernetes Memory EmptyDir volumes.
+pub const CUBE_MEMORY_EMPTYDIR_TYPE: &str = "cube-memory-emptydir";
+pub const CUBE_MEMORY_EMPTYDIR_GUEST_BASE_DIR: &str = "/run/cube-memory-emptydir";
+pub const CUBE_MEMORY_EMPTYDIR_CONTAINER_OPTION_PREFIX: &str = "cube-container-option=";
 pub const GUEST_VIRTIOFS_MNT_PATH: &str = "/run/virtiofs";
 pub const GUEST_VIRTIOFS_MNT_PATH_DEPRECATED: &str = "/run/cube-containers/shared/containers";

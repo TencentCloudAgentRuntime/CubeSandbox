@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,9 +21,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use containerd_shim::protos::types::mount::Mount;
 use oci_spec::runtime::Spec;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::common::{
-    ANNO_ROOTFS_WLAYER_PATH, GUEST_VIRTIOFS_MNT_PATH, GUEST_VIRTIOFS_MNT_PATH_DEPRECATED,
+    ANNO_ROOTFS_WLAYER_PATH, CUBE_MEMORY_EMPTYDIR_CONTAINER_OPTION_PREFIX,
+    CUBE_MEMORY_EMPTYDIR_GUEST_BASE_DIR, CUBE_MEMORY_EMPTYDIR_TYPE, GUEST_VIRTIOFS_MNT_PATH,
+    GUEST_VIRTIOFS_MNT_PATH_DEPRECATED,
 };
 use crate::container::rootfs::{OverlayInfo, RootfsInfo, ANNOTATION_K_ROOTFS_INFO};
 use crate::sandbox::config::ANNO_VMM_FS;
@@ -36,7 +40,14 @@ pub const SHARE_BASE: &str = "/data/cubelet/s0.2-share";
 const VIRTIOFS_SHARED_DIR: &str = "/data/cubelet";
 const GUEST_SANDBOX_RESOLV_CONF: &str = "/etc/resolv.conf";
 const MANAGED_ROOTFS_WRITABLE_DIR: &str = "rootfs-writable";
+const KUBELET_EMPTYDIR_PLUGIN: &str = "kubernetes.io~empty-dir";
+const TMPFS_MAGIC: libc::c_long = 0x0102_1994;
 static EXPORT_ATTEMPT: AtomicU64 = AtomicU64::new(1);
+
+struct MemoryEmptyDir {
+    guest_source: PathBuf,
+    storage_options: Vec<String>,
+}
 
 #[derive(Debug)]
 pub struct PreparedRootfs {
@@ -379,6 +390,27 @@ fn export_host_bind_mounts(
             mount.set_options(Some(vec!["bind".to_string(), "ro".to_string()]));
             continue;
         }
+        if let Some(memory_emptydir) = memory_emptydir(&source, &metadata)? {
+            // A Memory EmptyDir must be a tmpfs in the container namespace.
+            // Exporting the host tmpfs through virtiofs preserves its data and
+            // capacity but changes statfs(2) to virtiofs. Keep this private
+            // type until Container::get_storages creates the Guest tmpfs.
+            let mut options = memory_emptydir.storage_options;
+            options.extend(
+                mount
+                    .options()
+                    .as_ref()
+                    .into_iter()
+                    .flatten()
+                    .map(|option| {
+                        format!("{CUBE_MEMORY_EMPTYDIR_CONTAINER_OPTION_PREFIX}{option}")
+                    }),
+            );
+            mount.set_source(Some(memory_emptydir.guest_source));
+            mount.set_typ(Some(CUBE_MEMORY_EMPTYDIR_TYPE.to_string()));
+            mount.set_options(Some(options));
+            continue;
+        }
         let export_target = host_bind_export_target(target, managed_volume_root, export_id, index);
         if metadata.is_dir() {
             fs::create_dir_all(&export_target).map_err(|error| {
@@ -420,6 +452,79 @@ fn export_host_bind_mounts(
         )));
     }
     Ok(())
+}
+
+/// Kubernetes projected volumes may also originate from tmpfs. Restrict the
+/// conversion to the kubelet EmptyDir plugin so token/configmap contents keep
+/// using the host export path.
+fn memory_emptydir(
+    source: &Path,
+    metadata: &fs::Metadata,
+) -> Result<Option<MemoryEmptyDir>, String> {
+    if !source
+        .components()
+        .any(|component| component.as_os_str() == KUBELET_EMPTYDIR_PLUGIN)
+    {
+        return Ok(None);
+    }
+
+    let source_c = path_cstring(source)?;
+    let mut fs_info: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(source_c.as_ptr(), &mut fs_info) } != 0 {
+        return Err(format!(
+            "statfs Memory EmptyDir source {} failed: {}",
+            source.display(),
+            io::Error::last_os_error()
+        ));
+    }
+    if fs_info.f_type as libc::c_long != TMPFS_MAGIC {
+        return Ok(None);
+    }
+
+    let mut volume_info: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(source_c.as_ptr(), &mut volume_info) } != 0 {
+        return Err(format!(
+            "statvfs Memory EmptyDir source {} failed: {}",
+            source.display(),
+            io::Error::last_os_error()
+        ));
+    }
+    let block_size = u64::try_from(volume_info.f_frsize)
+        .ok()
+        .filter(|size| *size > 0)
+        .ok_or_else(|| {
+            format!(
+                "Memory EmptyDir source {} has invalid block size",
+                source.display()
+            )
+        })?;
+    let blocks = u64::try_from(volume_info.f_blocks).map_err(|_| {
+        format!(
+            "Memory EmptyDir source {} has invalid block count",
+            source.display()
+        )
+    })?;
+    let size = blocks.checked_mul(block_size).ok_or_else(|| {
+        format!(
+            "Memory EmptyDir source {} size overflows u64",
+            source.display()
+        )
+    })?;
+    let digest = Sha256::digest(source.as_os_str().as_bytes());
+    let mode = metadata.mode() & 0o7777;
+
+    Ok(Some(MemoryEmptyDir {
+        guest_source: Path::new(CUBE_MEMORY_EMPTYDIR_GUEST_BASE_DIR).join(format!("{digest:x}")),
+        storage_options: vec![
+            format!("size={size}"),
+            format!("uid={}", metadata.uid()),
+            format!("gid={}", metadata.gid()),
+            format!("mode={mode:o}"),
+            "nosuid".to_string(),
+            "nodev".to_string(),
+            "noexec".to_string(),
+        ],
+    }))
 }
 
 fn mirror_export_target_mode(metadata: &fs::Metadata, export_target: &Path) -> Result<(), String> {

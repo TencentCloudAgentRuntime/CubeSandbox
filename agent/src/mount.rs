@@ -214,13 +214,16 @@ async fn ephemeral_storage_handler(
     // normal ephemeral storage
     fs::create_dir_all(Path::new(&storage.mount_point))?;
 
-    // By now we only support one option field: "fsGroup" which
-    // isn't an valid mount option, thus we should remove it when
-    // do mount.
+    // fsGroup is an Agent-only option, while tmpfs options (for example
+    // size/uid/gid/mode) must reach mount(2). Keep the latter intact.
     if storage.options.len() > 0 {
-        // ephemeral_storage didn't support mount options except fsGroup.
         let mut new_storage = storage.clone();
-        new_storage.options = vec![];
+        new_storage.options = storage
+            .options
+            .iter()
+            .filter(|option| !option.starts_with(&format!("{FS_GID}=")))
+            .cloned()
+            .collect();
         common_storage_handler(logger, &new_storage)?;
 
         let opts_vec: Vec<String> = storage.options.to_vec();

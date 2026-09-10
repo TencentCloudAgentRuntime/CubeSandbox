@@ -53,7 +53,7 @@ var (
 	keepPods     = flag.Bool("keep", envBool("KEEP", false), "keep test pods after the run")
 
 	cubeImage    = flag.String("cube-image", envString("CUBE_IMAGE", "ccr.ccs.tencentyun.com/library/pause:latest"), "cube pause image")
-	utilityImage = flag.String("utility-image", envString("UTILITY_IMAGE", "docker.io/library/alpine:latest"), "utility image")
+	utilityImage = flag.String("utility-image", envString("UTILITY_IMAGE", "ccr.ccs.tencentyun.com/library/alpine:latest"), "utility image")
 	cubeAppID    = flag.String("cube-appid", envString("CUBE_APPID", "1253970226"), "cube appid label/annotation value")
 	cubeNet      = flag.String("cube-master-net", envString("CUBE_MASTER_NET", `{"Mode":"WAN","BizGw":{"ID":1,"Tunnels":[]},"Version":1}`), "cube.master.net annotation value")
 
@@ -344,6 +344,7 @@ func TestCoreSemantics(t *testing.T) {
 			c.VolumeMounts = []corev1.VolumeMount{{Name: "work", MountPath: "/work"}}
 		})},
 	}))
+	addCubePathAssessments(builder, "semantic-emptydir-memory-tmpfs-size", assessMemoryEmptyDir)
 	addCubePathAssessments(builder, "semantic-multicontainer", assessReadyPod("semantic-multicontainer", corev1.PodSpec{
 		RestartPolicy: corev1.RestartPolicyNever,
 		Containers: []corev1.Container{
@@ -497,6 +498,37 @@ func assessLifecyclePod(ctx context.Context, t *testing.T, cfg *envconf.Config) 
 	if elapsed := time.Since(start); elapsed < 2500*time.Millisecond {
 		t.Fatalf("preStop did not delay deletion enough: elapsed=%s", elapsed)
 	}
+	return ctx
+}
+
+func assessMemoryEmptyDir(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+	client := clientset(t, cfg)
+	limit := resource.MustParse("10Mi")
+	pod := cubePod(t, ctx, cfg, client, "semantic-emptydir-memory", corev1.PodSpec{
+		RestartPolicy: corev1.RestartPolicyNever,
+		Volumes: []corev1.Volume{{
+			Name: "memory",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: &limit},
+			},
+		}},
+		Containers: []corev1.Container{baseContainer("main", []string{"/bin/sh", "-c", "sleep 3600"}, func(c *corev1.Container) {
+			c.VolumeMounts = []corev1.VolumeMount{{Name: "memory", MountPath: "/memory"}}
+		})},
+	})
+	createPod(ctx, t, client, pod)
+	defer cleanupPod(ctx, t, client, pod)
+
+	got := waitPodReady(ctx, t, client, pod.Namespace, pod.Name, *semanticTimeout)
+	stdout, stderr, err := execInPod(ctx, cfg, pod.Namespace, pod.Name, "main", []string{"/bin/sh", "-c", "stat -f -c %T /memory; df -k /memory | awk 'NR == 2 {print $2}'"})
+	if err != nil {
+		t.Fatalf("memory emptyDir inspection failed: %v; stdout=%q stderr=%q; %s; events=%s", err, stdout, stderr, podSummary(got), podEvents(ctx, client, pod.Namespace, pod.Name))
+	}
+	values := strings.Fields(stdout)
+	if len(values) != 2 || values[0] != "tmpfs" || values[1] != "10240" {
+		t.Fatalf("memory emptyDir must be tmpfs with sizeLimit=10Mi (10240Ki), got %q; %s; events=%s", stdout, podSummary(got), podEvents(ctx, client, pod.Namespace, pod.Name))
+	}
+	t.Logf("semantic-emptydir-memory-tmpfs-size: %s", podSummary(got))
 	return ctx
 }
 
@@ -688,12 +720,11 @@ func waitNativeCSIPVCReaderContent(ctx context.Context, t *testing.T, cfg *envco
 	for attempt := 1; time.Now().Before(deadline); attempt++ {
 		nativeReader := nativeCSIPVCReaderPod(t, ctx, cfg, client, fmt.Sprintf("awv-csi-pvc-native-read-%d", attempt), pvcName)
 		createPod(ctx, t, client, nativeReader)
-		nativeRead := waitPodReady(ctx, t, client, nativeReader.Namespace, nativeReader.Name, 4*time.Minute)
-		stdout, stderr, err := execInPod(ctx, cfg, nativeReader.Namespace, nativeReader.Name, "main", []string{"/bin/sh", "-c", `set -eu; cat /workspace/"${RUN_ID}"/marker.txt`})
-		if err == nil && strings.TrimSpace(stdout) == "ok" {
+		nativeRead, err := waitPodPhaseResult(ctx, client, nativeReader.Namespace, nativeReader.Name, corev1.PodSucceeded, minDuration(45*time.Second, time.Until(deadline)))
+		if err == nil {
 			return nativeRead
 		}
-		last = fmt.Sprintf("attempt=%d err=%v stdout=%q stderr=%q pod=%s events=%s", attempt, err, stdout, stderr, podSummary(nativeRead), podEvents(ctx, client, nativeReader.Namespace, nativeReader.Name))
+		last = fmt.Sprintf("attempt=%d err=%v pod=%s events=%s", attempt, err, podSummary(nativeRead), podEvents(ctx, client, nativeReader.Namespace, nativeReader.Name))
 		cleanupPod(ctx, t, client, nativeReader)
 		select {
 		case <-ctx.Done():
@@ -760,7 +791,7 @@ func awvCSIPVCPod(t *testing.T, ctx context.Context, cfg *envconf.Config, client
 
 func nativeCSIPVCReaderPod(t *testing.T, ctx context.Context, cfg *envconf.Config, client *kubernetes.Clientset, suffix, pvcName string) *corev1.Pod {
 	t.Helper()
-	container := baseContainer("main", []string{"/bin/sh", "-c", `set -eu; sleep 3600`}, func(c *corev1.Container) {
+	container := baseContainer("main", []string{"/bin/sh", "-c", `set -eu; test "$(cat /workspace/"${RUN_ID}"/marker.txt)" = ok`}, func(c *corev1.Container) {
 		c.Env = []corev1.EnvVar{{Name: "RUN_ID", Value: *runID}}
 		c.VolumeMounts = []corev1.VolumeMount{{Name: "workspace", MountPath: "/workspace"}}
 	})
@@ -1075,6 +1106,14 @@ func waitPodReadyResult(ctx context.Context, client *kubernetes.Clientset, ns, n
 
 func waitPodPhase(ctx context.Context, t *testing.T, client *kubernetes.Clientset, ns, name string, phase corev1.PodPhase, timeout time.Duration) *corev1.Pod {
 	t.Helper()
+	got, err := waitPodPhaseResult(ctx, client, ns, name, phase, timeout)
+	if err != nil {
+		t.Fatalf("pod %s/%s did not reach phase %s within %s: %s; events=%s", ns, name, phase, timeout, podSummary(got), podEvents(ctx, client, ns, name))
+	}
+	return got
+}
+
+func waitPodPhaseResult(ctx context.Context, client *kubernetes.Clientset, ns, name string, phase corev1.PodPhase, timeout time.Duration) (*corev1.Pod, error) {
 	var got *corev1.Pod
 	err := wait.PollUntilContextTimeout(ctx, time.Second, timeout, true, func(ctx context.Context) (bool, error) {
 		p, err := client.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
@@ -1085,12 +1124,12 @@ func waitPodPhase(ctx context.Context, t *testing.T, client *kubernetes.Clientse
 			return false, err
 		}
 		got = p
+		if p.Status.Phase == corev1.PodFailed {
+			return false, fmt.Errorf("pod failed")
+		}
 		return podPhase(p) == phase, nil
 	})
-	if err != nil {
-		t.Fatalf("pod %s/%s did not reach phase %s within %s: %s; events=%s", ns, name, phase, timeout, podSummary(got), podEvents(ctx, client, ns, name))
-	}
-	return got
+	return got, err
 }
 
 func waitForPodDeleted(ctx context.Context, t *testing.T, client *kubernetes.Clientset, ns, name string, timeout time.Duration) bool {

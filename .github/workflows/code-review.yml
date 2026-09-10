@@ -1,6 +1,8 @@
 name: Claude Auto Review
 
 on:
+  # Disabled: retain manual dispatch only while automated review is paused.
+  workflow_dispatch:
   # IMPORTANT: pull_request_target makes secrets available to fork PRs.
   # SECURITY RULE: never add steps that EXECUTE code from the PR
   # (no npm install / make / cargo build / pre-commit / etc.).
@@ -16,8 +18,6 @@ on:
   # head into the workspace root (including forks via refs/pull/*/head), which
   # reintroduces untrusted code at the trusted root.
   # See: https://github.com/anthropics/claude-code-action/blob/main/docs/security.md
-  pull_request_target:
-    types: [opened, synchronize, reopened]
 
 concurrency:
   group: claude-review-${{ github.event.pull_request.number }}

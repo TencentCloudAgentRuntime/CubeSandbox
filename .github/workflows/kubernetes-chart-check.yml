@@ -1,21 +1,7 @@
 name: Kubernetes Chart Check
 
 on:
-  push:
-    branches: [master]
-    paths:
-      - 'Cubelet/Dockerfile'
-      - 'deploy/kubernetes/chart/**'
-      - 'deploy/kubernetes/images/scripts/**'
-      - 'scripts/bump-image.sh'
-      - '.github/workflows/kubernetes-chart-check.yml'
-  pull_request:
-    paths:
-      - 'Cubelet/Dockerfile'
-      - 'deploy/kubernetes/chart/**'
-      - 'deploy/kubernetes/images/scripts/**'
-      - 'scripts/bump-image.sh'
-      - '.github/workflows/kubernetes-chart-check.yml'
+  # Disabled: retain manual dispatch only while the chart check is paused.
   workflow_dispatch:
 
 permissions:

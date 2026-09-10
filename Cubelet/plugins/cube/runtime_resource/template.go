@@ -78,6 +78,14 @@ func templateKey(resources *runtimev1.ResourceRequest, assets Assets) string {
 }
 
 func assetFingerprint(path string) string {
+	// Runtime assets are installed under /opt/cube-cri/current. The installer
+	// deliberately normalizes file mtimes, so size+mtime alone can leave an
+	// old VM snapshot eligible after the current release symlink changes.
+	// Include the resolved release path to invalidate snapshots across every
+	// runtime release switch.
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return path + ":missing"

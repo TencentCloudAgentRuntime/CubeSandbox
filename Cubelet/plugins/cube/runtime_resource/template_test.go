@@ -114,3 +114,32 @@ func TestTemplateResolverColdModeSkipsReuseAndBuild(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 }
+
+func TestTemplateKeyTracksResolvedAssetRelease(t *testing.T) {
+	root := t.TempDir()
+	for _, release := range []string{"release-a", "release-b"} {
+		path := filepath.Join(root, release)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "agent"), []byte("same-size"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current := filepath.Join(root, "current")
+	if err := os.Symlink(filepath.Join(root, "release-a"), current); err != nil {
+		t.Fatal(err)
+	}
+	assets := Assets{AgentPath: filepath.Join(current, "agent")}
+	request := testTemplateRequest()
+	first := templateKey(request, assets)
+	if err := os.Remove(current); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "release-b"), current); err != nil {
+		t.Fatal(err)
+	}
+	if second := templateKey(request, assets); second == first {
+		t.Fatal("template key must change when the resolved asset release changes")
+	}
+}
