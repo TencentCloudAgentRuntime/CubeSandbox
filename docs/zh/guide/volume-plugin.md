@@ -543,6 +543,19 @@ Volume.destroy(vol.volume_id)
 
 同一 Volume 可被多个沙箱同时挂载；一个沙箱写入的数据对其他沙箱可见。调用 `Volume.destroy()` 前须销毁**所有**挂载该 Volume 的沙箱（平台如何跟踪共享引用见 [RefCount](#refcount)）。
 
+### 快照、回滚、克隆与跨机恢复
+
+Snapshot 会保存稳定的 Volume ID、容器挂载路径和只读属性，但不会复制 Volume 数据，也不会持久化运行时 `private_data`。FromSnap 由 Master 查询当前 Volume 记录，并把 driver 元数据发送给目标 Cubelet 执行 `Attach`；Pause/Resume 会校验已记录的 Volume ID，并根据 pause package 重新 Attach；原地 Rollback 则保留沙箱现有的外部挂载。
+
+因此它采用 **external-reference（外部引用）**语义：
+
+- FromSnap 和回滚会恢复 VM/rootfs 状态，但挂载后的 Volume 展示当前数据。
+- 克隆继续共享同一个 Volume；读写挂载中的写入对源沙箱和其他克隆可见。
+- Plugin Volume 不会把原本支持跨机的 VM Snapshot 固定到源节点。对于 `remote_status=ready` 的 S3 VM Snapshot，目标 Cubelet 会在启动 VM 前尝试 Attach Volume。
+- 调度器当前只检查 VM 兼容性，不检查 Volume portability、topology、multi-attach 能力或目标节点 driver。Volume 不存在、目标节点未注册 driver 或 `Attach` 返回错误时，沙箱创建失败。运维方需要在每个候选节点配置相同 driver，并确保它们能够访问目标后端。
+
+Volume backend 与 VM Snapshot backend 相互独立。VM Snapshot 包必须使用 S3 backend 才能跨机；Plugin Volume 可以使用目标节点 driver 能够 Attach 的任意后端。raw host mount 与此不同，始终固定在源节点。
+
 ### 常见异常（SDK）
 
 | 场景 | SDK 异常 | 典型原因 |
@@ -599,20 +612,20 @@ volume_plugins:
 
 ## rpc 插件 pb 定义说明
 
-rpc 插件实现 [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin.proto) 中的 gRPC 服务。消息字段与上文 [Hook 定义](#hook-定义) 一致（proto 使用 `snake_case`）。
+rpc 插件实现 [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin.proto) 中的 gRPC 服务。消息字段与上文 [Hook 定义](#hook-定义) 一致（proto 使用 `snake_case`）。
 
 | 文件 | 说明 |
 |------|------|
-| [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin.proto) | 协议源文件 |
-| [`volumeplugin.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin.pb.go) | 已提交的 Go message |
-| [`volumeplugin_grpc.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/Cubelet/api/services/volumeplugin/v1/volumeplugin_grpc.pb.go) | 已提交的 gRPC stub |
+| [`volumeplugin.proto`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin.proto) | 协议源文件 |
+| [`volumeplugin.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin.pb.go) | 已提交的 Go message |
+| [`volumeplugin_grpc.pb.go`](https://github.com/TencentCloud/CubeSandbox/blob/master/pkgs/proto/services/volumeplugin/v1/volumeplugin_grpc.pb.go) | 已提交的 gRPC stub |
 
 | Service | 调用方 | RPC |
 |---------|--------|-----|
 | `VolumeControllerService` | CubeMaster | `Create`、`Destroy` |
 | `VolumePluginService` | Cubelet | `Attach`、`Detach` |
 
-修改 proto 后重新生成：`cd Cubelet && make proto`。参考实现：[`examples/volume/cos/rpc/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.zh.md)。
+修改 proto 后重新生成：`cd pkgs/proto && make proto`。参考实现：[`examples/volume/cos/rpc/README.zh.md`](https://github.com/TencentCloud/CubeSandbox/blob/master/examples/volume/cos/rpc/README.zh.md)。
 
 ---
 
@@ -732,7 +745,7 @@ Volume 依赖 CubeMaster 与 Cubelet **双侧**均升级到支持 Volume 插件�
 | 跨节点 refcount | `CubeMaster/pkg/volume/refcount/refcount.go` | 解析 ext_info 事件并累加 `t_cube_volume.refcount` |
 | Volume DB 模型 | `CubeMaster/pkg/base/db/models/volume.go` | `VolumeRecord`（含 `refcount` 字段） |
 | Node 挂载逻辑 | `Cubelet/storage/pluginvolume.go` | bind-mount + virtiofs；上报 node 级 refcount 转变 |
-| 协议定义 | `Cubelet/api/services/volumeplugin/v1/volumeplugin.proto` | rpc 类型 proto |
-| Go 生成代码 | `Cubelet/api/services/volumeplugin/v1/volumeplugin*.pb.go` | 已提交的 message / rpc stub |
+| 协议定义 | `pkgs/proto/services/volumeplugin/v1/volumeplugin.proto` | rpc 类型 proto |
+| Go 生成代码 | `pkgs/proto/services/volumeplugin/v1/volumeplugin*.pb.go` | 已提交的 message / rpc stub |
 | COS 参考（binary） | `examples/volume/cos/binary/cube-volume-cos.sh` | binary 类型示例 |
 | COS 参考（rpc） | `examples/volume/cos/rpc/cmd/cube-volume-cos-rpc` | rpc 类型示例 |

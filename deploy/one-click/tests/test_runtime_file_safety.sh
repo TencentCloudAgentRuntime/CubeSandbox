@@ -175,6 +175,12 @@ test_unit_dependency_order() {
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-cubemaster.service" "After=network-online.target cube-sandbox-mysql.service cube-sandbox-redis.service"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-cube-api.service" "After=network-online.target cube-sandbox-cubemaster.service"
   assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-webui.service" "After=docker.service network-online.target cube-sandbox-cubemaster.service cube-sandbox-cubeops.service"
+  # s3lvol must start after MinIO and therefore stop before it (no Requires=:
+  # compute nodes do not ship MinIO).
+  assert_contains "${ONE_CLICK_DIR}/systemd/cube-sandbox-s3lvol.service" "After=network-online.target cube-sandbox-minio.service"
+  if grep -Fq 'Requires=cube-sandbox-minio.service' "${ONE_CLICK_DIR}/systemd/cube-sandbox-s3lvol.service"; then
+    fail "s3lvol must not Require minio (compute nodes have no MinIO unit)"
+  fi
 }
 
 test_detect_glibc_version_consumes_full_ldd_output() {
@@ -898,6 +904,10 @@ test_postcheck_skips_when_external_host_set() {
   CUBE_EXTERNAL_MYSQL_HOST=db.example.com \
     bash "${ONE_CLICK_DIR}/scripts/systemd/mysql-postcheck.sh" \
     || fail "mysql-postcheck must exit 0 when CUBE_EXTERNAL_MYSQL_HOST is set"
+  CUBE_EXTERNAL_POSTGRES_HOST=pg.example.com \
+    CUBE_DATABASE_DRIVER=postgres \
+    bash "${ONE_CLICK_DIR}/scripts/systemd/mysql-postcheck.sh" \
+    || fail "mysql-postcheck must exit 0 when CUBE_EXTERNAL_POSTGRES_HOST is set"
   CUBE_EXTERNAL_REDIS_HOST=cache.example.com \
     bash "${ONE_CLICK_DIR}/scripts/systemd/redis-postcheck.sh" \
     || fail "redis-postcheck must exit 0 when CUBE_EXTERNAL_REDIS_HOST is set"

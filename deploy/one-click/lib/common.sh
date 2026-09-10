@@ -499,6 +499,236 @@ load_env_file() {
   fi
 }
 
+# Installer toggle keys: on/off switches whose this-run value must survive the
+# upgrade env merge. The merge treats a bundle-.env value as an explicit
+# operator override only when it differs from the new env.example default
+# (the `cp env.example .env` safeguard), so flipping one of these keys BACK to
+# the template default via .env would otherwise be inexpressible on upgrade.
+# For the keys listed here, presence in the bundle .env or in install.sh's
+# process environment counts as explicit operator intent and is re-applied
+# after the merge (snapshot_one_click_toggles / apply_one_click_toggles).
+#
+# Opting a key in gives it presence-implies-explicit semantics: a wholesale
+# `cp env.example .env` carried into an upgrade resets the key to the template
+# default (documented caveat in the one-click README).
+ONE_CLICK_TOGGLE_KEYS=(
+  ONE_CLICK_ENABLE_S3LVOL
+  CUBE_PVM_ENABLE
+)
+
+# snapshot_one_click_toggles: capture this-run operator intent for
+# ONE_CLICK_TOGGLE_KEYS from the process environment and the bundle .env.
+# Must run BEFORE any env file is sourced: the upgrade merge later sources the
+# merged old-runtime env, which would otherwise clobber both channels.
+#   ONE_CLICK_TOGGLE_ENV_SNAPSHOT     key -> value from the process environment
+#   ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT  key -> value from the bundle .env
+# (presence in .env is enough — a value equal to the env.example default still
+# counts, which is exactly what makes "flip back to default" expressible)
+snapshot_one_click_toggles() {
+  local env_file="$1"
+  local key
+  # -g: these are process-wide state read later by apply_one_click_toggles;
+  # -A: keys are env-var names, not numeric indexes. NOTE: the declaration and
+  # the empty-assignment must be separate statements — bash 4.2 (CentOS 7)
+  # mishandles `declare -gA VAR=()` by creating a function-local array.
+  declare -gA ONE_CLICK_TOGGLE_ENV_SNAPSHOT
+  declare -gA ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT
+  ONE_CLICK_TOGGLE_ENV_SNAPSHOT=()
+  ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT=()
+  for key in "${ONE_CLICK_TOGGLE_KEYS[@]}"; do
+    if [[ -n "${!key+x}" ]]; then
+      ONE_CLICK_TOGGLE_ENV_SNAPSHOT["${key}"]="${!key}"
+    fi
+    if [[ -f "${env_file}" ]] && grep -q "^${key}=" "${env_file}"; then
+      ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT["${key}"]="$(read_env_key "${env_file}" "${key}")"
+    fi
+  done
+  return 0
+}
+
+# apply_one_click_toggles: re-apply the snapshotted operator intent after the
+# env files (including the upgrade merge output) have been sourced. Same
+# snapshot/replay shape as apply_one_click_database_intent (change both together). Precedence
+# mirrors install.sh's documented channel order (CLI flags > .env > process
+# environment > defaults): .env key > process environment > merged/loaded
+# value. The final value is persisted by install.sh's upsert_env_kv, so this
+# is the single place toggle intent is resolved.
+apply_one_click_toggles() {
+  local key
+  for key in "${ONE_CLICK_TOGGLE_KEYS[@]}"; do
+    if [[ -n "${ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT[${key}]+x}" ]]; then
+      printf -v "${key}" '%s' "${ONE_CLICK_TOGGLE_DOTENV_SNAPSHOT[${key}]}"
+      log "toggle ${key}=${!key} (explicit in .env)"
+    elif [[ -n "${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[${key}]+x}" ]]; then
+      printf -v "${key}" '%s' "${ONE_CLICK_TOGGLE_ENV_SNAPSHOT[${key}]}"
+      log "toggle ${key}=${!key} (explicit in process environment)"
+    fi
+  done
+  return 0
+}
+
+# Database engine keys are commented out of env.example, so merge_env_three_way
+# always re-appends the previous .one-click.env markers as "preserved custom
+# settings". Without a this-run snapshot, MySQL↔Postgres (or external→bundled)
+# switches expressed only in the new .env die as "mutually exclusive" or keep
+# the old engine. Mirror the toggle snapshot: capture .env / process intent
+# before merge, then scrub the opposite engine after merge.
+ONE_CLICK_DB_INTENT_KEYS=(
+  CUBE_DATABASE_DRIVER
+  CUBE_EXTERNAL_MYSQL_HOST
+  CUBE_EXTERNAL_MYSQL_PORT
+  CUBE_EXTERNAL_MYSQL_USER
+  CUBE_EXTERNAL_MYSQL_PASSWORD
+  CUBE_EXTERNAL_MYSQL_DB
+  CUBE_EXTERNAL_POSTGRES_HOST
+  CUBE_EXTERNAL_POSTGRES_PORT
+  CUBE_EXTERNAL_POSTGRES_USER
+  CUBE_EXTERNAL_POSTGRES_PASSWORD
+  CUBE_EXTERNAL_POSTGRES_DB
+)
+
+# snapshot_one_click_database_intent records process-env values and which DB
+# keys are present as active KEY= lines in .env. It must NOT store raw RHS text
+# from read_env_key: quoted passwords would round-trip with the quote chars.
+# Call capture_one_click_database_dotenv_values after load_env_file so dotenv
+# values are the shell-interpreted ones.
+snapshot_one_click_database_intent() {
+  local env_file="$1"
+  local key
+  declare -gA ONE_CLICK_DB_ENV_SNAPSHOT
+  declare -gA ONE_CLICK_DB_DOTENV_SNAPSHOT
+  declare -gA ONE_CLICK_DB_DOTENV_PRESENT
+  ONE_CLICK_DB_ENV_SNAPSHOT=()
+  ONE_CLICK_DB_DOTENV_SNAPSHOT=()
+  ONE_CLICK_DB_DOTENV_PRESENT=()
+  for key in "${ONE_CLICK_DB_INTENT_KEYS[@]}"; do
+    if [[ -n "${!key+x}" ]]; then
+      ONE_CLICK_DB_ENV_SNAPSHOT["${key}"]="${!key}"
+    fi
+    if [[ -f "${env_file}" ]] && grep -q "^${key}=" "${env_file}"; then
+      ONE_CLICK_DB_DOTENV_PRESENT["${key}"]=1
+    fi
+  done
+  return 0
+}
+
+# capture_one_click_database_dotenv_values fills DOTENV_SNAPSHOT from the live
+# shell environment for keys marked present in .env. Must run after
+# load_env_file (+ CLI re-apply) and before the upgrade merge re-sources
+# .one-click.env.
+capture_one_click_database_dotenv_values() {
+  local key
+  for key in "${ONE_CLICK_DB_INTENT_KEYS[@]}"; do
+    if [[ -n "${ONE_CLICK_DB_DOTENV_PRESENT[${key}]+x}" ]]; then
+      ONE_CLICK_DB_DOTENV_SNAPSHOT["${key}"]="${!key-}"
+    fi
+  done
+  return 0
+}
+
+_clear_one_click_external_mysql_env() {
+  CUBE_EXTERNAL_MYSQL_HOST=""
+  CUBE_EXTERNAL_MYSQL_PORT=""
+  CUBE_EXTERNAL_MYSQL_USER=""
+  CUBE_EXTERNAL_MYSQL_PASSWORD=""
+  CUBE_EXTERNAL_MYSQL_DB=""
+}
+
+_clear_one_click_external_postgres_env() {
+  CUBE_EXTERNAL_POSTGRES_HOST=""
+  CUBE_EXTERNAL_POSTGRES_PORT=""
+  CUBE_EXTERNAL_POSTGRES_USER=""
+  CUBE_EXTERNAL_POSTGRES_PASSWORD=""
+  CUBE_EXTERNAL_POSTGRES_DB=""
+}
+
+_one_click_db_intent_declared() {
+  local key="$1"
+  [[ -n "${ONE_CLICK_DB_DOTENV_PRESENT[${key}]+x}" || -n "${ONE_CLICK_DB_ENV_SNAPSHOT[${key}]+x}" ]]
+}
+
+# apply_one_click_database_intent re-applies this-run DB engine intent after the
+# upgrade merge. Same snapshot/replay shape as apply_one_click_toggles (change both
+# together); DB-specific pieces are the no-intent no-op, host→driver inference, and
+# opposite-engine scrub. No-op when neither .env nor the process environment named any
+# DB intent key (preserve prior runtime markers).
+#
+# Per-key resolution matches apply_one_click_toggles: dotenv wins, process env
+# fills gaps, otherwise the merge-preserved value is kept. Only the *opposite*
+# engine's CUBE_EXTERNAL_* markers are scrubbed so same-engine credentials that
+# lived only in .one-click.env are not wiped back to cube_pass defaults.
+# When DRIVER is only merge-preserved but this run declares a host for the other
+# engine, the host implies the driver (stale DRIVER must not scrub the host).
+apply_one_click_database_intent() {
+  local key
+  local has_intent=0
+
+  if [[ ${#ONE_CLICK_DB_DOTENV_PRESENT[@]} -gt 0 || ${#ONE_CLICK_DB_DOTENV_SNAPSHOT[@]} -gt 0 || ${#ONE_CLICK_DB_ENV_SNAPSHOT[@]} -gt 0 ]]; then
+    has_intent=1
+  fi
+  [[ "${has_intent}" -eq 1 ]] || return 0
+
+  for key in "${ONE_CLICK_DB_INTENT_KEYS[@]}"; do
+    if [[ -n "${ONE_CLICK_DB_DOTENV_SNAPSHOT[${key}]+x}" ]]; then
+      printf -v "${key}" '%s' "${ONE_CLICK_DB_DOTENV_SNAPSHOT[${key}]}"
+    elif [[ -n "${ONE_CLICK_DB_ENV_SNAPSHOT[${key}]+x}" ]]; then
+      printf -v "${key}" '%s' "${ONE_CLICK_DB_ENV_SNAPSHOT[${key}]}"
+    fi
+  done
+
+  if ! _one_click_db_intent_declared CUBE_DATABASE_DRIVER; then
+    if _one_click_db_intent_declared CUBE_EXTERNAL_POSTGRES_HOST; then
+      CUBE_DATABASE_DRIVER="postgres"
+      log "database intent: inferred driver=postgres from this-run CUBE_EXTERNAL_POSTGRES_HOST"
+    elif _one_click_db_intent_declared CUBE_EXTERNAL_MYSQL_HOST; then
+      CUBE_DATABASE_DRIVER="mysql"
+      log "database intent: inferred driver=mysql from this-run CUBE_EXTERNAL_MYSQL_HOST"
+    elif [[ -z "${CUBE_DATABASE_DRIVER:-}" ]]; then
+      if [[ -n "${CUBE_EXTERNAL_POSTGRES_HOST:-}" ]]; then
+        CUBE_DATABASE_DRIVER="postgres"
+      else
+        CUBE_DATABASE_DRIVER="mysql"
+      fi
+    fi
+  elif [[ -z "${CUBE_DATABASE_DRIVER:-}" ]]; then
+    if [[ -n "${CUBE_EXTERNAL_POSTGRES_HOST:-}" ]]; then
+      CUBE_DATABASE_DRIVER="postgres"
+    else
+      CUBE_DATABASE_DRIVER="mysql"
+    fi
+  fi
+
+  # Fail fast on this-run contradictions before scrubbing so validate_*'s
+  # mutually-exclusive / wrong-driver die paths remain reachable for .env input.
+  if _one_click_db_intent_declared CUBE_EXTERNAL_MYSQL_HOST       && _one_click_db_intent_declared CUBE_EXTERNAL_POSTGRES_HOST       && [[ -n "${CUBE_EXTERNAL_MYSQL_HOST:-}" && -n "${CUBE_EXTERNAL_POSTGRES_HOST:-}" ]]; then
+    die "CUBE_EXTERNAL_MYSQL_HOST and CUBE_EXTERNAL_POSTGRES_HOST are mutually exclusive; set CUBE_DATABASE_DRIVER to select one engine"
+  fi
+  if _one_click_db_intent_declared CUBE_DATABASE_DRIVER; then
+    if [[ "${CUBE_DATABASE_DRIVER}" == "postgres" ]]; then
+      if _one_click_db_intent_declared CUBE_EXTERNAL_MYSQL_HOST           && [[ -n "${CUBE_EXTERNAL_MYSQL_HOST:-}" ]]; then
+        die "CUBE_DATABASE_DRIVER=postgres cannot be combined with CUBE_EXTERNAL_MYSQL_HOST"
+      fi
+    else
+      if _one_click_db_intent_declared CUBE_EXTERNAL_POSTGRES_HOST           && [[ -n "${CUBE_EXTERNAL_POSTGRES_HOST:-}" ]]; then
+        die "CUBE_EXTERNAL_POSTGRES_HOST requires CUBE_DATABASE_DRIVER=postgres"
+      fi
+    fi
+  fi
+
+  if [[ "${CUBE_DATABASE_DRIVER}" == "postgres" ]]; then
+    _clear_one_click_external_mysql_env
+    log "database intent: driver=postgres host=${CUBE_EXTERNAL_POSTGRES_HOST:-}; cleared opposite CUBE_EXTERNAL_MYSQL_*"
+  else
+    _clear_one_click_external_postgres_env
+    if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST:-}" ]]; then
+      log "database intent: external MySQL host=${CUBE_EXTERNAL_MYSQL_HOST}; cleared opposite CUBE_EXTERNAL_POSTGRES_*"
+    else
+      log "database intent: driver=mysql (no external host); cleared opposite CUBE_EXTERNAL_POSTGRES_*"
+    fi
+  fi
+  return 0
+}
+
 # Load build-machine overrides for release-bundle scripts.
 # Precedence: ONE_CLICK_BUILD_ENV_FILE > ${ONE_CLICK_DIR}/build.env >
 # legacy ONE_CLICK_ENV_FILE / .env (with a migration hint).
@@ -917,6 +1147,150 @@ _remove_env_keys() {
   for key in "$@"; do
     remove_env_kv "${env_file}" "${key}"
   done
+}
+
+# patch_cubemaster_instance_db_config rewrites instance_db_config.{driver,addr,user,pwd,db_name}
+# in a CubeMaster conf.yaml. Patterns are anchored at line start so keys like
+# common.cube_ops_addr (which contain the substring "addr:") are never matched.
+patch_cubemaster_instance_db_config() {
+  local cfg="$1"
+  local driver="$2"
+  local addr="$3"
+  local user="$4"
+  local pwd="$5"
+  local db_name="$6"
+  local addr_esc user_esc pwd_esc db_esc
+  ensure_file "${cfg}"
+  addr_esc="$(escape_sed "${addr}")"
+  user_esc="$(escape_sed "${user}")"
+  pwd_esc="$(escape_sed "${pwd}")"
+  db_esc="$(escape_sed "${db_name}")"
+  sed -i \
+    -e "s|^\([[:space:]]*\)driver: \".*\"|\1driver: \"${driver}\"|" \
+    -e "s|^\([[:space:]]*\)addr: \".*\"|\1addr: \"${addr_esc}\"|" \
+    -e "s|^\([[:space:]]*\)user: \".*\"|\1user: \"${user_esc}\"|" \
+    -e "s|^\([[:space:]]*\)pwd: \".*\"|\1pwd: \"${pwd_esc}\"|" \
+    -e "s|^\([[:space:]]*\)db_name: \".*\"|\1db_name: \"${db_esc}\"|" \
+    "${cfg}"
+}
+
+# one_click_skip_local_mysql is true when an external DB endpoint is configured.
+# Key off host presence (not bare CUBE_DATABASE_DRIVER): driver=postgres with an
+# empty host must not skip bundled MySQL if this env is later reused on control.
+one_click_skip_local_mysql() {
+  [[ -n "${CUBE_EXTERNAL_MYSQL_HOST:-}" || -n "${CUBE_EXTERNAL_POSTGRES_HOST:-}" ]]
+}
+
+# validate_one_click_database_config mirrors Helm database.driver / postgres.*:
+# mysql keeps bundled or CUBE_EXTERNAL_MYSQL_*; postgres is external-only and
+# requires CUBE_EXTERNAL_POSTGRES_HOST. Engines do not share host/credential keys.
+validate_one_click_database_config() {
+  local driver="${CUBE_DATABASE_DRIVER:-mysql}"
+  case "${driver}" in
+    mysql|postgres) ;;
+    *)
+      die "CUBE_DATABASE_DRIVER must be mysql or postgres (got '${driver}')"
+      ;;
+  esac
+  CUBE_DATABASE_DRIVER="${driver}"
+
+  if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST:-}" && -n "${CUBE_EXTERNAL_POSTGRES_HOST:-}" ]]; then
+    die "CUBE_EXTERNAL_MYSQL_HOST and CUBE_EXTERNAL_POSTGRES_HOST are mutually exclusive; set CUBE_DATABASE_DRIVER to select one engine"
+  fi
+
+  if [[ "${driver}" == "postgres" ]]; then
+    if [[ -n "${CUBE_EXTERNAL_MYSQL_HOST:-}" ]]; then
+      die "CUBE_DATABASE_DRIVER=postgres cannot be combined with CUBE_EXTERNAL_MYSQL_HOST"
+    fi
+    if [[ -z "${CUBE_EXTERNAL_POSTGRES_HOST:-}" ]]; then
+      die "CUBE_DATABASE_DRIVER=postgres requires CUBE_EXTERNAL_POSTGRES_HOST (one-click never ships a local PostgreSQL)"
+    fi
+  else
+    if [[ -n "${CUBE_EXTERNAL_POSTGRES_HOST:-}" ]]; then
+      die "CUBE_EXTERNAL_POSTGRES_HOST requires CUBE_DATABASE_DRIVER=postgres"
+    fi
+  fi
+}
+
+# persist_one_click_database_runtime_env writes CUBE_DATABASE_DRIVER, the active
+# engine's CUBE_EXTERNAL_* markers, and DATABASE_URL for CubeAPI/CubeOps.
+# Opposite-engine keys are scrubbed so a driver switch cannot keep the previous
+# endpoint alive via ":-" fallbacks.
+persist_one_click_database_runtime_env() {
+  local env_file="$1"
+  local driver="${CUBE_DATABASE_DRIVER:-mysql}"
+  local database_url_user database_url_pass database_url_host database_url_port database_url_db
+  [[ -n "${env_file}" ]] || die "persist_one_click_database_runtime_env: env file path required"
+
+  # driver=postgres with no host is not a usable external endpoint (compute
+  # mirror). Persist bundled MySQL markers so reuse on control cannot skip
+  # local MySQL or fail validate on a bare driver=postgres.
+  if [[ "${driver}" == "postgres" && -z "${CUBE_EXTERNAL_POSTGRES_HOST:-}" ]]; then
+    driver="mysql"
+    CUBE_DATABASE_DRIVER="mysql"
+  fi
+
+  upsert_env_kv "${env_file}" "CUBE_DATABASE_DRIVER" "${driver}"
+
+  if [[ "${driver}" == "postgres" ]]; then
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_POSTGRES_HOST" "${CUBE_EXTERNAL_POSTGRES_HOST}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_POSTGRES_PORT" "${CUBE_EXTERNAL_POSTGRES_PORT:-5432}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_POSTGRES_USER" "${CUBE_EXTERNAL_POSTGRES_USER:-cube}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_POSTGRES_PASSWORD" "${CUBE_EXTERNAL_POSTGRES_PASSWORD:-}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_POSTGRES_DB" "${CUBE_EXTERNAL_POSTGRES_DB:-cube_mvp}"
+    database_url_user="$(urlencode "${CUBE_EXTERNAL_POSTGRES_USER:-cube}")"
+    database_url_pass="$(urlencode "${CUBE_EXTERNAL_POSTGRES_PASSWORD:-}")"
+    database_url_host="$(urlencode "${CUBE_EXTERNAL_POSTGRES_HOST}")"
+    database_url_port="$(urlencode "${CUBE_EXTERNAL_POSTGRES_PORT:-5432}")"
+    database_url_db="$(urlencode "${CUBE_EXTERNAL_POSTGRES_DB:-cube_mvp}")"
+    # Scheme matches Helm cube.databaseURL (postgresql://...).
+    upsert_env_kv "${env_file}" "DATABASE_URL" \
+      "postgresql://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}"
+    _remove_env_keys "${env_file}" \
+      CUBE_EXTERNAL_MYSQL_HOST \
+      CUBE_EXTERNAL_MYSQL_PORT \
+      CUBE_EXTERNAL_MYSQL_USER \
+      CUBE_EXTERNAL_MYSQL_PASSWORD \
+      CUBE_EXTERNAL_MYSQL_DB
+  elif [[ -n "${CUBE_EXTERNAL_MYSQL_HOST:-}" ]]; then
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_MYSQL_HOST" "${CUBE_EXTERNAL_MYSQL_HOST}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_MYSQL_PORT" "${CUBE_EXTERNAL_MYSQL_PORT:-3306}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_MYSQL_USER" "${CUBE_EXTERNAL_MYSQL_USER:-cube}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_MYSQL_PASSWORD" "${CUBE_EXTERNAL_MYSQL_PASSWORD:-}"
+    upsert_env_kv "${env_file}" "CUBE_EXTERNAL_MYSQL_DB" "${CUBE_EXTERNAL_MYSQL_DB:-cube_mvp}"
+    database_url_user="$(urlencode "${CUBE_EXTERNAL_MYSQL_USER:-cube}")"
+    database_url_pass="$(urlencode "${CUBE_EXTERNAL_MYSQL_PASSWORD:-}")"
+    database_url_host="$(urlencode "${CUBE_EXTERNAL_MYSQL_HOST}")"
+    database_url_port="$(urlencode "${CUBE_EXTERNAL_MYSQL_PORT:-3306}")"
+    database_url_db="$(urlencode "${CUBE_EXTERNAL_MYSQL_DB:-cube_mvp}")"
+    upsert_env_kv "${env_file}" "DATABASE_URL" \
+      "mysql://${database_url_user}:${database_url_pass}@${database_url_host}:${database_url_port}/${database_url_db}"
+    _remove_env_keys "${env_file}" \
+      CUBE_EXTERNAL_POSTGRES_HOST \
+      CUBE_EXTERNAL_POSTGRES_PORT \
+      CUBE_EXTERNAL_POSTGRES_USER \
+      CUBE_EXTERNAL_POSTGRES_PASSWORD \
+      CUBE_EXTERNAL_POSTGRES_DB
+  else
+    local local_mysql_host="127.0.0.1"
+    local local_mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
+    local local_mysql_user="${CUBE_SANDBOX_MYSQL_USER:-cube}"
+    local local_mysql_password="${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}"
+    local local_mysql_db="${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}"
+    upsert_env_kv "${env_file}" "DATABASE_URL" \
+      "mysql://$(urlencode "${local_mysql_user}"):$(urlencode "${local_mysql_password}")@$(urlencode "${local_mysql_host}"):$(urlencode "${local_mysql_port}")/$(urlencode "${local_mysql_db}")"
+    _remove_env_keys "${env_file}" \
+      CUBE_EXTERNAL_MYSQL_HOST \
+      CUBE_EXTERNAL_MYSQL_PORT \
+      CUBE_EXTERNAL_MYSQL_USER \
+      CUBE_EXTERNAL_MYSQL_PASSWORD \
+      CUBE_EXTERNAL_MYSQL_DB \
+      CUBE_EXTERNAL_POSTGRES_HOST \
+      CUBE_EXTERNAL_POSTGRES_PORT \
+      CUBE_EXTERNAL_POSTGRES_USER \
+      CUBE_EXTERNAL_POSTGRES_PASSWORD \
+      CUBE_EXTERNAL_POSTGRES_DB
+  fi
 }
 
 # persist_one_click_redis_runtime_env writes Redis keys for systemd
@@ -1411,6 +1785,7 @@ DEPRECATED_KEYS = {
     "CUBE_BUILD_TIME",
     "ONE_CLICK_CUBEMASTER_BIN",
     "ONE_CLICK_CUBEMASTERCLI_BIN",
+    "ONE_CLICK_TEMPLATECENTER_BIN",
     "ENVD_LOCAL_PATH",
     "ONE_CLICK_CUBELET_BIN",
     "ONE_CLICK_CUBECLI_BIN",
@@ -1486,6 +1861,10 @@ for line in template:
     # differs from the new env.example default. This is intentional: the common
     # way to create a .env is `cp env.example .env`, which would otherwise make
     # every key an "override" and clobber the user's existing customizations.
+    # (Installer toggle keys such as ONE_CLICK_ENABLE_S3LVOL are NOT special-
+    # cased here: their this-run intent is captured and re-applied around this
+    # merge by snapshot_one_click_toggles / apply_one_click_toggles in
+    # install.sh, and persisted via upsert_env_kv afterwards.)
     if key in new_overrides and new_overrides[key] != new_defaults.get(key):
         chosen = new_overrides[key]
         explicit.append(key)
@@ -2345,7 +2724,9 @@ ip_int_to_dot() {
 is_cube_tap_netdev() {
   local iface="$1"
   iface="${iface%%@*}"
-  [[ "${iface}" =~ ^z[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  # Current: dotted IPv4. Legacy: z + IPv4 (names that still fit IFNAMSIZ).
+  [[ "${iface}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || [[ "${iface}" =~ ^z[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
 is_cube_managed_netdev() {
@@ -2415,7 +2796,8 @@ _check_cidr_conflict() {
       continue
     fi
     # Other cube-managed devices, including the optional cube-router and
-    # persistent TAP devices named "z<ipv4>", are also deployment residue.
+    # persistent TAP devices named "<ipv4>" (legacy "z<ipv4>"), are also
+    # deployment residue.
     if is_cube_managed_netdev "${iface_name}"; then
       continue
     fi
@@ -2569,7 +2951,7 @@ _check_cidr_conflict() {
       die "${cidr_label} '${cidr}' overlaps an existing cube-dev network (${cd_network}/${cd_mask}).
 
   Changing the sandbox CIDR on a host that already has a cube network is
-  disruptive: the old cube-dev and the persistent z* TAP devices are left
+  disruptive: the old cube-dev and the persistent TAP devices are left
   stale. A reboot alone is NOT enough -- the systemd target is enabled and
   cubelet's embedded network runtime rebuilds the old network from config.toml on boot.
 
@@ -2577,7 +2959,9 @@ _check_cidr_conflict() {
     sudo systemctl stop 'cube-sandbox-*.target'
     sudo ip link delete cube-dev 2>/dev/null || true
     sudo ip link delete cube-router 2>/dev/null || true
-    ip tuntap show | awk -F: '/^z[0-9]+\\./{print \$1}' \\
+    ip tuntap show | awk -F: '
+      \$1 ~ /^(z)?[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+\$/ { print \$1 }
+    ' \\
       | xargs -r -n1 -I{} sudo ip tuntap del dev {} mode tap
   then re-run install with the new CIDR.
 

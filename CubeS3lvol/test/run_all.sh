@@ -76,8 +76,8 @@ done
 # Tally
 #
 # Assertion counts come from the suites' own summary lines, which are not in one
-# format: the older tests print Chinese, s3_flush_test omits the "result:"
-# prefix, and the scripts use the English form. All three are parsed rather than
+# format: s3_flush_test omits the "result:" prefix, and the scripts use the
+# English "result: N passed, M failed" form. Both are parsed rather than
 # unified, because rewriting eight suites' output to tidy up a report is a poor
 # trade -- and a suite whose line cannot be parsed is reported as such instead of
 # being counted as zero.
@@ -244,9 +244,13 @@ S3_ARGS=(-e "${ENDPOINT}" -b "${BUCKET}" -r "${REGION}")
 
 if [ "${MODE}" = list ]; then
 	echo "offline integration: spawner thread_bounce journal wal cache flush export"
-	echo "                     statefile local_dev checkpoint"
+	echo "                     statefile local_dev checkpoint export_swap"
+	echo "                     copy_xml lease_term pending_persist"
 	echo "with S3:             s3_client_test s3_bs_dev_test"
-	echo "dataplane:           dataplane recovery snapshot export selfimport decouple_queue snapdelete fs guards activation control"
+	echo "dataplane:           dataplane recovery snapshot export srcdel selfimport"
+	echo "                     derived decouple_queue snapshot_cancel snapshot_converge"
+	echo "                     agent_template cubecow_client snapdelete pending_delete"
+	echo "                     fs guards activation control"
 	echo ""
 	echo "root:        $([ "${HAVE_ROOT}" -eq 1 ] && echo yes || echo no)"
 	echo "credentials: $([ "${HAVE_CREDS}" -eq 1 ] && echo yes || echo no)"
@@ -312,12 +316,14 @@ echo "--- offline tools"
 run_suite s3_bucket_selftest python3 ./test/tools/s3_bucket.py --self-test
 run_suite isa_baseline ./test/tools/test_isa_baseline.sh
 run_suite rpc_py38_compat ./test/tools/test_rpc_py38_compat.sh
+run_suite lvs_identity ./test/tools/test_lvs_identity.sh
 echo ""
 
 echo "--- integration (no S3, no root)"
 for t in s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test \
 	 s3_cache_test s3_flush_test s3_export_test s3_statefile_test \
-	 s3_local_dev_test s3_checkpoint_test; do
+	 s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
+	 s3_copy_xml_test s3_lease_term_test s3_pending_persist_test; do
 	run_suite "${t}" "./test/integration/${t}"
 done
 echo ""
@@ -418,14 +424,18 @@ else:
 
 if [ "${MODE}" != all ]; then
 	echo "--- dataplane: skipped, $([ "${MODE}" = offline ] && echo --offline || echo --no-dataplane)"
-	for t in dataplane recovery snapshot export selfimport decouple_queue snapdelete fs guards activation control; do
+	for t in dataplane recovery snapshot export srcdel selfimport derived \
+		 decouple_queue snapshot_cancel snapshot_converge agent_template \
+		 cubecow_client snapdelete pending_delete fs guards activation control; do
 		report_skip "run_${t}_test.sh" "not requested" 1
 	done
 else
 	BLOCKER="$(dataplane_blocker)"
 	if [ -n "${BLOCKER}" ]; then
 		echo "--- dataplane"
-		for t in dataplane recovery snapshot export selfimport decouple_queue snapdelete fs guards activation control; do
+		for t in dataplane recovery snapshot export srcdel selfimport derived \
+			 decouple_queue snapshot_cancel snapshot_converge agent_template \
+			 cubecow_client snapdelete pending_delete fs guards activation control; do
 			report_skip "run_${t}_test.sh" "${BLOCKER}"
 		done
 	else
@@ -449,22 +459,48 @@ else
 		# Next to export, whose manifests it consumes.
 		run_suite run_selfimport_test.sh \
 			./test/dataplane/run_selfimport_test.sh
-		# A queued decouple must not be snapshotable: snapshotting an esnap
-		# clone moves its external snapshot onto the new snapshot, and the
-		# queued decouple then fails its detach. Regression for the 64-node
-		# failure; consumes export manifests like export does.
+		# Handing on an imported volume without copying it: three lvstores in
+		# turn, so that what the last one reads has to resolve against two
+		# prefixes at once. Next to selfimport because it is the other half of
+		# the same question -- selfimport is an import that comes home, this is
+		# one that keeps travelling.
+		run_suite run_derived_test.sh \
+			./test/dataplane/run_derived_test.sh "${S3_ARGS[@]}"
+		# Snapshotting a volume whose decouple is *queued* must cancel that
+		# decouple rather than leave one that materialises everything and then
+		# cannot detach. Regression for the 64-node failure; consumes export
+		# manifests like export does.
 		run_suite run_decouple_queue_test.sh \
 			./test/dataplane/run_decouple_queue_test.sh "${S3_ARGS[@]}"
+		# The same, for a decouple that is *running* -- the common case, since a
+		# decouple starts unless another is in the way, so it is the branch an
+		# ordinary "import, then snapshot" trips.
+		run_suite run_snapshot_cancel_test.sh \
+			./test/dataplane/run_snapshot_cancel_test.sh "${S3_ARGS[@]}"
+		# And that such a chain can then stop depending on its source: the
+		# snapshot is decoupled, and the final read happens after the source
+		# prefix is deleted and the lvstore re-attached, so a pass cannot come
+		# from a cache.
+		run_suite run_snapshot_converge_test.sh \
+			./test/dataplane/run_snapshot_converge_test.sh "${S3_ARGS[@]}"
 		# The agent-template chain across two real s3lvol_tgt processes (only
 		# the bucket is shared); consumes export manifests like export does.
 		run_suite run_agent_template_test.sh \
 			./test/dataplane/run_agent_template_test.sh "${S3_ARGS[@]}"
+		# cubecow/Cubelet client contract: the 11 rcow_* methods in the
+		# order Cubelet actually issues them (seal, clone fan-out, parallel
+		# export, import then activate without waiting for decouple). Next
+		# to agent_template because that suite is the two-process deployment
+		# form of a similar chain; this one is the single-client RPC form.
+		run_suite run_cubecow_client_test.sh \
+			./test/dataplane/run_cubecow_client_test.sh
 		# Snapshot deletion semantics; next to the suites that build clone chains.
 		run_suite run_snapdelete_test.sh \
 			./test/dataplane/run_snapdelete_test.sh
-		# Pending-delete marks: refused -> marked -> skipped while blocked ->
-		# retried once clear. Right after snapdelete: same delete path, but the
-		# question is what a *refused* delete leaves behind.
+		# Deletes that could not be carried out when asked for: the intent, the
+		# deferral, the poller that completes them, and cancelling. Directly
+		# after snapdelete, whose refusals are what this queue is built on.
+		# Slowest part is one wait for the 60 s poller.
 		run_suite run_pending_delete_test.sh \
 			./test/dataplane/run_pending_delete_test.sh
 		# Mounts a real filesystem, so it goes after the block-level suites:

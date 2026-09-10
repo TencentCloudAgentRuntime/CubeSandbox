@@ -138,6 +138,15 @@ sandbox.connect()                     # restore from snapshot
 sandbox.run_code("print('back!')")    # carry on as if never paused
 ```
 
+`connect()` does not change the sandbox's idle timeout — the value set at create (or later via `set_timeout`) is preserved across pause/resume. To change it at resume time, use the deprecated `resume(timeout=...)`:
+
+| `resume(timeout=...)` | Effect |
+|---|---|
+| omitted / `None` | keep the current timeout (same as `connect()`) |
+| `0` | keep the current timeout (use `set_timeout(0)` for immediate expiry) |
+| `NEVER_TIMEOUT` (`-1`) | never time out after resume |
+| `N > 0` | start a new N-second window from resume |
+
 See [`examples/code-sandbox-quickstart/pause.py`](https://github.com/tencentcloud/CubeSandbox/blob/master/examples/code-sandbox-quickstart/pause.py) for a full demo. Cross-node Resume (S3 backend, `remote_status=ready`) is documented in [Cross-Node Snapshots](./cross-node-snapshot.md).
 
 ### CubeProxy cache after Resume
@@ -176,7 +185,7 @@ sandbox = Sandbox.create(
 
 ### Timeout reset on auto-resume
 
-Each successful auto-resume gives the sandbox a **fresh** `timeout` countdown (matching e2b semantics). The "resume → short use → idle out → pause again" loop can repeat indefinitely.
+Each successful auto-resume **resets the idle clock** while keeping the same timeout length. The "resume → short use → idle out → pause again" loop can repeat indefinitely.
 
 ### What counts as activity
 
@@ -220,7 +229,7 @@ The repository ships with **no cluster-wide idle timeout** (`default_timeout_ins
 `create_timeout_insec` in the same section is unrelated: it only bounds the create/scheduling RPC deadline, not sandbox idle TTL. See [Service management — CubeMaster settings](service-management.md#cubemaster-settings).
 
 - **Pause fidelity**: CPU registers, process memory, TCP state (with no external peer), and filesystem mutations all survive the snapshot. Outbound sockets the sandbox itself opened are dropped on pause and must be reopened by the application after resume.
-- **Cluster coordination**: auto-pause is driven by the `cube-lifecycle-manager` service that runs on the control node. It consumes lifecycle events CubeMaster publishes via Redis stream, discovers every live CubeProxy replica through a Redis-backed registration table, and broadcasts state to each of them. Cross-replica races are resolved by Redis `SETNX` state locks so the same sandbox is never paused or resumed twice concurrently.
+- **Cluster coordination**: auto-pause is driven by `cube-lifecycle-manager`. The Helm chart and Terraform one-click both default to two warm replicas. Both replicas consume lifecycle events, discover CubeProxy replicas, and serve resume callbacks, while a Redis lease elects one replica for idle sweep/kill and stale-registry pruning. After a leader failover a sandbox may pause or resume once more; the next request auto-resumes it as usual (see the [Kubernetes FAQ](kubernetes/faq.md)). Per-sandbox Redis state transitions and CubeMaster lifecycle locks serialize effective pause/resume work across replicas.
 - **Failure mode**: when an auto-resume RPC fails, CubeProxy returns `503 + Retry-After` to the client immediately rather than hanging on a long timeout. When the sandbox has already been killed (`killing` / `killed`) the proxy returns `410 Gone` instead, telling SDK clients to stop retrying.
 - **Diagnostics**: `docker logs cube-lifecycle-manager` (control node) is the runtime log for the auto-pause coordinator. Look for `create event applied`, `auto-paused sandbox`, `auto-resumed sandbox`, `timeout-killed sandbox`. Each CubeProxy replica additionally exposes `GET http://<node-ip>:8082/admin/healthz` reporting `heartbeat_last_pushed_ms` (the last time it announced itself to the manager). The admin port defaults to `8082`; override it with `CUBE_PROXY_ADMIN_PORT` when that port is already in use on the host (CubeProxy uses host networking).
 

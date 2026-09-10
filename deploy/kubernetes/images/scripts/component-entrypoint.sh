@@ -587,6 +587,100 @@ sed_escape_replacement() {
   printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g' -e 's/[/]/\\\//g'
 }
 
+# Opt cubelet into CubeS3lvol: [cow.s3] enable = true (the image default is
+# false -- a socket path alone does not opt in) and socket_path pointing at
+# the sidecar socket. No undo path is needed: stage_component resets
+# config.toml from the image on every start.
+patch_cow_s3_opt_in() {
+  local cfg="$1"
+  local sock="$2"
+  local header='[plugins."io.cubelet.internal.v1.storage".cow.s3]'
+  local header_re='^[[:space:]]*\[plugins\."io\.cubelet\.internal\.v1\.storage"\.cow\.s3\]'
+  local tmp
+  local header_count
+  local enable_ok=0
+  local socket_ok=0
+
+  [[ -n "${sock}" ]] || fail "CUBE_S3LVOL_SOCKET is empty"
+  tmp="$(mktemp "${cfg}.XXXXXX")"
+  if grep -Eq "${header_re}" "${cfg}"; then
+    awk -v sock="${sock}" -v header="${header}" '
+      function is_table(line, name,    t) {
+        t = line
+        sub(/^[[:space:]]+/, "", t)
+        return index(t, name) == 1
+      }
+      function flush_s3() {
+        if (in_s3) {
+          if (!found_enable) {
+            print "    enable = true"
+          }
+          if (!found_socket) {
+            print "    socket_path = \"" sock "\""
+          }
+          in_s3 = 0
+        }
+      }
+      is_table($0, header) {
+        in_s3 = 1
+        print
+        next
+      }
+      in_s3 && /^[[:space:]]*\[/ {
+        flush_s3()
+      }
+      in_s3 && /^[[:space:]]*enable[[:space:]]*=/ {
+        print "    enable = true"
+        found_enable = 1
+        next
+      }
+      in_s3 && /^[[:space:]]*socket_path[[:space:]]*=/ {
+        print "    socket_path = \"" sock "\""
+        found_socket = 1
+        next
+      }
+      { print }
+      END { flush_s3() }
+    ' "${cfg}" > "${tmp}"
+  else
+    cat "${cfg}" > "${tmp}"
+    printf '\n    %s\n    enable = true\n    socket_path = "%s"\n' "${header}" "${sock}" >> "${tmp}"
+  fi
+  header_count="$(grep -Ec "${header_re}" "${tmp}" || true)"
+  if [[ "${header_count}" -ne 1 ]]; then
+    rm -f "${tmp}"
+    fail "expected exactly one live ${header} (got ${header_count})"
+  fi
+  enable_ok="$(awk -v header="${header}" '
+    function is_table(line, name,    t) {
+      t = line
+      sub(/^[[:space:]]+/, "", t)
+      return index(t, name) == 1
+    }
+    is_table($0, header) { in_s3 = 1; next }
+    in_s3 && /^[[:space:]]*\[/ { in_s3 = 0 }
+    in_s3 && /^[[:space:]]*enable[[:space:]]*=[[:space:]]*true[[:space:]]*$/ { found = 1 }
+    END { print found + 0 }
+  ' "${tmp}")"
+  socket_ok="$(awk -v header="${header}" -v sock="${sock}" '
+    function is_table(line, name,    t) {
+      t = line
+      sub(/^[[:space:]]+/, "", t)
+      return index(t, name) == 1
+    }
+    is_table($0, header) { in_s3 = 1; next }
+    in_s3 && /^[[:space:]]*\[/ { in_s3 = 0 }
+    in_s3 && $0 ~ ("^[[:space:]]*socket_path[[:space:]]*=[[:space:]]*\"" sock "\"[[:space:]]*$") { found = 1 }
+    END { print found + 0 }
+  ' "${tmp}")"
+  if [[ "${enable_ok}" -ne 1 || "${socket_ok}" -ne 1 ]]; then
+    rm -f "${tmp}"
+    fail "failed to set ${header} enable = true and socket_path = ${sock}"
+  fi
+  mv -f "${tmp}" "${cfg}"
+  log "cow.s3 enable=true socket_path=${sock}"
+}
+
 detect_primary_interface() {
   ip route get 1.1.1.1 2>/dev/null | awk '
     {
@@ -952,11 +1046,22 @@ run_cubelet() {
   apply_effective_pvm_from_state
   select_guest_kernel "$(preserve_guest_kernel_selection "${TOOLBOX_ROOT}/cube-kernel-scf")"
 
-  local ops_esc master_http_esc
+  local ops_esc master_http_esc cubeops_addr_esc cubeops_addr
   ops_esc="$(sed_escape_replacement "${CUBE_OPS_ENDPOINT}")"
   master_http_esc="$(sed_escape_replacement "${CUBE_MASTER_HTTP_ADDR}")"
   sed -i -e "s#^\([[:space:]]*meta_server_endpoint:[[:space:]]*\).*#\1\"${ops_esc}\"#" "${dyn}"
   sed -i -e "s#^\([[:space:]]*cubemaster_http_addr:[[:space:]]*\).*#\1\"${master_http_esc}\"#" "${dyn}"
+  # Warehouse downloads use the same CubeOps as node register/heartbeat.
+  cubeops_addr="${CUBE_OPS_ADDR:-${CUBE_OPS_ENDPOINT}}"
+  if [[ "${cubeops_addr}" != http://* && "${cubeops_addr}" != https://* ]]; then
+    cubeops_addr="http://${cubeops_addr}"
+  fi
+  cubeops_addr_esc="$(sed_escape_replacement "${cubeops_addr}")"
+  if grep -Eq '^[[:space:]]*cubeops_addr[[:space:]]*=' "${cfg}"; then
+    sed -i -e "s#^[[:space:]]*cubeops_addr[[:space:]]*=.*#    cubeops_addr = \"${cubeops_addr_esc}\"#" "${cfg}"
+  else
+    sed -i -e "/node_status_update_frequency/a\\    cubeops_addr = \"${cubeops_addr_esc}\"" "${cfg}"
+  fi
   configure_sandbox_dns
 
   if [[ -z "${CUBE_SANDBOX_ETH_NAME:-}" && "${CUBE_SANDBOX_AUTO_DETECT_ETH:-true}" == "true" ]]; then
@@ -978,6 +1083,9 @@ run_cubelet() {
     local egress_admin_url_esc
     egress_admin_url_esc="$(sed_escape_replacement "${egress_admin_url}")"
     sed -i "s|cube_egress_admin_url = \"[^\"]*\"|cube_egress_admin_url = \"${egress_admin_url_esc}\"|" "${cfg}"
+  fi
+  if [[ -n "${CUBE_S3LVOL_SOCKET:-}" ]]; then
+    patch_cow_s3_opt_in "${cfg}" "${CUBE_S3LVOL_SOCKET}"
   fi
   if [[ -n "${CUBE_TAP_INIT_NUM:-}" ]]; then
     [[ "${CUBE_TAP_INIT_NUM}" =~ ^[0-9]+$ ]] || fail "CUBE_TAP_INIT_NUM must be a non-negative integer"

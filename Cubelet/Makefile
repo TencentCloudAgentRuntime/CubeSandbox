@@ -2,21 +2,24 @@ APPS=cubelet cubecli
 COVERAGE_PROFILE=coverage.profile
 ROOT_DIR=$(shell pwd)
 BUILD_DIR=$(ROOT_DIR)/build
-PROTO=services/errorcode services/version services/snapshot services/cubebox services/runtime services/images services/nbi services/multimetadb services/volumeplugin types
+PROTO=services/cubehost services/multimetadb services/nbi services/runtime services/version
 PACK_DIR=$(BUILD_DIR)/cube-let
 
 export GO111MODULE=on
 export GOARCH ?= $(shell go env GOARCH)
 export GOOS=linux
 GO_BIN_DIR := $(shell if [ -n "$$(go env GOBIN)" ]; then printf "%s" "$$(go env GOBIN)"; else printf "%s/bin" "$$(go env GOPATH)"; fi)
-PROTOC_VERSION := 5.28.3
-PROTO_TOOLS_DIR := $(CURDIR)/.tools
-PROTOC := $(PROTO_TOOLS_DIR)/protoc-$(PROTOC_VERSION)/bin/protoc
-PROTO_TOOLS_BIN := $(PROTO_TOOLS_DIR)/bin
-PROTOC_INCLUDE_FLAGS=-I=. -I=$(PROTO_TOOLS_DIR)/protoc-$(PROTOC_VERSION)/include
+# Well-known types (empty.proto/any.proto) are vendored in pkgs/proto/third_party;
+# shared protos (cubebox/errorcode/images/snapshot/volumeplugin/types) resolve
+# through pkgs/proto. Only private protos remain in this module.
+PROTOBUF_INCLUDE_DIR := $(abspath ../pkgs/proto/third_party)
+PROTOC_INCLUDE_FLAGS=-I=. -I=../pkgs/proto
+ifneq ($(strip $(PROTOBUF_INCLUDE_DIR)),)
+PROTOC_INCLUDE_FLAGS += -I=$(PROTOBUF_INCLUDE_DIR)
+endif
 PROTOC_GO_FLAGS=--go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative
 PROTO_DOC_FILES=$(shell python3 -c 'import glob; print(" ".join(sorted(glob.glob("api/**/*.proto", recursive=True))))')
-export PATH := $(PROTO_TOOLS_BIN):$(GO_BIN_DIR):$(PATH)
+export PATH := $(GO_BIN_DIR):$(PATH)
 
 ifeq ($(V),1)
 Q =
@@ -31,12 +34,10 @@ PKG=github.com/tencentcloud/CubeSandbox/Cubelet/pkg
 
 PWD = $(shell pwd)
 
-# COVERAGE_PACKAGES is the coverage we care about.
+# COVERAGE_PACKAGES excludes generated api/ code and integration/ (needs a
+# live cluster); everything else is unit-testable in the builder.
 COVERAGE_PACKAGES=$(shell go list ./... \
 	| grep -v github.com/tencentcloud/CubeSandbox/Cubelet/api \
-	| grep -v github.com/tencentcloud/CubeSandbox/Cubelet/cmd \
-	| grep -v github.com/tencentcloud/CubeSandbox/Cubelet/shimlog \
-	| grep -v github.com/tencentcloud/CubeSandbox/Cubelet/runtime \
 	| grep -v /integration)
 
 # Version — injected at build time via ldflags.
@@ -70,10 +71,10 @@ deps:
 	$(Q)go mod download
 
 check-proto-tools:
-	@./hack/install-proto-tools.sh
-	@$(PROTOC) --version | grep -qx 'libprotoc 28.3' || { echo "error: expected protoc v$(PROTOC_VERSION)"; exit 1; }
-	@protoc-gen-go --version | grep -qx 'protoc-gen-go v1.36.11' || { echo "error: expected protoc-gen-go v1.36.11"; exit 1; }
-	@protoc-gen-go-grpc --version | grep -qx 'protoc-gen-go-grpc 1.6.1' || { echo "error: expected protoc-gen-go-grpc 1.6.1"; exit 1; }
+	@command -v protoc >/dev/null 2>&1 || { echo "error: protoc not installed"; exit 1; }
+	@command -v protoc-gen-go >/dev/null 2>&1 || { echo "error: protoc-gen-go not installed"; exit 1; }
+	@command -v protoc-gen-go-grpc >/dev/null 2>&1 || { echo "error: protoc-gen-go-grpc not installed"; exit 1; }
+	@if [ -z "$(PROTOBUF_INCLUDE_DIR)" ]; then echo "error: protobuf include directory not found"; exit 1; fi
 
 $(APPS): deps
 	@echo "${GOOS}"
@@ -114,12 +115,12 @@ proto: check-proto-tools
 	$(call msg,Generate proto)
 	@( for pkg in ${PROTO}; do \
 		echo $$pkg ;\
-		$(PROTOC) $(PROTOC_INCLUDE_FLAGS) $(PROTOC_GO_FLAGS) \
+		protoc $(PROTOC_INCLUDE_FLAGS) $(PROTOC_GO_FLAGS) \
 		api/$$pkg/v1/*.proto ;\
 	done)
 	@if command -v protoc-gen-doc >/dev/null 2>&1; then \
 		printf '  %-8s %s\n' "Generate" "proto doc"; \
-		$(PROTOC) $(PROTOC_INCLUDE_FLAGS) --doc_out=./doc/ --doc_opt=markdown,cubelet-api.md $(PROTO_DOC_FILES); \
+		protoc $(PROTOC_INCLUDE_FLAGS) --doc_out=./doc/ --doc_opt=markdown,cubelet-api.md $(PROTO_DOC_FILES); \
 	else \
 		printf '  %-8s %s\n' "Skip" "proto doc (missing protoc-gen-doc)"; \
 	fi

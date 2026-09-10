@@ -7,10 +7,13 @@
 **
 !CubeMaster
 !CubeMaster/**
-!cubelog
-!cubelog/**
-!CubeDB
-!CubeDB/**
+!pkgs
+!pkgs/CubeLog
+!pkgs/CubeLog/**
+!pkgs/cubedb
+!pkgs/cubedb/**
+!pkgs/proto
+!pkgs/proto/**
 !Cubelet
 !Cubelet/**
 !CubeOps

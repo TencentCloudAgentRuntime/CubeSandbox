@@ -1530,7 +1530,16 @@ impl SandBox {
             let mut containers = self.containers.lock().await;
             match containers.get_mut(id) {
                 Some(c) => c.clone(),
-                None => return Err(Error::NotFoundError(format!("not found container:{}", id))),
+                None => {
+                    let should_clean = id == &self.id && !self.conf.app_snapshot_create;
+                    drop(containers);
+                    if should_clean {
+                        crate::container::remove_sandbox_log_dir(&self.id, &self.log).await;
+                    }
+                    // Keep NotFound: cubelet already treats it as success on
+                    // destroy. Changing the RPC contract is out of scope.
+                    return Err(Error::NotFoundError(format!("not found container:{}", id)));
+                }
             }
         };
         let _operation = container.acquire_operation().await;
@@ -1539,9 +1548,16 @@ impl SandBox {
             .await
             .map_err(|e| Error::Other(format!("{}", e)))?;
 
-        let mut containers = self.containers.lock().await;
-        if containers.remove(id).is_none() {
-            warnf!(self.log, "remove container:{} failed from map", id);
+        {
+            let mut containers = self.containers.lock().await;
+            if containers.remove(id).is_none() {
+                warnf!(self.log, "remove container:{} failed from map", id);
+            }
+        }
+        // Live Task.Delete. Crash leftover is cleaned by the delete subcommand
+        // (`clean_sandbox_resource`). Pause-to-snapshot returns before here.
+        if id == &self.id && !self.conf.app_snapshot_create {
+            crate::container::remove_sandbox_log_dir(&self.id, &self.log).await;
         }
         Ok((code, tm))
     }
@@ -1838,6 +1854,8 @@ impl SandBox {
     ///   `metadata.json` is written beside it — same layout as CommitSandbox
     ///   so Resume can use `get_snapshot_dir(base, cpu, mem)`.
     /// * `memory_vol_url` – optional CubeCow (or device) URL for memory ranges.
+    /// * `snapshot_type` – same Full / Incremental / SoftDirty choice as
+    ///   CommitSandbox (`--snapshot-type`).
     ///
     /// On success the MicroVM is deleted (`pause2snapshot`) and state stays
     /// `Paused`. Cubelet then reaps this shim via task Delete. On failure after
@@ -1846,6 +1864,7 @@ impl SandBox {
         &mut self,
         destination_path: &str,
         memory_vol_url: Option<String>,
+        snapshot_type: SnapshotType,
     ) -> CResult<()> {
         let _operations = self.acquire_all_container_operations().await;
         {
@@ -1861,7 +1880,7 @@ impl SandBox {
         }
 
         if let Err(e) = self
-            .pause_vm_to_snapshot_inner(destination_path, memory_vol_url)
+            .pause_vm_to_snapshot_inner(destination_path, memory_vol_url, snapshot_type)
             .await
         {
             let mut state = self.state.lock().await;
@@ -1875,6 +1894,7 @@ impl SandBox {
         &mut self,
         destination_path: &str,
         memory_vol_url: Option<String>,
+        snapshot_type: SnapshotType,
     ) -> CResult<()> {
         self.disconnect_agent(false).await?;
 
@@ -1896,7 +1916,7 @@ impl SandBox {
         })?;
 
         let destination_url = format!("file://{}", snapshot_dir.display());
-        ch.pause_vm_cube_with_config(&destination_url, memory_vol_url)
+        ch.pause_vm_cube_with_config(&destination_url, memory_vol_url, snapshot_type)
             .await?;
 
         // vmshutdown event after pause2snapshot deletes the MicroVM

@@ -15,12 +15,12 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/templatecenter"
-	"github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func TestConstructCreateReqDefaultsToCubeboxForTemplateRestore(t *testing.T) {
@@ -59,7 +59,7 @@ func TestDeleteTemplateMapsAttemptInProgressToConflict(t *testing.T) {
 	t.Cleanup(func() {
 		deleteTemplateFn = origDeleteTemplateFn
 	})
-	deleteTemplateFn = func(ctx context.Context, templateID, instanceType string) error {
+	deleteTemplateFn = func(ctx context.Context, templateID, instanceType string, _ templatecenter.DeleteTemplateOptions) error {
 		return fmtWrapped(templatecenter.ErrTemplateAttemptInProgress, "build still running")
 	}
 
@@ -81,7 +81,7 @@ func TestDeleteTemplateMapsCleanupLocatorMissingToNotFound(t *testing.T) {
 	t.Cleanup(func() {
 		deleteTemplateFn = origDeleteTemplateFn
 	})
-	deleteTemplateFn = func(ctx context.Context, templateID, instanceType string) error {
+	deleteTemplateFn = func(ctx context.Context, templateID, instanceType string, _ templatecenter.DeleteTemplateOptions) error {
 		return fmtWrapped(templatecenter.ErrTemplateCleanupLocatorMissing, "historical locator missing")
 	}
 
@@ -103,7 +103,7 @@ func TestDeleteTemplateSuccessResponse(t *testing.T) {
 	t.Cleanup(func() {
 		deleteTemplateFn = origDeleteTemplateFn
 	})
-	deleteTemplateFn = func(ctx context.Context, templateID, instanceType string) error {
+	deleteTemplateFn = func(ctx context.Context, templateID, instanceType string, _ templatecenter.DeleteTemplateOptions) error {
 		return nil
 	}
 
