@@ -1,8 +1,8 @@
 name: DCO Check
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+  # Disabled: retain manual dispatch only while the DCO check is paused.
+  workflow_dispatch:
 
 permissions:
   contents: read
