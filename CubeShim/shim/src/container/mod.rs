@@ -28,7 +28,8 @@ use crate::common::types::PropagationContainerMount;
 use crate::common::utils::{AsyncUtils, CPath, Utils};
 use crate::common::{
     self, CResult, ANNO_PROPAGATION_CONTAINER_MNTS, CUBE_BIND_SHARE_GUEST_BASE_DIR,
-    CUBE_BIND_SHARE_TYPE, MOUNT_TYPE_BIND, MOUNT_TYPE_RBIND,
+    CUBE_BIND_SHARE_TYPE, CUBE_MEMORY_EMPTYDIR_CONTAINER_OPTION_PREFIX, CUBE_MEMORY_EMPTYDIR_TYPE,
+    MOUNT_TYPE_BIND, MOUNT_TYPE_RBIND,
 };
 use crate::container::rootfs::ANNO_CONTAINER_CUSTOM_FILE;
 use crate::log::{stat_defer, stat_defer::StatDefer, Log};
@@ -633,6 +634,49 @@ impl Container {
         //bind-share
         for m in mounts.iter_mut() {
             if let Some(t) = m.typ() {
+                if t == CUBE_MEMORY_EMPTYDIR_TYPE {
+                    let mount_point = m
+                        .source()
+                        .as_ref()
+                        .ok_or_else(|| {
+                            format!(
+                                "Memory EmptyDir mount {} has no Guest source",
+                                m.destination().display()
+                            )
+                        })?
+                        .to_string_lossy()
+                        .to_string();
+                    let (storage_options, container_options): (Vec<_>, Vec<_>) = m
+                        .options()
+                        .as_ref()
+                        .into_iter()
+                        .flatten()
+                        .cloned()
+                        .partition(|option| {
+                            !option.starts_with(CUBE_MEMORY_EMPTYDIR_CONTAINER_OPTION_PREFIX)
+                        });
+                    let container_options = container_options
+                        .into_iter()
+                        .map(|option| {
+                            option
+                                .strip_prefix(CUBE_MEMORY_EMPTYDIR_CONTAINER_OPTION_PREFIX)
+                                .expect("Memory EmptyDir container option prefix was checked")
+                                .to_string()
+                        })
+                        .collect();
+                    let storage = agent::Storage {
+                        driver: "ephemeral".to_string(),
+                        source: "tmpfs".to_string(),
+                        fstype: "tmpfs".to_string(),
+                        options: storage_options.into(),
+                        mount_point,
+                        ..Default::default()
+                    };
+                    m.set_typ(Some(MOUNT_TYPE_BIND.to_string()));
+                    m.set_options(Some(container_options));
+                    storages.push(storage);
+                    continue;
+                }
                 if t == CUBE_BIND_SHARE_TYPE {
                     let mut source = CPath::new(CUBE_BIND_SHARE_GUEST_BASE_DIR);
 
