@@ -69,3 +69,6 @@ tasks:
   test:e2e-framework:
     desc: 在测试集群运行探针、并发启动、Pod 语义、混合运行时和 AWV CSI 用例。
     cmds: ['bash ./cube-cri-testsuite/cube-cri-e2e-framework.sh {{.ARGS}}']
+  test:performance:
+    desc: 在同一 TS4/PVM 节点对比 Host、runc 与 Cube 的运行时性能。
+    cmds: ['bash ./cube-cri-testsuite/performance/run.sh {{.ARGS}}']

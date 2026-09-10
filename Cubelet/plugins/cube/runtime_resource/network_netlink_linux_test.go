@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
 	"github.com/vishvananda/netlink"
@@ -35,21 +36,27 @@ func (e *fakeNetlinkExecutor) Run(ctx context.Context, path string, operation fu
 }
 
 type fakeNetlinkHandle struct {
-	links          map[string]netlink.Link
-	addresses      []netlink.Addr
-	routes         map[int][]netlink.Route
-	neighbors      []netlink.Neigh
-	neighborReads  int
-	qdiscs         map[int][]netlink.Qdisc
-	filters        map[int][]netlink.Filter
-	operations     []string
-	nextLinkIndex  int
-	addrListErrors []error
-	failOperation  string
-	failError      error
-	failCounts     map[string]int
-	eventualNeigh  []netlink.Neigh
-	neighAfterRead int
+	links           map[string]netlink.Link
+	addresses       []netlink.Addr
+	routes          map[int][]netlink.Route
+	neighbors       []netlink.Neigh
+	neighborReads   int
+	qdiscs          map[int][]netlink.Qdisc
+	filters         map[int][]netlink.Filter
+	operations      []string
+	nextLinkIndex   int
+	addrListErrors  []error
+	failOperation   string
+	failError       error
+	failCounts      map[string]int
+	eventualNeigh   []netlink.Neigh
+	neighAfterRead  int
+	linkReadyAfter  int
+	linkReads       int
+	addrReadyAfter  int
+	addrReads       int
+	routeReadyAfter int
+	routeReads      int
 }
 
 func newFakeNetlinkHandle() *fakeNetlinkHandle {
@@ -81,6 +88,12 @@ func (h *fakeNetlinkHandle) record(operation string) error {
 func (h *fakeNetlinkHandle) LinkByName(name string) (netlink.Link, error) {
 	if err := h.record("link-get " + name); err != nil {
 		return nil, err
+	}
+	if name == "eth0" {
+		h.linkReads++
+		if h.linkReadyAfter > 0 && h.linkReads < h.linkReadyAfter {
+			return nil, unix.ENODEV
+		}
 	}
 	link, ok := h.links[name]
 	if !ok {
@@ -145,12 +158,20 @@ func (h *fakeNetlinkHandle) AddrList(link netlink.Link, family int) ([]netlink.A
 			return nil, err
 		}
 	}
+	h.addrReads++
+	if h.addrReadyAfter > 0 && h.addrReads < h.addrReadyAfter {
+		return nil, nil
+	}
 	return slices.Clone(h.addresses), nil
 }
 
 func (h *fakeNetlinkHandle) RouteList(link netlink.Link, family int) ([]netlink.Route, error) {
 	if err := h.record(fmt.Sprintf("route-list %s %d", link.Attrs().Name, family)); err != nil {
 		return nil, err
+	}
+	h.routeReads++
+	if h.routeReadyAfter > 0 && h.routeReads < h.routeReadyAfter {
+		return nil, nil
 	}
 	return slices.Clone(h.routes[family]), nil
 }
@@ -370,6 +391,43 @@ func TestNetlinkNetworkPrepareBuildsDualStackAttachmentWithoutCommands(t *testin
 	}
 }
 
+func TestNetlinkNetworkWaitsForCNIInterfaceAddressAndRoute(t *testing.T) {
+	handle := newFakeNetlinkHandle()
+	configureFakeDualStack(t, handle)
+	handle.linkReadyAfter = 3
+	handle.addrReadyAfter = 3
+	handle.routeReadyAfter = 2
+	network := &netlinkNetwork{executor: &fakeNetlinkExecutor{handle: handle}, probe: func(context.Context, string, net.IP) error {
+		t.Fatal("gateway probe called with populated neighbor table")
+		return nil
+	}}
+	attachment, err := network.Prepare(context.Background(), t.TempDir(), "eth0", "cb123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attachment.GetMac() == "" || len(attachment.GetIps()) != 2 || len(attachment.GetRoutes()) == 0 {
+		t.Fatalf("attachment=%+v", attachment)
+	}
+	if handle.linkReads < 5 || handle.addrReads < 3 || handle.routeReads < 2 {
+		t.Fatalf("readiness polls link=%d addr=%d route=%d", handle.linkReads, handle.addrReads, handle.routeReads)
+	}
+}
+
+func TestNetlinkNetworkReadinessWaitHonorsContext(t *testing.T) {
+	handle := newFakeNetlinkHandle()
+	handle.linkReadyAfter = 1_000_000
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Millisecond)
+	defer cancel()
+	network := &netlinkNetwork{executor: &fakeNetlinkExecutor{handle: handle}, probe: probeGatewayUDP}
+	_, err := network.Prepare(ctx, t.TempDir(), "eth0", "cb123")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error=%v, want context deadline", err)
+	}
+	if _, exists := handle.links["cb123"]; exists {
+		t.Fatal("TAP was created before CNI configuration became ready")
+	}
+}
+
 func TestNetlinkNetworkProbesOnlyMissingGateway(t *testing.T) {
 	handle := newFakeNetlinkHandle()
 	configureFakeDualStack(t, handle)
@@ -410,6 +468,57 @@ func TestNetlinkNetworkPollsAfterAsynchronousGatewayProbe(t *testing.T) {
 	}
 	if !slices.Contains(probes, "eth0/10.0.0.1") || !slices.Contains(probes, "eth0/fe80::1") {
 		t.Fatalf("probes=%v", probes)
+	}
+}
+
+func TestNetlinkNetworkAllowsDelayedGatewayNeighborPublication(t *testing.T) {
+	handle := newFakeNetlinkHandle()
+	configureFakeDualStack(t, handle)
+	handle.eventualNeigh = slices.Clone(handle.neighbors)
+	handle.neighbors = nil
+	// Sixteen reads require at least fifteen 2ms poll intervals. This models
+	// the delayed Cilium publication seen under concurrent Pod startup and
+	// guards against the former 20ms deadline.
+	handle.neighAfterRead = 16
+	network := &netlinkNetwork{executor: &fakeNetlinkExecutor{handle: handle}, probe: func(context.Context, string, net.IP) error {
+		return nil
+	}}
+	attachment, err := network.Prepare(context.Background(), t.TempDir(), "eth0", "cb123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.neighborReads != 16 || len(attachment.GetNeighbors()) != 2 {
+		t.Fatalf("reads=%d neighbors=%+v", handle.neighborReads, attachment.GetNeighbors())
+	}
+}
+
+func TestAdapterRollsBackWhenGatewayNeighborNeverAppears(t *testing.T) {
+	handle := newFakeNetlinkHandle()
+	configureFakeDualStack(t, handle)
+	handle.neighbors = nil
+	network := &netlinkNetwork{executor: &fakeNetlinkExecutor{handle: handle}, probe: func(context.Context, string, net.IP) error {
+		return nil
+	}}
+	adapter, err := newAdapter(filepath.Join(t.TempDir(), "resources"), testAssets(t), network)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := adapterRequest()
+	request.Network.NetnsPath = t.TempDir()
+	tapName := nameFor("cb", request.GetSandboxId(), request.GetGeneration())
+	started := time.Now()
+	_, err = adapter.Prepare(context.Background(), request, state.Lease{Generation: 3, LeaseID: "lease-a"})
+	if err == nil || !strings.Contains(err.Error(), "gateway has no neighbor MAC") {
+		t.Fatalf("Prepare error=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed < 200*time.Millisecond || elapsed > time.Second {
+		t.Fatalf("bounded neighbor wait elapsed=%s", elapsed)
+	}
+	if _, exists := handle.links[tapName]; exists {
+		t.Fatal("TAP remains after failed Prepare rollback")
+	}
+	if _, err := adapter.load(request.GetSandboxId()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("adapter record remains after failed Prepare rollback: %v", err)
 	}
 }
 
