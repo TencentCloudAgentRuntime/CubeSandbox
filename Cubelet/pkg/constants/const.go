@@ -285,6 +285,7 @@ const (
 	AnnotationsVMOSImagePath      = "cube.vm.os-image.path"
 	AnnotationsVMKernelPath       = "cube.vm.kernel.path"
 	AnnotationsVMAgentPath        = "cube.vm.agent.path"
+	AnnotationUsePassfdIO         = "cube.use_passfd_io"
 	AnnotationsRootfsWritableKey  = "cube.rootfs.wlayer.path"
 	AnnotationsRootfsWlayerSubdir = "cube.rootfs.wlayer.subdir"
 	AnnotationsCubeMsgKey         = "cube.msg.dev.path"

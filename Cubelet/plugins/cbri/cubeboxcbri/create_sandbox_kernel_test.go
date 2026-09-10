@@ -66,6 +66,7 @@ func TestCreateSandboxCreateSnapshotRefreshesArtifactKernel(t *testing.T) {
 
 	spec := applySpecOpts(t, ctx, specOpts)
 	require.Equal(t, targetKernelPath, spec.Annotations[constants.AnnotationsVMKernelPath])
+	require.Equal(t, "true", spec.Annotations[constants.AnnotationUsePassfdIO])
 }
 
 func TestCreateSandboxRestoreDoesNotRefreshArtifactKernel(t *testing.T) {
