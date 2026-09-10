@@ -72,7 +72,8 @@ MODULE_DIR   = ../../module/bdev/s3lvol
 
 APPS = s3_client_test s3_spawner_test s3_thread_bounce_test s3_bs_dev_test \
        s3_journal_test s3_wal_test s3_cache_test s3_flush_test s3_export_test \
-       s3_statefile_test s3_local_dev_test s3_checkpoint_test
+       s3_statefile_test s3_local_dev_test s3_checkpoint_test s3_export_swap_test \
+       s3_copy_xml_test s3_lease_term_test s3_pending_persist_test
 
 # (a) minimal library set for the stubbed path
 STUB_SRCS      = spdk_thread_stub.c
@@ -140,6 +141,31 @@ s3_bs_dev_test: s3_bs_dev_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 	    -Wl,--start-group $(BLOB_SPDK_LIBS) -Wl,--end-group \
 	    $(BLOB_DPDK_ARGS) \
 	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
+
+# Swapping an imported export's manifest. Same link as s3_bs_dev_test -- it uses
+# struct spdk_bs_dev -- and a real thread, because the whole point of the swap is
+# what it does about the *other* threads: the old manifest is released after
+# spdk_for_each_channel() has been round them, and only a real thread can be
+# driven far enough to observe that. No S3: swapping is pure memory.
+s3_export_swap_test: s3_export_swap_test.c $(S3BSDEV_DIR)/libs3bsdev.a
+	$(CC) $(COMMON_CFLAGS) s3_export_swap_test.c \
+	    $(S3BSDEV_DIR)/libs3bsdev.a \
+	    $(AWS_LIBS) \
+	    -Wl,--start-group $(BLOB_SPDK_LIBS) -Wl,--end-group \
+	    $(BLOB_DPDK_ARGS) \
+	    $(SYS_LIBS) $(TEST_SYS_LIBS) -o $@
+
+# CopyObject XML delimiter / truncation. Header-only, no S3, no SPDK.
+s3_copy_xml_test: s3_copy_xml_test.c $(S3BSDEV_DIR)/s3_copy_xml.h
+	$(CC) $(COMMON_CFLAGS) -I$(S3BSDEV_DIR) s3_copy_xml_test.c -o $@
+
+# Lease-miss-after-deadline predicate. Header-only, no S3, no SPDK.
+s3_lease_term_test: s3_lease_term_test.c $(MODULE_DIR)/export_lease_term.h
+	$(CC) $(COMMON_CFLAGS) -I$(MODULE_DIR) s3_lease_term_test.c -o $@
+
+# Pending-delete registry PUT coalescing. Header-only, no S3, no SPDK.
+s3_pending_persist_test: s3_pending_persist_test.c $(MODULE_DIR)/pending_persist_ctl.h
+	$(CC) $(COMMON_CFLAGS) -I$(MODULE_DIR) s3_pending_persist_test.c -o $@
 
 # chunk map persistence check: no S3, but it does need the bdev layer.
 #
@@ -276,7 +302,8 @@ s3_checkpoint_test: s3_checkpoint_test.c $(S3BSDEV_DIR)/libs3bsdev.a
 # Run only the tests that need no S3 credentials
 check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cache_test \
        s3_flush_test s3_export_test s3_statefile_test s3_local_dev_test \
-       s3_checkpoint_test
+       s3_checkpoint_test s3_export_swap_test s3_copy_xml_test s3_lease_term_test \
+       s3_pending_persist_test
 	./s3_spawner_test
 	./s3_thread_bounce_test
 	./s3_journal_test
@@ -287,6 +314,10 @@ check: s3_spawner_test s3_thread_bounce_test s3_journal_test s3_wal_test s3_cach
 	./s3_statefile_test
 	./s3_local_dev_test
 	./s3_checkpoint_test
+	./s3_export_swap_test
+	./s3_copy_xml_test
+	./s3_lease_term_test
+	./s3_pending_persist_test
 
 .PHONY: $(S3BSDEV_DIR)/libs3bsdev.a
 $(S3BSDEV_DIR)/libs3bsdev.a:

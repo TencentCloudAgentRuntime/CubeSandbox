@@ -82,6 +82,8 @@ impl Shim for Service {
             runtime_resource::handoff_persisted_to_reaper().map_err(Error::Other)?;
         }
 
+        // Binary delete: also removes /data/cubelet/log/<id> so a crashed
+        // shim does not leak host log files until a later live Task.Delete.
         utils::Utils::clean_sandbox_resource(&self.id).map_err(Error::Other)?;
 
         Ok(api::DeleteResponse::new())

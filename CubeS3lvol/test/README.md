@@ -12,19 +12,16 @@ them in this order -- the earlier ones are faster and need less environment.
 ## Running everything with one command
 
 ```sh
-make check           # 23 suites, 928 assertions, about 6 minutes (= test/run_all.sh)
-make check-offline   # only the suites needing no credentials and no root: 11, 491 assertions, about 40 seconds
+make check           # 24 suites (= test/run_all.sh; dataplane needs root + S3)
+make check-offline   # suites needing no credentials and no root (see `test/run_all.sh --list`)
 test/run_all.sh --list          # show what would run and what the environment has
 test/run_all.sh --no-dataplane  # both integration layers, no dataplane
 ```
 
 The reason `run_all.sh` exists is that the suites' preconditions had drifted
-apart: ten integration tests run anywhere, two need real credentials, ten
-dataplane scripts need root + credentials + a writable `/data` + exclusive use
-of the machine's nvme stack; and the arguments differ too (seven take
-`-e/-b/-r`, six read `s3.cfg` themselves). So "run the tests" had become
-"remember twenty-two invocations", and in practice meant running only the two
-or three related to whatever had just changed.
+apart: which tests need credentials, root, or a writable `/data` lives in
+`run_all.sh --list` (and the skip reasons it prints), not in a count that
+rots every time a suite is added.
 
 A few design decisions, each corresponding to a way a run can "look green while
 testing nothing":
@@ -146,6 +143,7 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
 ./test/dataplane/run_export_test.sh    -e cos.ap-nanjing.myqcloud.com -b <bucket> -r ap-nanjing
 ./test/dataplane/run_selfimport_test.sh    # reads /data/cubelet/s3.cfg, no arguments
 ./test/dataplane/run_snapdelete_test.sh    # same
+./test/dataplane/run_cubecow_client_test.sh    # same; cubecow/Cubelet RPC order
 ./test/dataplane/run_activation_test.sh    # same
 ./test/dataplane/run_fs_test.sh            # same; really does mkfs.xfs + mount
 ./test/dataplane/run_guards_test.sh        # same; the two accidental-deletion guards
@@ -266,6 +264,18 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   blobstore (a snapshot with a clone cannot be deleted), while an esnap clone's
   parent is pinned by the export, which can be released and also expires (the
   REF default TTL is only 3600 s). So it is safer, not just faster.
+
+- `run_cubecow_client_test.sh` -- the cubecow / Cubelet client contract. Cubelet
+  never calls JSON-RPC itself; cubecow always uses the same 11 `rcow_*` methods
+  in a fixed order, and that order is what this suite drives. Existing suites
+  cover the mechanisms (export, clone isolation, two-process import) but not
+  the composition Cubelet actually issues: seal (ext4, umount, inactive snap,
+  delete the work volume), N clones from one template plus resize of a clone,
+  three snapshots exported at once and polled by `snapshot_name`, a refused
+  template delete whose error must not contain `not found`, a failed import
+  that must not leave a named lvol, and `import(decouple=true)` followed by
+  `rcow_active_bdev` without waiting for decouple. It reads `s3.cfg` and uses
+  its own lvstore / WAL / registries.
 
 - `run_snapdelete_test.sh` -- 23 assertions. **Deleting a snapshot while its
   source volume is still alive**, and the boundaries of that.
@@ -443,8 +453,8 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
   next round red while **the round that actually produced it shows all green**,
   wrong on both ends.
 
-Common conventions of the dataplane scripts (seven take `-e/-b/-r`
-arguments, the other six read `/data/cubelet/s3.cfg` themselves):
+Common conventions of the dataplane scripts (those that take `-e/-b/-r`
+versus those that read `/data/cubelet/s3.cfg` themselves):
 
 | Environment variable | Effect |
 |----------|------|
@@ -488,10 +498,16 @@ test/tools/s3lvol_rpc.py --retry-pending   # re-issue the snapshot deletes that
 ```
 
 `--retry-pending` acts on the pending-delete marks a refused snapshot delete
-leaves behind (`PEND` in `--ls`). The marks are in the target's memory only,
-nothing retries them automatically, and there is no cancel -- see
+leaves behind (`PEND` in `--ls`). A ~60s poller already completes leased
+exports, extra clones, and finished decouples; `--retry-pending` is for
+lease-less exports, failed destroys, and not waiting out the poller. Marks are
+persisted to `<prefix>/meta/pending-deletes.json` (crash before that PUT
+forgets the intent). Withdraw a mark with `rcow_cancel_pending_delete`; see
 [Retrying a refused snapshot delete](../README.md#retrying-a-refused-snapshot-delete---retry-pending)
-in the main README for the full contract.
+in the main README for the full contract, including the race if the poller
+has already submitted destroy. `run_pending_delete_test.sh` step [11] uses
+`rcow_pending_load_hold` to delay that registry's HEAD and GET around unload
+(test-only; production never parks attach).
 
 Especially useful when debugging a hung target: a process a test script left
 behind can be asked for its state directly.

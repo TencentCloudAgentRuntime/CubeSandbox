@@ -22,6 +22,12 @@ const (
 	// A row in this state must never be reused; the create/reuse path rebuilds
 	// instead. GC retries cleanup until the artifact row can be safely deleted.
 	ArtifactStatusCleanupPending = "CLEANUP_PENDING"
+	// ArtifactStatusDeleting marks an artifact row the TC deleter has claimed
+	// (CLEANUP_PENDING -> DELETING) and is actively destroying. A row in this
+	// state must never be resurrected by a build claim: the deleter's final
+	// row DELETE is guarded on this status, so a concurrent claim flipping it
+	// back to BUILDING would lose the delete in flight.
+	ArtifactStatusDeleting = "DELETING"
 	// ArtifactStatusOrphaned marks an artifact with no surviving references that
 	// was never fully built/distributed (e.g. interrupted build); GC reclaims it.
 	ArtifactStatusOrphaned = "ORPHANED"
@@ -30,6 +36,10 @@ const (
 	JobStatusRunning = "RUNNING"
 	JobStatusReady   = "READY"
 	JobStatusFailed  = "FAILED"
+	// JobStatusBuilt marks a remote-mode job whose rootfs artifact has been
+	// built by CubeTemplateCenter and reported back via the internal status
+	// callback. Distribution + template registration happen after this point.
+	JobStatusBuilt = "BUILT"
 
 	JobOperationCreate           = "CREATE"
 	JobOperationRedo             = "REDO"

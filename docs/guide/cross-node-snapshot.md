@@ -1,5 +1,9 @@
 # Cross-Node Snapshots (Pause / Resume / Snapshot)
 
+::: tip Deployment scope
+CubeS3lvol is **off by default** on both one-click and Kubernetes deployments. To enable it see [§2 Configuring the S3 backend](#_2-configuring-the-s3-backend); for resource and storage planning see [§3 Storage requirements on every node](#_3-storage-requirements-on-every-node).
+:::
+
 CubeSandbox persists a sandbox as a **package** of three objects (rootfs / memory / metadata) so you can **Pause**, **Resume**, and take a **Snapshot**:
 
 - **Pause / Resume**: freeze a running sandbox (memory + filesystem) into a pause package, then restore it on the same node or another compatible node.
@@ -39,7 +43,7 @@ cubemastercli tpl create-from-image \
   --probe-path /health
 ```
 
-Confirm `BACKEND` is `s3` with `cubemastercli cubebox template list`. Sandboxes and snapshots created from that template inherit `s3` (see [CLI fields](#4-cli-fields-for-cross-node-restore)).
+Confirm `BACKEND` is `s3` with `cubemastercli cubebox template list`. Sandboxes and snapshots created from that template inherit `s3` (see [CLI fields](#_4-cli-fields-for-cross-node-restore)).
 
 ### 1.2 Origin first; cross-node only when the origin cannot schedule
 
@@ -68,6 +72,15 @@ The scheduler (`restoreplace`) **always prefers the origin node**. It leaves tha
 In short: if the origin is up and schedulable, restore stays there. If it is gone or unschedulable **and** the snapshot meets the cross-node conditions, restore moves. Otherwise the API fails; it will not pick an incompatible node.
 
 An [isolated](./node-operations.md) origin is unschedulable, which is the usual way to force a cross-node Resume in tests. A sandbox with a **host-mount** is pinned to the origin (`PinToOrigin`) and will not cross even when `remote_status=ready`.
+
+External storage changes the placement behavior:
+
+- **Raw host mounts remain origin-only.** A host path has no cluster-wide identity, so an identical path string on another node is not considered portable.
+- **Plugin Volumes may attempt cross-node restore.** For FromSnap, Master resolves each current Volume record and sends its driver metadata to the target Cubelet. For Resume, Master validates the recorded Volume IDs and Cubelet reads the attach metadata from the pause package. In both paths, Cubelet checks that the driver is registered locally and calls `Attach` before starting the VM.
+- The scheduler currently does **not** model Volume portability, topology, multi-attach support, or driver availability. Operators must configure the required driver and backend access on every eligible node. A missing Volume, missing target driver, or failed `Attach` fails the FromSnap/Resume operation; CubeSandbox does not start the VM without its required Volume.
+- FromSnap may attach the same read-write Volume while the source sandbox is still running. Use a backend that safely supports the intended sharing pattern; otherwise stop the source first or use a read-only mount.
+
+The S3 requirement on this page applies to the **VM snapshot package backend**, not necessarily to the plugin Volume's own backend. For example, an S3 VM snapshot may restore with an NFS, CephFS, or S3-backed plugin Volume if the target node can attach it.
 
 ### 1.3 The snapshot must be remotely `ready`
 
@@ -118,16 +131,42 @@ Cubelet reads `/proc/cpuinfo` on the node and hashes CPU identity plus the featu
 Cube install ships MinIO as the default S3 service so you can try the feature out of the box.
 To point at your own S3 store, follow the [CubeS3lvol README](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md).
 
+### 2.1 Kubernetes (Helm)
+
+Set `cubeS3lvol.enabled=true` on the chart. Nothing else is required: the sidecar reuses the chart MinIO or `volumeS3` endpoint and credentials, and writes to its own `cube-s3lvol` bucket — always separate from the S3 volume plugin's `cube-volumes` bucket. The cubelet entrypoint then sets `[cow.s3] enable = true` and points `socket_path` at the shared emptyDir socket; writing a socket path without `enable` does not opt in. Enabling it **recreates the Big Pod and interrupts sandboxes on that node**; do this in a maintenance window.
+
+Identity comes from the full Kubernetes node name, hashed to `rcow-<8hex>`. A Pod recreate keeps the same name. `cubeS3lvol.lvsName` pins the same name on every node — do not set it on a multi-node cluster.
+
+Extra settings are only needed when:
+
+- the S3 endpoint is external and path-style — set `cubeS3lvol.s3.pathStyle: true`;
+- cores are isolated — set `cubeS3lvol.cpuMask` (default is rcow's `0x3`).
+
+```yaml
+cubeS3lvol:
+  enabled: true
+  # Optional: override endpoint / keys. Bucket must stay separate from cube-volumes.
+  # s3:
+  #   endpoint: https://s3.example.com
+  #   accessKeyId: ...
+  #   secretAccessKey: ...
+  #   bucket: cube-s3lvol
+```
+
+The first start creates the sparse WAL if it is missing; `journalMB` / `walMB` / `cacheMB` only apply before that file exists. Enabling the sidecar also raises the Big Pod's `terminationGracePeriodSeconds` to at least 180s so `rcow_stop` can disconnect and unload.
+
 ---
 
 ## 3. Storage requirements on every node
+
+Every node that runs the s3lvol target needs about **2 CPU + 18 GiB RAM**; x86_64 hosts need AVX2 (Haswell).
 
 Snapshot objects live in shared S3, but **every node that runs the s3lvol target also needs a local WAL image**. Cross-node restore depends on it: writes to the snapshot are staged on local disk first and flushed to S3 asynchronously, and a node without the image can neither take snapshots nor restore them.
 
 ### 3.1 The WAL image
 
 - Path: `/data/cubelet/rcow/wal_bdev.img`
-- Logical size: **512 GiB** by default, created as a **sparse** file by `install.sh`
+- Logical size: **512 GiB** by default, created as a **sparse** file by one-click `install.sh` or the Helm sidecar entrypoint on first start
 - Created once; the journal / WAL / cache split is fixed at creation and cannot be resized afterwards (only by re-creating the image)
 
 The default 512 GiB is three regions:
@@ -143,7 +182,7 @@ The default 512 GiB is three regions:
 ### 3.2 Cluster planning
 
 - **Every node that may restore cross-node needs its own WAL image on local disk** — compute nodes running sandboxes, and control nodes that run the s3lvol target, included.
-- The region sizes are set at install time via `RCOW_JOURNAL_MB` / `RCOW_WAL_MB` / `RCOW_CACHE_MB` (one-click install), or the equivalent runtime env in the CubeS3lvol config. Tuning them only matters **before the first start** — the layout is frozen once the image exists.
+- The region sizes are set at install time via `RCOW_JOURNAL_MB` / `RCOW_WAL_MB` / `RCOW_CACHE_MB` (one-click), chart `cubeS3lvol.journalMB` / `walMB` / `cacheMB` (Helm), or the equivalent runtime env. Tuning them only matters **before the first start** — the layout is frozen once the image exists.
 - The image does not hold snapshot data permanently: it is a write buffer plus a cache. The durable copy is in S3.
 
 ---
@@ -211,7 +250,7 @@ cubeopscli --address 127.0.0.1 --port 3010 node list
 cubeopscli --address 127.0.0.1 --port 3010 node list --json
 ```
 
-`HostFacts` keys are described in [1.4 Target kernel / CPU must match the origin](#14-target-kernel--cpu-must-match-the-origin). Before a cross-node restore, confirm `cpuid_hash` and `host_kernel_release` match, and review the rest of HostFacts.
+`HostFacts` keys are described in [1.4 Target kernel / CPU must match the origin](#_14-target-kernel--cpu-must-match-the-origin). Before a cross-node restore, confirm `cpuid_hash` and `host_kernel_release` match, and review the rest of HostFacts.
 
 ---
 
@@ -284,7 +323,13 @@ Create from the **template** (`Sandbox.create(template=tpl-…)`).
 
    A different refusal: when the volume is still an **active** NVMe-oF namespace, the delete is refused at the RPC layer (with a hint to run `rcow_deactive_bdev` first). That path does **not** record a mark — it is a precondition the caller can fix immediately, not a blocker to wait out.
 
-   Once the blocker clears (the export is released or expires, the extra clone is deleted, decouple finishes, or the volume is deactivated), you must **retry by hand** on that node:
+   A ~60s poller then completes the delete once the blocker is gone for **leased** exports (the importer stops renewing), extra clones, a finished decouple, or an export that was still publishing. It will **not** auto-complete a **lease-less** export: TTL expiry is not evidence that nobody is reading, so that case waits for a human (or `--retry-pending`). An asynchronously failed destroy is also left for an explicit retry.
+
+   Marks are persisted to `<prefix>/meta/pending-deletes.json` and restored on attach. The delete RPC returns **before** that PUT; a crash in that window forgets the intent and the delete has to be asked for again. When the blocker is one the poller can finish on its own, the reply is still success, with **`deferred: true`**. A lease-less export still returns EBUSY; the mark is recorded in both cases. Withdraw the intent with `rcow_cancel_pending_delete` (`lvol_name` required, `lvs_name` optional); it is idempotent. If the poller has already submitted destroy, cancel only drops the mark and the snapshot may still go away.
+
+   A snapshot of a volume that is still decoupling from an import keeps that external parent; `rcow_create_snapshot` then returns **`decouple_cancelled: true`**.
+
+   `--retry-pending` is still the operator tool for lease-less exports, failed destroys, and not waiting for the poller:
 
    ```sh
    # from the CubeS3lvol directory
@@ -292,7 +337,7 @@ Create from the **template** (`Sandbox.create(template=tpl-…)`).
    test/tools/s3lvol_rpc.py --retry-pending   # retry every marked snapshot that is deletable now
    ```
 
-   Limits of this mechanism: marks live **only in the s3lvol_tgt process memory** and are lost on restart or lvstore unload; there is **no automatic retry** (no background poller) and **no way to cancel** a recorded mark. The cluster delete path (Cubelet `S3Cow.DeleteByKind`) currently treats a refused snapshot delete as success and does not run `--retry-pending`, so leftover objects must be handled on the node as above. See [Retrying a refused snapshot delete](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md#retrying-a-refused-snapshot-delete---retry-pending) in `CubeS3lvol/README.md`.
+   The cluster delete path (Cubelet `S3Cow.DeleteByKind`) currently treats a refused snapshot delete as success and does not run `--retry-pending`, so leftover objects on that path must be handled on the node as above. See [Retrying a refused snapshot delete](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md#retrying-a-refused-snapshot-delete---retry-pending) in `CubeS3lvol/README.md`.
 
 2. **DB / filesystem layout changed vs pre-0.7.0; migration is tested from 0.6.0 only.** Table and on-disk layout differ from versions before 0.7.0. The new release adapts older data for cleanup, but that path is **tested against 0.6.0**. If adaptation fails, delete leftover snapshot files and the matching DB rows by hand.
 

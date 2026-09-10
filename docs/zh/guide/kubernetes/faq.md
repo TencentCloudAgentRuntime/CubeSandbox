@@ -144,6 +144,10 @@ kubectl uncordon <node>
 
 ## 控制面 / 数据库
 
+### CLM 故障切换后沙箱为什么会多一次 pause/resume
+
+这是预期行为，且只发生一次，不是循环。新 leader 接管时（副本故障，或滚动升级中的 leader 切换）会重新核对每个沙箱的状态，记录不一致时按安全的一侧记为 `paused`。这只是记录层面的修正，不会向 VM 发 pause，下次请求会照常 auto-resume。代价是最多一次额外的 auto-resume；反过来，把实际已停止的沙箱记成 `running`，会让流量打到已停机的 VM。
+
 ### cube-master 报连不上 MySQL
 
 按顺序查（以下命令假定 Release 名为 `cube`，命名空间 `cube-system`；其它 Release 名请把资源名前缀换成 `<release>`）：
@@ -440,7 +444,7 @@ PVC/PV 是否删除取决于实际 StorageClass 的 `reclaimPolicy`（TKE 的 `c
 
 ```bash
 ONE_CLICK_ARCH=arm64 \
-PUSH=1 REGISTRY=<your-registry> IMAGE_TAG=v0.7.0 \
+PUSH=1 REGISTRY=<your-registry> IMAGE_TAG=v0.7.1-rc1 \
 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 

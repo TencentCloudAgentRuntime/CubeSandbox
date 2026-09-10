@@ -7,7 +7,7 @@ import (
 	"context"
 	"sync"
 
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 )
 
 // TraceBuffer defers performance-log formatting and I/O until the owner has

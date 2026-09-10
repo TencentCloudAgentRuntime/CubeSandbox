@@ -10,7 +10,7 @@ import (
 	"unicode"
 
 	"github.com/containerd/plugin"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 const (
@@ -211,8 +211,13 @@ const (
 	// id (same snap-* format as normal Commit snapshots). Cubelet only stores
 	// the local catalog under this id; Kind=pause_snapshot.
 	MasterAnnotationPauseSnapshotID = "cube.master.pause.snapshot.id"
+	// MasterAnnotationLaunchMemorySnapshotID is the template or customer
+	// snapshot the sandbox was first started from. Pause may clone it only
+	// when it is still the VM's last restore (first Pause after
+	// Create-from-template). Resume and Commit must not overwrite it.
+	MasterAnnotationLaunchMemorySnapshotID = "cube.master.launch.memory.snapshot.id"
 	// MasterAnnotationStorageBackend is the CoW backend Master passes on
-	// Pause / Commit (xfs｜s3). Empty means xfs.
+	// Pause / Commit (xfs/s3). Empty means xfs.
 	MasterAnnotationStorageBackend = "cube.master.storage.backend"
 	// MasterAnnotationSnapshotRemoteUUIDs is the JSON blob of remote
 	// volume uuids (rootfs/memory/metadata) for cubecow_import_lvol.
@@ -280,6 +285,7 @@ const (
 	AnnotationsVMOSImagePath      = "cube.vm.os-image.path"
 	AnnotationsVMKernelPath       = "cube.vm.kernel.path"
 	AnnotationsVMAgentPath        = "cube.vm.agent.path"
+	AnnotationUsePassfdIO         = "cube.use_passfd_io"
 	AnnotationsRootfsWritableKey  = "cube.rootfs.wlayer.path"
 	AnnotationsRootfsWlayerSubdir = "cube.rootfs.wlayer.subdir"
 	AnnotationsCubeMsgKey         = "cube.msg.dev.path"

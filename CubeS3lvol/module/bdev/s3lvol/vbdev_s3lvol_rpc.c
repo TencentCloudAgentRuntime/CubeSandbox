@@ -24,7 +24,7 @@
  *     rcow_create_lvol / rcow_delete_lvol / rcow_resize_lvol
  *     rcow_create_snapshot / rcow_create_clone
  *     rcow_export_snapshot / rcow_get_snapshot_status / rcow_import_lvol
- *     rcow_release_export / rcow_get_imports / rcow_decouple_lvol
+ *     rcow_release_export / rcow_get_exports / rcow_get_imports / rcow_decouple_lvol
  *     rcow_get_decouple
  *     rcow_active_bdev / rcow_deactive_bdev / rcow_get_bdev
  *
@@ -145,6 +145,28 @@ rpc_lvol_respond_ok(struct spdk_jsonrpc_request *request, const char *name)
 	rpc_lvol_write_response(request, true, name);
 }
 
+/* A delete that was accepted as an intent rather than carried out.
+ *
+ * Deliberately a success: the caller asked for the snapshot to go away, and it
+ * will, without them having to do anything else -- reporting -EBUSY would say
+ * the opposite. The envelope is the usual one so every existing caller keeps
+ * reading the name off stdout unchanged; the extra field is there for the ones
+ * that want to tell "gone now" from "gone shortly" (test/tools/s3lvol_rpc.py
+ * --raw shows it). */
+static void
+rpc_lvol_respond_deferred(struct spdk_jsonrpc_request *request, const char *name)
+{
+	struct spdk_json_write_ctx *w;
+
+	w = spdk_jsonrpc_begin_result(request);
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_bool(w, "bool_value", true);
+	spdk_json_write_named_string(w, "string_value", name);
+	spdk_json_write_named_bool(w, "deferred", true);
+	spdk_json_write_object_end(w);
+	spdk_jsonrpc_end_result(request, w);
+}
+
 static void
 rpc_lvol_respond_err(struct spdk_jsonrpc_request *request, int err,
 		     const char *msg)
@@ -181,7 +203,7 @@ rpc_lvol_respond_errf(struct spdk_jsonrpc_request *request, const char *fmt, ...
  * Structured answers, carried inside string_value
  *
  * Four of these RPCs have more than a name to report: rcow_get_bdev,
- * rcow_get_decouple and rcow_get_imports answer with a list, and
+ * rcow_get_decouple, rcow_get_exports and rcow_get_imports answer with a list, and
  * rcow_active_bdev with the placement it picked. The unified reply has one string
  * to put that in, so the document is serialised and handed over as that string;
  * the caller parses it a second time.
@@ -632,20 +654,30 @@ static const struct spdk_json_object_decoder rpc_create_lvol_decoders[] = {
 	{"size_gib",  offsetof(struct rpc_create_lvol, size_gib),  spdk_json_decode_uint64, false},
 };
 
+struct rpc_create_lvol_ctx {
+	struct spdk_jsonrpc_request *request;
+	char                         name[SPDK_LVOL_NAME_MAX];
+};
+
 static void
 rpc_create_lvol_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 {
-	struct spdk_jsonrpc_request *request = cb_arg;
+	struct rpc_create_lvol_ctx *ctx = cb_arg;
 
 	if (lvolerrno != 0) {
-		rpc_lvol_respond_err(request, lvolerrno, NULL);
+		SPDK_ERRLOG("rcow_create_lvol '%s' failed: %s\n", ctx->name,
+			    spdk_strerror(-lvolerrno));
+		rpc_lvol_respond_err(ctx->request, lvolerrno, NULL);
+		free(ctx);
 		return;
 	}
 
 	/* Returns the lvol name; the caller takes it to rcow_active_bdev --
 	 * NOT nvmf_subsystem_add_ns, which bypasses the active volume registry
 	 * and would not be replayed on crash recovery. */
-	rpc_lvol_respond_ok(request, lvol->name);
+	SPDK_NOTICELOG("rcow_create_lvol '%s' completed\n", lvol->name);
+	rpc_lvol_respond_ok(ctx->request, lvol->name);
+	free(ctx);
 }
 
 /* GiB -> bytes; the ceiling and the zero check are shared with the other two,
@@ -658,6 +690,7 @@ rpc_rcow_create_lvol(struct spdk_jsonrpc_request *request,
 			    const struct spdk_json_val *params)
 {
 	struct rpc_create_lvol req = {0};
+	struct rpc_create_lvol_ctx *ctx;
 	struct s3lvol_lvstore *lvs;
 	const char *problem;
 	char errbuf[128];
@@ -673,12 +706,16 @@ rpc_rcow_create_lvol(struct spdk_jsonrpc_request *request,
 
 	problem = rcow_gib_problem("size_gib", req.size_gib, errbuf, sizeof(errbuf));
 	if (problem) {
+		SPDK_WARNLOG("rcow_create_lvol '%s' refused: %s\n", req.lvol_name,
+			     problem);
 		rpc_lvol_respond_err(request, 0, problem);
 		goto cleanup;
 	}
 
 	lvs = s3lvol_lvstore_pick_one();
 	if (!lvs) {
+		SPDK_WARNLOG("rcow_create_lvol '%s' refused: no unique lvstore\n",
+			     req.lvol_name);
 		rpc_lvol_respond_err(request, 0,
 			"this RPC creates volumes in the one lvstore that exists; "
 			"there are currently none, or more than one (it takes no "
@@ -686,11 +723,25 @@ rpc_rcow_create_lvol(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		rpc_lvol_respond_err(request, -ENOMEM, NULL);
+		goto cleanup;
+	}
+	ctx->request = request;
+	snprintf(ctx->name, sizeof(ctx->name), "%s", req.lvol_name);
+
+	SPDK_NOTICELOG("rcow_create_lvol '%s' requested (%" PRIu64 " GiB)\n",
+		       req.lvol_name, req.size_gib);
+
 	rc = s3lvol_lvol_create(lvs, req.lvol_name,
 				RCOW_GIB_TO_BYTES(req.size_gib), true,
-				rpc_create_lvol_cb, request);
+				rpc_create_lvol_cb, ctx);
 	if (rc != 0) {
+		SPDK_ERRLOG("rcow_create_lvol '%s' failed: %s\n", req.lvol_name,
+			    spdk_strerror(-rc));
 		rpc_lvol_respond_err(request, rc, NULL);
+		free(ctx);
 	}
 
 cleanup:
@@ -736,17 +787,59 @@ static const struct spdk_json_object_decoder rpc_create_clone_decoders[] = {
  * Also, callers should not hand-assemble a bdev name for nvmf -- the correct
  * entry point is rcow_active_bdev, which takes the lvol name (not the bdev
  * name). */
+/* Carries the one fact the reply needs beyond the new name: whether taking this
+ * snapshot cancelled a decouple. Known synchronously, but reported from the
+ * completion, which is why it cannot simply be a local variable. */
+struct rpc_derive_ctx {
+	struct spdk_jsonrpc_request *request;
+	bool                         cancelled_decouple;
+	bool                         snapshot;
+	char                         from[SPDK_LVOL_NAME_MAX];
+	char                         to[SPDK_LVOL_NAME_MAX];
+};
+
 static void
 rpc_derive_lvol_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 {
-	struct spdk_jsonrpc_request *request = cb_arg;
+	struct rpc_derive_ctx *ctx = cb_arg;
+	struct spdk_json_write_ctx *w;
+	const char *op = ctx->snapshot ? "rcow_create_snapshot" : "rcow_create_clone";
 
 	if (lvolerrno != 0) {
-		rpc_lvol_respond_err(request, lvolerrno, NULL);
+		SPDK_ERRLOG("%s '%s' from '%s' failed: %s\n", op, ctx->to, ctx->from,
+			    spdk_strerror(-lvolerrno));
+		rpc_lvol_respond_err(ctx->request, lvolerrno, NULL);
+		free(ctx);
 		return;
 	}
 
-	rpc_lvol_respond_ok(request, lvol->name);
+	if (ctx->cancelled_decouple) {
+		/* The caller asked for this volume to be decoupled -- by default,
+		 * without naming it -- and that is not going to happen now: the
+		 * snapshot holds the external parent, so the chain keeps reading the
+		 * source export, and this node keeps renewing its lease. In the reply
+		 * so Cubelet does not have to scrape logs, and here so a post-mortem
+		 * can find the same fact. */
+		SPDK_NOTICELOG("%s '%s' from '%s' completed; decouple of the source "
+			       "was cancelled\n", op, lvol->name, ctx->from);
+	} else {
+		SPDK_NOTICELOG("%s '%s' from '%s' completed\n", op, lvol->name,
+			       ctx->from);
+	}
+
+	if (!ctx->cancelled_decouple) {
+		rpc_lvol_respond_ok(ctx->request, lvol->name);
+		free(ctx);
+		return;
+	}
+
+	w = spdk_jsonrpc_begin_result(ctx->request);
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_string(w, "name", lvol->name);
+	spdk_json_write_named_bool(w, "decouple_cancelled", true);
+	spdk_json_write_object_end(w);
+	spdk_jsonrpc_end_result(ctx->request, w);
+	free(ctx);
 }
 
 /* Shared by both: decode, resolve, dispatch. The only differences are the decoder
@@ -759,6 +852,7 @@ rpc_derive_lvol(struct spdk_jsonrpc_request *request,
 		size_t decoder_count, bool snapshot)
 {
 	struct rpc_lvol_derive req = {0};
+	struct rpc_derive_ctx *ctx;
 	struct s3lvol_lvstore *lvs;
 	struct spdk_lvol *lvol;
 	int rc;
@@ -770,6 +864,9 @@ rpc_derive_lvol(struct spdk_jsonrpc_request *request,
 
 	lvol = s3lvol_lvol_find_any(req.lvol_name);
 	if (!lvol) {
+		SPDK_WARNLOG("%s: lvol '%s' not found in any lvstore\n",
+			     snapshot ? "rcow_create_snapshot" : "rcow_create_clone",
+			     req.lvol_name);
 		rpc_lvol_respond_errf(request, "lvol '%s' not found in any lvstore",
 				      req.lvol_name);
 		goto cleanup;
@@ -780,15 +877,38 @@ rpc_derive_lvol(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		rpc_lvol_respond_err(request, -ENOMEM, NULL);
+		goto cleanup;
+	}
+	ctx->request = request;
+	ctx->snapshot = snapshot;
+	snprintf(ctx->from, sizeof(ctx->from), "%s", req.lvol_name);
+	snprintf(ctx->to, sizeof(ctx->to), "%s", req.new_name);
+
+	SPDK_NOTICELOG("%s '%s' from '%s' requested\n",
+		       snapshot ? "rcow_create_snapshot" : "rcow_create_clone",
+		       req.new_name, req.lvol_name);
+
 	if (snapshot) {
 		rc = s3lvol_lvol_create_snapshot(lvs, lvol, req.new_name,
-						 rpc_derive_lvol_cb, request);
+						 &ctx->cancelled_decouple,
+						 rpc_derive_lvol_cb, ctx);
 	} else {
+		/* No cancellation on this path: create_clone derives from a snapshot,
+		 * which never has a decouple of its own -- the queue holds the volume
+		 * the snapshot was taken from. So the field stays false and the reply
+		 * keeps its old shape. */
 		rc = s3lvol_lvol_create_clone(lvs, lvol, req.new_name,
-					      rpc_derive_lvol_cb, request);
+					      rpc_derive_lvol_cb, ctx);
 	}
 	if (rc != 0) {
+		SPDK_ERRLOG("%s '%s' from '%s' failed: %s\n",
+			    snapshot ? "rcow_create_snapshot" : "rcow_create_clone",
+			    req.new_name, req.lvol_name, spdk_strerror(-rc));
 		rpc_lvol_respond_err(request, rc, NULL);
+		free(ctx);
 	}
 
 cleanup:
@@ -973,11 +1093,14 @@ rpc_resize_lvol_cb(void *cb_arg, int lvolerrno)
 	lvol->action_in_progress = false;
 
 	if (lvolerrno != 0) {
+		SPDK_ERRLOG("rcow_resize_lvol '%s' failed: %s\n", lvol->name,
+			    spdk_strerror(-lvolerrno));
 		rpc_lvol_respond_err(request, lvolerrno, NULL);
 		free(ctx);
 		return;
 	}
 
+	SPDK_NOTICELOG("rcow_resize_lvol '%s' completed\n", lvol->name);
 	rpc_lvol_respond_ok(request, lvol->name);
 	free(ctx);
 }
@@ -1020,6 +1143,8 @@ rpc_rcow_resize_lvol(struct spdk_jsonrpc_request *request,
 	 * spdk_lvol::action_in_progress exists for this and is unused upstream, so
 	 * it only ever means "an s3lvol RPC is working on this lvol". */
 	if (lvol->action_in_progress) {
+		SPDK_WARNLOG("rcow_resize_lvol '%s' refused: another operation is "
+			     "in progress\n", lvol->name);
 		rpc_lvol_respond_err(request, 0,
 				     "another operation is in progress on this lvol");
 		goto cleanup;
@@ -1034,11 +1159,16 @@ rpc_rcow_resize_lvol(struct spdk_jsonrpc_request *request,
 	ctx->lvol = lvol;
 	lvol->action_in_progress = true;
 
+	SPDK_NOTICELOG("rcow_resize_lvol '%s' requested (%" PRIu64 " GiB)\n",
+		       lvol->name, req.size_gib);
+
 	rc = s3lvol_lvol_resize(lvol, RCOW_GIB_TO_BYTES(req.size_gib),
 				rpc_resize_lvol_cb, ctx);
 	if (rc != 0) {
 		lvol->action_in_progress = false;
 		free(ctx);
+		SPDK_ERRLOG("rcow_resize_lvol '%s' failed: %s\n", lvol->name,
+			    spdk_strerror(-rc));
 		rpc_lvol_respond_err(request, rc, NULL);
 	}
 
@@ -1193,9 +1323,24 @@ rpc_rcow_delete_lvol(struct spdk_jsonrpc_request *request,
 
 	rc = s3lvol_lvol_destroy(lvol, rpc_lvol_op_cb, ctx);
 	if (rc != 0) {
+		/* Every refusal in the destroy path happens before anything is torn
+		 * down, so the lvol is still there to ask. If the refusal recorded an
+		 * intent the poller will finish on its own, the caller is done: say
+		 * so instead of handing them an error to react to. */
+		bool deferred = lvol->lvol_store &&
+				s3lvol_snapshot_pending_deferred(&lvol->lvol_store->uuid,
+								 &lvol->uuid);
+
 		free(ctx->lvol_name);
 		free(ctx);
-		rpc_lvol_respond_err(request, rc, NULL);
+		if (deferred) {
+			SPDK_NOTICELOG("rcow_delete_lvol '%s' deferred: it will be "
+				       "completed once the blocker clears\n",
+				       lvol->name);
+			rpc_lvol_respond_deferred(request, lvol->name);
+		} else {
+			rpc_lvol_respond_err(request, rc, NULL);
+		}
 	}
 
 cleanup:
@@ -1666,6 +1811,15 @@ rpc_rcow_get_lvstores(struct spdk_jsonrpc_request *request,
 				spdk_json_write_named_bool(w, "delete_pending",
 							   pending);
 			}
+			/* How deep the snapshot chain under this lvol is, because
+			 * crossing S3LVOL_DEFAULT_MAX_CHAIN_DEPTH turns an export of
+			 * it into a full copy that nothing ever reclaims. The target
+			 * warns when a derive crosses the soft threshold, but a
+			 * warning only reaches whoever reads the log at the time; a
+			 * control plane deciding whether to prune needs to be able to
+			 * ask. 0 for a deactivated volume, like the cluster counts. */
+			spdk_json_write_named_uint32(w, "chain_depth",
+				s3lvol_lvol_chain_depth(lvs, lvol));
 			spdk_json_write_object_end(w);
 		}
 		spdk_json_write_array_end(w);
@@ -1823,6 +1977,8 @@ rpc_rcow_export_snapshot(struct spdk_jsonrpc_request *request,
 
 	lvol = s3lvol_lvol_find_any(req.snapshot_name);
 	if (!lvol) {
+		SPDK_WARNLOG("rcow_export_snapshot '%s' refused: snapshot not found\n",
+			     req.snapshot_name);
 		rpc_lvol_respond_errf(request,
 				      "snapshot '%s' not found in any lvstore",
 				      req.snapshot_name);
@@ -1848,6 +2004,8 @@ rpc_rcow_export_snapshot(struct spdk_jsonrpc_request *request,
 		 * reasons it was -- and a client that only reads stdout sees nothing at
 		 * all, since the message travels in the failed reply. The target log
 		 * carries the detail; this at least says what the call was about. */
+		SPDK_ERRLOG("rcow_export_snapshot '%s' failed: %s\n",
+			    req.snapshot_name, spdk_strerror(-rc));
 		rpc_lvol_respond_errf(request,
 				      "could not start exporting snapshot '%s': %s "
 				      "(the target log says why)",
@@ -1855,6 +2013,8 @@ rpc_rcow_export_snapshot(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
+	SPDK_NOTICELOG("rcow_export_snapshot '%s' started as %s\n",
+		       req.snapshot_name, uuid);
 	rpc_lvol_respond_ok(request, uuid);
 
 cleanup:
@@ -2060,15 +2220,25 @@ rpc_lvstore_for(struct spdk_jsonrpc_request *request, const char *lvs_name)
 	return lvs;
 }
 
+struct rpc_import_ctx {
+	struct spdk_jsonrpc_request *request;
+	char                         lvol_name[SPDK_LVOL_NAME_MAX];
+	char                         export_uuid[SPDK_UUID_STRING_LEN];
+};
+
 static void
 rpc_import_lvol_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 {
-	struct spdk_jsonrpc_request *request = cb_arg;
+	struct rpc_import_ctx *ctx = cb_arg;
 	struct spdk_json_write_ctx *w;
 	const char *mode;
 
 	if (lvolerrno != 0) {
-		rpc_lvol_respond_err(request, lvolerrno, NULL);
+		SPDK_ERRLOG("rcow_import_lvol '%s' from export %s failed: %s\n",
+			    ctx->lvol_name, ctx->export_uuid,
+			    spdk_strerror(-lvolerrno));
+		rpc_lvol_respond_err(ctx->request, lvolerrno, NULL);
+		free(ctx);
 		return;
 	}
 
@@ -2088,13 +2258,17 @@ rpc_import_lvol_cb(void *cb_arg, struct spdk_lvol *lvol, int lvolerrno)
 	 * disagree with what was actually built. */
 	mode = spdk_blob_is_esnap_clone(lvol->blob) ? "esnap" : "local_clone";
 
-	w = spdk_jsonrpc_begin_result(request);
+	SPDK_NOTICELOG("rcow_import_lvol '%s' from export %s completed (%s)\n",
+		       lvol->name, ctx->export_uuid, mode);
+
+	w = spdk_jsonrpc_begin_result(ctx->request);
 	spdk_json_write_object_begin(w);
 	spdk_json_write_named_bool(w, "bool_value", true);
 	spdk_json_write_named_string(w, "string_value", lvol->name);
 	spdk_json_write_named_string(w, "mode", mode);
 	spdk_json_write_object_end(w);
-	spdk_jsonrpc_end_result(request, w);
+	spdk_jsonrpc_end_result(ctx->request, w);
+	free(ctx);
 }
 
 static void
@@ -2105,6 +2279,7 @@ rpc_rcow_import_lvol(struct spdk_jsonrpc_request *request,
 	 * call says so, so an absent flag keeps the default while an explicit false
 	 * overrides it. */
 	struct rpc_import_lvol req = { .decouple = true };
+	struct rpc_import_ctx *ctx;
 	struct s3lvol_import_opts opts = {0};
 	struct s3lvol_lvstore *lvs;
 	int rc;
@@ -2120,14 +2295,30 @@ rpc_rcow_import_lvol(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		rpc_lvol_respond_err(request, -ENOMEM, NULL);
+		goto cleanup;
+	}
+	ctx->request = request;
+	snprintf(ctx->lvol_name, sizeof(ctx->lvol_name), "%s", req.lvol_name);
+	snprintf(ctx->export_uuid, sizeof(ctx->export_uuid), "%s", req.export_uuid);
+
 	opts.lvol_name     = req.lvol_name;
 	opts.export_uuid   = req.export_uuid;
 	opts.src_namespace = req.src_namespace;
 	opts.decouple      = req.decouple;
 
-	rc = s3lvol_lvol_import(lvs, &opts, rpc_import_lvol_cb, request);
+	SPDK_NOTICELOG("rcow_import_lvol '%s' from export %s requested "
+		       "(decouple=%s)\n", req.lvol_name, req.export_uuid,
+		       req.decouple ? "true" : "false");
+
+	rc = s3lvol_lvol_import(lvs, &opts, rpc_import_lvol_cb, ctx);
 	if (rc != 0) {
+		SPDK_ERRLOG("rcow_import_lvol '%s' from export %s failed: %s\n",
+			    req.lvol_name, req.export_uuid, spdk_strerror(-rc));
 		rpc_lvol_respond_err(request, rc, NULL);
+		free(ctx);
 	}
 
 cleanup:
@@ -2336,14 +2527,152 @@ cleanup:
 SPDK_RPC_REGISTER("rcow_release_export", rpc_rcow_release_export,
 		  SPDK_RPC_RUNTIME)
 
-/* What this node currently reads through to.
+/* Turn a reference export into a copied one, so this node stops owing anybody the
+ * snapshot behind it.
  *
- * The list arrives as a JSON array in string_value; see the note on rpc_json_buf.
+ * The counterpart to rcow_release_export, and the choice between them is whose
+ * data survives. Release deletes the export and refuses while anything reads it;
+ * this keeps the export readable for ever by copying what it references, and the
+ * snapshot becomes deletable. It is what a node runs when it wants its space back
+ * without waiting for every importer to finish.
  *
- * There is no bdev_s3lvol_list_exports counterpart yet: listing what a *bucket*
- * holds needs s3_list_objects(), which is still -ENOTSUP. This one is answered
- * from the in-memory registry, and it is the interesting direction anyway --
- * "which of my volumes still depend on somebody else". */
+ * Importers need not be told: the manifest is replaced in place, and a reader
+ * discovers it when the objects it holds stop existing. */
+static void
+rpc_rcow_materialise_export(struct spdk_jsonrpc_request *request,
+			    const struct spdk_json_val *params)
+{
+	struct rpc_export_id req = {0};
+	struct rpc_lvol_op_ctx *ctx;
+	struct s3lvol_lvstore *lvs;
+	int rc;
+
+	if (spdk_json_decode_object(params, rpc_export_id_decoders,
+				    SPDK_COUNTOF(rpc_export_id_decoders), &req)) {
+		rpc_lvol_respond_err(request, 0, "Invalid parameters");
+		goto cleanup;
+	}
+
+	lvs = rpc_lvstore_for(request, req.lvs_name);
+	if (!lvs) {
+		goto cleanup;
+	}
+
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx) {
+		rpc_lvol_respond_err(request, -ENOMEM, NULL);
+		goto cleanup;
+	}
+	ctx->request   = request;
+	ctx->lvol_name = strdup(req.export_uuid);
+	if (!ctx->lvol_name) {
+		free(ctx);
+		rpc_lvol_respond_err(request, -ENOMEM, NULL);
+		goto cleanup;
+	}
+
+	/* Answers when the copy is done, not when it starts: the caller's next move
+	 * is usually to delete the snapshot, and that is only allowed once this has
+	 * finished. Unlike an export, which hands back a uuid to poll. */
+	rc = s3lvol_export_materialise(lvs, req.export_uuid, rpc_lvol_op_cb, ctx);
+	if (rc != 0) {
+		free(ctx->lvol_name);
+		free(ctx);
+		rpc_lvol_respond_err(request, rc, NULL);
+	}
+
+cleanup:
+	free(req.lvs_name);
+	free(req.export_uuid);
+}
+SPDK_RPC_REGISTER("rcow_materialise_export", rpc_rcow_materialise_export,
+		  SPDK_RPC_RUNTIME)
+
+/* What this node currently publishes, and what it currently reads through to.
+ *
+ * Both lists come from the in-memory registries, as a JSON array in
+ * string_value; see the note on rpc_json_buf. There is no listing of what a
+ * *bucket* holds -- that needs s3_list_objects(), which is still -ENOTSUP.
+ *
+ * rcow_get_exports is the source side: every reference (and dense) export this
+ * node still owes, including ones whose TTL has passed. The uuid is what
+ * rcow_release_export takes; rcow_get_lvstores only reports export_status on
+ * the snapshot, which is why a leaked registry used to be visible only in the
+ * attach log.
+ *
+ * rcow_get_imports is the other direction: which of this node's volumes still
+ * depend on somebody else. */
+static void
+rpc_rcow_get_exports(struct spdk_jsonrpc_request *request,
+		     const struct spdk_json_val *params)
+{
+	struct rpc_lvstore_name req = {0};
+	struct s3lvol_lvstore *lvs;
+	struct rpc_json_buf buf;
+	struct spdk_json_write_ctx *w;
+
+	if (params && spdk_json_decode_object(params, rpc_lvstore_name_decoders,
+					      SPDK_COUNTOF(rpc_lvstore_name_decoders),
+					      &req)) {
+		rpc_lvol_respond_err(request, 0, "Invalid parameters");
+		free(req.lvs_name);
+		return;
+	}
+
+	w = rpc_json_buf_begin(&buf);
+	if (!w) {
+		rpc_lvol_respond_err(request, -ENOMEM, NULL);
+		free(req.lvs_name);
+		return;
+	}
+
+	spdk_json_write_array_begin(w);
+
+	for (lvs = s3lvol_lvstore_first(); lvs != NULL; lvs = s3lvol_lvstore_next(lvs)) {
+		struct s3lvol_export *exp;
+
+		if (req.lvs_name && strcmp(req.lvs_name, s3lvol_lvstore_get_name(lvs)) != 0) {
+			continue;
+		}
+		for (exp = s3lvol_export_first(lvs); exp != NULL;
+		     exp = s3lvol_export_next(exp)) {
+			struct s3lvol_export_entry e;
+
+			s3lvol_export_get(exp, &e);
+			spdk_json_write_object_begin(w);
+			spdk_json_write_named_string(w, "lvs_name",
+						     s3lvol_lvstore_get_name(lvs));
+			spdk_json_write_named_string(w, "export_uuid", e.export_uuid);
+			spdk_json_write_named_string(w, "snapshot", e.snapshot);
+			spdk_json_write_named_uint64(w, "blob_id", e.blob_id);
+			spdk_json_write_named_string(w, "layout",
+						     e.is_ref ? S3_EXPORT_LAYOUT_REF_STR :
+						     S3_EXPORT_LAYOUT_DENSE_STR);
+			spdk_json_write_named_uint32(w, "generation", e.generation);
+			spdk_json_write_named_uint64(w, "expires_at", e.expires_at);
+			spdk_json_write_named_bool(w, "expired", e.expired);
+			spdk_json_write_named_bool(w, "lease_aware", e.lease_aware);
+			spdk_json_write_named_bool(w, "lease_checked", e.lease_checked);
+			spdk_json_write_named_bool(w, "lease_absent", e.lease_absent);
+			spdk_json_write_named_bool(w, "lease_watch", e.lease_watch);
+			spdk_json_write_named_uint64(w, "lease_updated_at",
+						     e.lease_updated_at);
+			spdk_json_write_named_uint32(w, "lease_renew_s", e.lease_renew_s);
+			spdk_json_write_named_string(w, "pin",
+						     s3lvol_export_pin_str(e.pin));
+			spdk_json_write_named_bool(w, "snapshot_alive", e.snapshot_alive);
+			spdk_json_write_named_bool(w, "reaping", e.reaping);
+			spdk_json_write_object_end(w);
+		}
+	}
+
+	spdk_json_write_array_end(w);
+	rpc_json_buf_respond(request, w, &buf);
+	free(req.lvs_name);
+}
+SPDK_RPC_REGISTER("rcow_get_exports", rpc_rcow_get_exports,
+		  SPDK_RPC_RUNTIME)
+
 static void
 rpc_rcow_get_imports(struct spdk_jsonrpc_request *request,
 			    const struct spdk_json_val *params)
@@ -2405,6 +2734,228 @@ rpc_rcow_get_imports(struct spdk_jsonrpc_request *request,
 	free(req.lvs_name);
 }
 SPDK_RPC_REGISTER("rcow_get_imports", rpc_rcow_get_imports,
+		  SPDK_RPC_RUNTIME)
+
+/* ==========================================================================
+ * Pending deletes: deletes that were asked for and could not be carried out
+ *
+ * rcow_get_pending_deletes     what is queued, and whether it completes itself
+ * rcow_cancel_pending_delete   withdraw the intent
+ *
+ * The queue exists because some refusals clear without anyone doing anything --
+ * the extra clone is deleted, the decouple finishes -- and the delete the caller
+ * asked for would then simply succeed. See vbdev_s3lvol_pending.c for which
+ * blockers are completed automatically and which deliberately are not.
+ * ========================================================================== */
+
+struct pending_list_ctx {
+	struct spdk_json_write_ctx *w;
+	const char                 *lvs_filter;	/* NULL means every lvstore */
+};
+
+static void
+pending_list_cb(void *cb_arg, const struct s3lvol_pending_entry *e)
+{
+	struct pending_list_ctx *ctx = cb_arg;
+	char uuid_str[SPDK_UUID_STRING_LEN];
+
+	if (ctx->lvs_filter && strcmp(ctx->lvs_filter, e->lvs_name) != 0) {
+		return;
+	}
+
+	spdk_uuid_fmt_lower(uuid_str, sizeof(uuid_str), &e->lvol_uuid);
+
+	spdk_json_write_object_begin(ctx->w);
+	spdk_json_write_named_string(ctx->w, "lvs_name", e->lvs_name);
+	spdk_json_write_named_string(ctx->w, "lvol_name", e->lvol_name);
+	spdk_json_write_named_string(ctx->w, "lvol_uuid", uuid_str);
+	spdk_json_write_named_uint64(ctx->w, "enqueued_at", e->enqueued_at);
+	spdk_json_write_named_string(ctx->w, "reason",
+				     s3lvol_pending_reason_str(e->reason));
+	/* The field that tells the caller whether they still have to do
+	 * something: false means the blocker needs a decision (a published
+	 * export), and the delete waits for an explicit retry. */
+	spdk_json_write_named_bool(ctx->w, "deferred", e->deferred);
+	spdk_json_write_object_end(ctx->w);
+}
+
+/* The list arrives as a JSON array in string_value; see the note on
+ * rpc_json_buf. Takes an optional lvs_name filter -- the whole queue is small,
+ * but a node with several lvstores usually cares about one of them. */
+static void
+rpc_rcow_get_pending_deletes(struct spdk_jsonrpc_request *request,
+			     const struct spdk_json_val *params)
+{
+	struct rpc_lvstore_name req = {0};
+	struct pending_list_ctx ctx;
+	struct rpc_json_buf buf;
+	struct spdk_json_write_ctx *w;
+
+	if (params && spdk_json_decode_object(params, rpc_lvstore_name_decoders,
+					      SPDK_COUNTOF(rpc_lvstore_name_decoders),
+					      &req)) {
+		rpc_lvol_respond_err(request, 0, "Invalid parameters");
+		free(req.lvs_name);
+		return;
+	}
+
+	w = rpc_json_buf_begin(&buf);
+	if (!w) {
+		rpc_lvol_respond_err(request, -ENOMEM, NULL);
+		free(req.lvs_name);
+		return;
+	}
+
+	ctx.w = w;
+	ctx.lvs_filter = req.lvs_name;
+
+	spdk_json_write_array_begin(w);
+	s3lvol_pending_foreach(pending_list_cb, &ctx);
+	spdk_json_write_array_end(w);
+
+	rpc_json_buf_respond(request, w, &buf);
+	free(req.lvs_name);
+}
+SPDK_RPC_REGISTER("rcow_get_pending_deletes", rpc_rcow_get_pending_deletes,
+		  SPDK_RPC_RUNTIME)
+
+struct rpc_pending_cancel {
+	char *lvs_name;		/* optional: disambiguates a name used twice */
+	char *lvol_name;
+};
+
+static const struct spdk_json_object_decoder rpc_pending_cancel_decoders[] = {
+	{"lvs_name", offsetof(struct rpc_pending_cancel, lvs_name), spdk_json_decode_string, true},
+	{"lvol_name", offsetof(struct rpc_pending_cancel, lvol_name), spdk_json_decode_string, false},
+};
+
+struct pending_cancel_ctx {
+	const char *lvs_name;
+	const char *lvol_name;
+	unsigned    removed;
+};
+
+static void
+pending_cancel_cb(void *cb_arg, const struct s3lvol_pending_entry *e)
+{
+	struct pending_cancel_ctx *ctx = cb_arg;
+
+	if (strcmp(ctx->lvol_name, e->lvol_name) != 0) {
+		return;
+	}
+	if (ctx->lvs_name && strcmp(ctx->lvs_name, e->lvs_name) != 0) {
+		return;
+	}
+	/* s3lvol_pending_foreach() walks the list safely against exactly this. */
+	s3lvol_snapshot_pending_clear(&e->lvs_uuid, &e->lvol_uuid);
+	ctx->removed++;
+}
+
+/* Withdraw a queued delete.
+ *
+ * Idempotent, and that is the point: cancelling something that has already been
+ * executed, or was never queued, leaves the caller in the state they asked for
+ * ("this snapshot is not going to be deleted behind my back"), so it succeeds
+ * rather than making them handle a race they cannot avoid. Mirrors
+ * rcow_deactive_bdev.
+ *
+ * Cancelling does not resurrect anything: the snapshot was never touched, only
+ * the intent was recorded. */
+static void
+rpc_rcow_cancel_pending_delete(struct spdk_jsonrpc_request *request,
+			       const struct spdk_json_val *params)
+{
+	struct rpc_pending_cancel req = {0};
+	struct pending_cancel_ctx ctx = {0};
+
+	if (spdk_json_decode_object(params, rpc_pending_cancel_decoders,
+				    SPDK_COUNTOF(rpc_pending_cancel_decoders),
+				    &req)) {
+		rpc_lvol_respond_err(request, 0, "Invalid parameters");
+		goto cleanup;
+	}
+
+	ctx.lvs_name  = req.lvs_name;
+	ctx.lvol_name = req.lvol_name;
+
+	s3lvol_pending_foreach(pending_cancel_cb, &ctx);
+
+	SPDK_NOTICELOG("rcow_cancel_pending_delete '%s': %u entr%s withdrawn\n",
+		       req.lvol_name, ctx.removed,
+		       ctx.removed == 1 ? "y" : "ies");
+
+	rpc_lvol_respond_ok(request, req.lvol_name);
+
+cleanup:
+	free(req.lvs_name);
+	free(req.lvol_name);
+}
+SPDK_RPC_REGISTER("rcow_cancel_pending_delete", rpc_rcow_cancel_pending_delete,
+		  SPDK_RPC_RUNTIME)
+
+/* Park pending-delete registry HEAD or GET until a later release.
+ *
+ * Tests only. Attach stays fire-and-forget; this delays the S3 callbacks so a
+ * script can unload (or attach a same-name replacement) while the load is
+ * still in flight. Production callers never set a stage. */
+struct rpc_pending_load_hold {
+	char *stage;
+	bool  release;
+};
+
+static const struct spdk_json_object_decoder rpc_pending_load_hold_decoders[] = {
+	{"stage",   offsetof(struct rpc_pending_load_hold, stage),   spdk_json_decode_string, true},
+	{"release", offsetof(struct rpc_pending_load_hold, release), spdk_json_decode_bool,   true},
+};
+
+static void
+rpc_rcow_pending_load_hold(struct spdk_jsonrpc_request *request,
+			    const struct spdk_json_val *params)
+{
+	struct rpc_pending_load_hold req = {0};
+	struct rpc_json_buf buf;
+	struct spdk_json_write_ctx *w;
+	unsigned released = 0;
+	int rc;
+
+	if (params && spdk_json_decode_object(params, rpc_pending_load_hold_decoders,
+						SPDK_COUNTOF(rpc_pending_load_hold_decoders),
+						&req)) {
+		rpc_lvol_respond_err(request, 0, "Invalid parameters");
+		free(req.stage);
+		return;
+	}
+
+	if (req.stage) {
+		rc = s3lvol_pending_load_hold(req.stage);
+		if (rc != 0) {
+			rpc_lvol_respond_errf(request,
+					     "stage must be head, get, or none");
+			free(req.stage);
+			return;
+		}
+	}
+	if (req.release) {
+		released = s3lvol_pending_load_release();
+	}
+
+	w = rpc_json_buf_begin(&buf);
+	if (!w) {
+		rpc_lvol_respond_err(request, -ENOMEM, NULL);
+		free(req.stage);
+		return;
+	}
+
+	spdk_json_write_object_begin(w);
+	spdk_json_write_named_string(w, "stage", s3lvol_pending_load_hold_name());
+	spdk_json_write_named_uint32(w, "parked", s3lvol_pending_load_parked_count());
+	spdk_json_write_named_uint32(w, "released", released);
+	spdk_json_write_object_end(w);
+
+	rpc_json_buf_respond(request, w, &buf);
+	free(req.stage);
+}
+SPDK_RPC_REGISTER("rcow_pending_load_hold", rpc_rcow_pending_load_hold,
 		  SPDK_RPC_RUNTIME)
 
 /* ==========================================================================
@@ -2544,6 +3095,8 @@ rpc_rcow_active_bdev(struct spdk_jsonrpc_request *request,
 	}
 
 	if (s3lvol_active_load() != 0) {
+		SPDK_WARNLOG("rcow_active_bdev '%s' refused: the active registry "
+			     "could not be read\n", req.device_name);
 		rpc_lvol_respond_err(request, 0,
 				     "the active registry could not be read");
 		goto cleanup;
@@ -2551,6 +3104,8 @@ rpc_rcow_active_bdev(struct spdk_jsonrpc_request *request,
 
 	lvol = s3lvol_lvol_find_any(req.device_name);
 	if (!lvol) {
+		SPDK_WARNLOG("rcow_active_bdev '%s' refused: no such lvol or "
+			     "snapshot\n", req.device_name);
 		rpc_lvol_respond_errf(request, "no such lvol or snapshot: %s",
 				      req.device_name);
 		goto cleanup;
@@ -2563,6 +3118,8 @@ rpc_rcow_active_bdev(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
+	SPDK_NOTICELOG("rcow_active_bdev '%s' requested\n", req.device_name);
+
 	/* Already active: report where it is rather than adding a second namespace
 	 * for the same volume. Activation has to be repeatable, because a caller
 	 * that timed out will retry. */
@@ -2573,6 +3130,9 @@ rpc_rcow_active_bdev(struct spdk_jsonrpc_request *request,
 		if (strcmp(existing->uuid, lvol->uuid_str) != 0) {
 			/* Same name, different volume: the recorded namespace still
 			 * refers to whatever was there before. */
+			SPDK_WARNLOG("rcow_active_bdev '%s' refused: recorded uuid "
+				     "%s does not match volume uuid %s\n",
+				     req.device_name, existing->uuid, lvol->uuid_str);
 			rpc_lvol_respond_errf(request,
 				"'%s' is recorded as active with uuid %s but the "
 				"volume of that name now has uuid %s; deactivate "
@@ -2591,6 +3151,9 @@ rpc_rcow_active_bdev(struct spdk_jsonrpc_request *request,
 		 * elsewhere. So neither; say what is wrong and let the caller decide. */
 		if ((req.subsys != RCOW_SUBSYS_UNSET && req.subsys != existing->subsys) ||
 		    (req.nsid != 0 && req.nsid != existing->nsid)) {
+			SPDK_WARNLOG("rcow_active_bdev '%s' refused: already at "
+				     "subsys %" PRIu32 " nsid %" PRIu32 "\n",
+				     existing->name, existing->subsys, existing->nsid);
 			rpc_lvol_respond_errf(request,
 				"'%s' is already active at subsys %" PRIu32 " nsid "
 				"%" PRIu32 ", not at the requested subsys %" PRIu32
@@ -2602,6 +3165,8 @@ rpc_rcow_active_bdev(struct spdk_jsonrpc_request *request,
 			goto cleanup;
 		}
 
+		SPDK_NOTICELOG("rcow_active_bdev '%s' already active as %s nsid "
+			       "%" PRIu32 "\n", existing->name, nqn, existing->nsid);
 		rpc_active_respond(request, existing->name, existing->uuid, nqn,
 				   existing->subsys, existing->nsid, true);
 		goto cleanup;
@@ -2708,6 +3273,8 @@ rpc_deactive_detached(void *cb_arg, uint32_t nsid, int status)
 	int rc;
 
 	if (status != 0) {
+		SPDK_ERRLOG("rcow_deactive_bdev '%s' failed: %s\n", ctx->name,
+			    spdk_strerror(-status));
 		rpc_lvol_respond_errf(ctx->request, "could not detach '%s': %s",
 				      ctx->name, spdk_strerror(-status));
 		free(ctx);
@@ -2729,7 +3296,7 @@ rpc_deactive_detached(void *cb_arg, uint32_t nsid, int status)
 		return;
 	}
 
-	SPDK_NOTICELOG("deactivated '%s'\n", ctx->name);
+	SPDK_NOTICELOG("rcow_deactive_bdev '%s' completed\n", ctx->name);
 	rpc_lvol_respond_ok(ctx->request, ctx->name);
 	free(ctx);
 }
@@ -2752,7 +3319,11 @@ rpc_rcow_deactive_bdev(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
+	SPDK_NOTICELOG("rcow_deactive_bdev '%s' requested\n", req.device_name);
+
 	if (s3lvol_active_load() != 0) {
+		SPDK_WARNLOG("rcow_deactive_bdev '%s' refused: the active registry "
+			     "could not be read\n", req.device_name);
 		rpc_lvol_respond_err(request, 0,
 				     "the active registry could not be read");
 		goto cleanup;
@@ -2763,7 +3334,8 @@ rpc_rcow_deactive_bdev(struct spdk_jsonrpc_request *request,
 		/* Not active is the desired end state, so this succeeds. An error here
 		 * would force every teardown script to tell "was not active" apart
 		 * from "could not be deactivated". */
-		SPDK_NOTICELOG("'%s' is not active; nothing to do\n", req.device_name);
+		SPDK_NOTICELOG("rcow_deactive_bdev '%s': not active; nothing to do\n",
+			       req.device_name);
 		rpc_lvol_respond_ok(request, req.device_name);
 		goto cleanup;
 	}
@@ -2781,6 +3353,8 @@ rpc_rcow_deactive_bdev(struct spdk_jsonrpc_request *request,
 
 	rc = s3lvol_nvmf_remove_ns(nqn, nsid, rpc_deactive_detached, ctx);
 	if (rc != 0) {
+		SPDK_ERRLOG("rcow_deactive_bdev '%s' failed: %s\n", req.device_name,
+			    spdk_strerror(-rc));
 		rpc_lvol_respond_errf(request,
 				      "could not start the detach of '%s': %s",
 				      req.device_name, spdk_strerror(-rc));
@@ -2834,6 +3408,15 @@ SPDK_RPC_REGISTER("rcow_deactive_bdev", rpc_rcow_deactive_bdev,
 #define GET_BDEV_WAIT_MS_DEFAULT 5000
 #define GET_BDEV_POLL_US         (20 * 1000)
 
+/* A path that passed once can still vanish: udev processes the previous
+ * namespace's REMOVE after the new sysfs is already visible, unlinks /dev,
+ * then creates the node again. An empty udev queue rules that out, so the
+ * usual answer costs nothing beyond one access(2). This fallback is for the
+ * case where the queue never looks quiet because unrelated devices keep it
+ * busy: accept a path that passed two polls in a row instead of waiting out
+ * traffic that has nothing to do with this lvol. */
+#define GET_BDEV_CONFIRM_POLLS   2
+
 /* A path is "/dev/nvme31n64" and change; PATH_MAX here would make the snapshot
  * of a full registry (32 x 64 namespaces) eight megabytes. */
 #define GET_BDEV_PATH_MAX        64
@@ -2880,25 +3463,30 @@ struct get_bdev_ctx {
 	uint32_t                     wait_ms;
 };
 
-/* Resolve one entry, reporting success only once the /dev node is there.
+/*
+ * Resolve one entry only once /dev is the live block device for this uuid.
  *
- * sysfs carries the namespace first and udev creates the node afterwards, so a
- * path taken straight from sysfs can still fail to open -- which is the whole
- * reason this RPC does the waiting rather than its callers.
- *
- * Touches sysfs and /dev only, no shared state: safe on the wait thread. */
+ * sysfs publishes the namespace before udev creates the node, so a path taken
+ * from sysfs can still fail to open -- which is why this RPC waits. Checking
+ * that the name exists, or even that it is a block device, is not enough:
+ * after deactive then reactivate at the same nsid, the /dev node can still
+ * belong to the previous occupant while sysfs already names the new uuid.
+ */
 static bool
 get_bdev_resolve(struct get_bdev_entry *e)
 {
 	char dev[GET_BDEV_PATH_MAX];
 
 	if (e->path[0] != '\0') {
-		return true;
+		if (s3lvol_nvmf_device_is_ready(e->path, e->uuid)) {
+			return true;
+		}
+		e->path[0] = '\0';
 	}
 	if (s3lvol_nvmf_resolve_device(e->uuid, dev, sizeof(dev)) != 0) {
 		return false;
 	}
-	if (access(dev, F_OK) != 0) {
+	if (!s3lvol_nvmf_device_is_ready(dev, e->uuid)) {
 		return false;
 	}
 
@@ -3031,11 +3619,21 @@ get_bdev_wait_thread(void *arg)
 {
 	struct get_bdev_ctx *ctx = arg;
 	uint32_t waited_ms = 0;
+	uint32_t consecutive = 0;
 
 	/* Nobody joins this thread -- see s3_spawner_pthread_create_async. */
 	pthread_detach(pthread_self());
 
-	while (get_bdev_resolve_all(ctx) > 0 && waited_ms < ctx->wait_ms) {
+	while (waited_ms < ctx->wait_ms) {
+		if (get_bdev_resolve_all(ctx) == 0) {
+			consecutive++;
+			if (s3lvol_nvmf_udev_settled() ||
+			    consecutive >= GET_BDEV_CONFIRM_POLLS) {
+				break;
+			}
+		} else {
+			consecutive = 0;
+		}
 		usleep(GET_BDEV_POLL_US);
 		waited_ms += GET_BDEV_POLL_US / 1000;
 	}
@@ -3089,7 +3687,7 @@ rpc_rcow_get_bdev(struct spdk_jsonrpc_request *request,
 	 * never activated. Checked before anything is allocated. */
 	if (req.device_name) {
 		if (!s3lvol_active_find(req.device_name)) {
-			rpc_lvol_respond_errf(request, "'%s' is not active",
+			rpc_lvol_respond_errf(request, "'%s' is not active (not found)",
 					      req.device_name);
 			goto cleanup;
 		}
@@ -3144,11 +3742,22 @@ rpc_rcow_get_bdev(struct spdk_jsonrpc_request *request,
 		ctx->count = i;
 	}
 
-	/* The common case by a wide margin: everything is already up, so answer
-	 * without a thread. This is also what a caller asking wait_ms=0 gets,
-	 * and what happens once the cap on concurrent waits is reached. */
-	if (get_bdev_resolve_all(ctx) == 0 || ctx->wait_ms == 0 ||
-	    g_get_bdev_waiters >= GET_BDEV_MAX_WAITERS) {
+	/* wait_ms=0 is the historical unwaited answer. The cap is the same:
+	 * better an unconfirmed path than one thread per concurrent caller. */
+	if (ctx->wait_ms == 0 || g_get_bdev_waiters >= GET_BDEV_MAX_WAITERS) {
+		get_bdev_resolve_all(ctx);
+		get_bdev_respond(ctx);
+		ctx = NULL;
+		goto cleanup;
+	}
+
+	/* Answer on this thread whenever the answer is already good: every path
+	 * resolved and udev idle. That is the steady state, it costs one
+	 * access(2), and it keeps repeat queries as cheap as they were before
+	 * there was a wait at all -- callers are expected to come back for the
+	 * path after an active, so the wait below is for those few moments
+	 * rather than something every query pays for. */
+	if (get_bdev_resolve_all(ctx) == 0 && s3lvol_nvmf_udev_settled()) {
 		get_bdev_respond(ctx);
 		ctx = NULL;
 		goto cleanup;

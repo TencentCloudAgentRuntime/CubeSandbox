@@ -1,5 +1,9 @@
 # 跨机快照（Pause / Resume / Snapshot）
 
+::: tip 部署范围
+CubeS3lvol 在 one-click 和 Kubernetes 上都**默认关闭**。开启方式见 [§2 配置后端 S3 服务](#_2-如何配置后端-s3-服务)；资源与存储规划见 [§3 每台节点的存储需求](#_3-每台节点的存储需求重点是-wal)。
+:::
+
 CubeSandbox 通过一份可持久化的「包对象」（rootfs / memory / metadata）实现沙箱的
 **暂停（Pause）**、**恢复（Resume）** 与 **快照（Snapshot）**：
 
@@ -50,7 +54,7 @@ cubemastercli tpl create-from-image \
 ```
 
 创建后可用 `cubemastercli cubebox template list` 确认 `BACKEND` 列显示为 `s3`，其下新建的沙箱与
-快照也会自动继承 `s3`（见 [CLI 字段](#4-cubemastercli-跨机相关的子命令与新显示字段)）。
+快照也会自动继承 `s3`（见 [CLI 字段](#_4-cubemastercli-跨机相关的子命令与新显示字段)）。
 
 ### 1.2 本机优先调度，本机无法调度才跨机
 
@@ -59,19 +63,19 @@ cubemastercli tpl create-from-image \
 
 ```
 ┌─────────────────┐   ┌──────────────────┐  是  ┌──────────────────┐
-│Resume/FromSnap  │──▶│ 源节点可调度?     │─────▶│ 本机恢复(源节点) │
+│Resume/FromSnap  │──▶│ 源节点可调度?      │─────▶│ 本机恢复(源节点)   │
 └─────────────────┘   └────────┬─────────┘      └──────────────────┘
                                │ 否
                                ▼
                       ┌──────────────────┐  是  ┌──────────────────┐
-                      │ CanCrossNode?    │─────▶│ 跨机恢复         │
-                      │ backend=s3 ∧    │      │ (任意兼容节点)   │
-                      │ remote=ready ∧  │      └──────────────────┘
-                      │ kernel/cpu 一致 │  否
+                      │ CanCrossNode?    │─────▶│ 跨机恢复          │
+                      │ backend=s3 ∧     │      │ (任意兼容节点)     │
+                      │ remote=ready ∧   │      └──────────────────┘
+                      │ kernel/cpu 一致   │
                       └────────┬─────────┘
-                               ▼
+                               ▼ 否
                       ┌──────────────────┐
-                      │ 报错: cannot     │
+                      │ 报错: cannot      │
                       │ restore cross-   │
                       │ node             │
                       └──────────────────┘
@@ -81,7 +85,13 @@ cubemastercli tpl create-from-image \
 否则直接报错，不会盲目落到不兼容的节点。
 
 源节点被 [隔离](./node-operations.md) 时视为不可调度，因此隔离是验证跨机 Resume 的常用手段。
-带 **host-mount** 的沙箱会钉在源节点（`PinToOrigin`），即使 `remote_status=ready` 也不会跨机。
+
+外部存储会进一步影响放置行为：
+
+- 带 **host-mount** 的沙箱会钉在源节点（`PinToOrigin`），不会参与跨机调度；host path 没有集群级稳定身份，因此其他节点上的同名路径不会被视为可移植存储。
+- 带 **Plugin Volume** 的沙箱可以跨机恢复。但请注意，运维方需要保证所有候选节点都安装所需 volume driver 并能访问后端。Volume 不存在、目标节点缺少 driver 或 `Attach` 失败时，FromSnap/Resume 会失败，不会在缺失必要 Volume 的情况下启动 VM。
+
+> FromSnap 时源沙箱可能仍在运行，因此同一个读写 Volume 可能同时被两个节点 Attach。请使用能够安全支持相应共享方式的后端；否则应先停止源沙箱，或使用只读挂载。
 
 ### 1.3 快照必须在云端「就绪」
 
@@ -144,9 +154,35 @@ cubemastercli tpl create-from-image \
 Cube 安装时默认安装 MinIO 作为 S3 服务，方便开箱体验。
 若要接入自己的 S3，按 [CubeS3lvol 文档](https://github.com/TencentCloud/CubeSandbox/blob/master/CubeS3lvol/README.md) 配置即可。
 
+### 2.1 Kubernetes（Helm）
+
+设置 `cubeS3lvol.enabled=true` 即可，无需其他配置：sidecar 复用 chart MinIO 或 `volumeS3` 的 endpoint 与凭证，写入自己的 `cube-s3lvol` 桶——始终与 S3 volume 插件的 `cube-volumes` 桶分开。cubelet 的 entrypoint 会把 `[cow.s3] enable` 写成 `true`，并把 `socket_path` 指到共享 emptyDir socket；只写 socket、不写 `enable` 不会开启。开启会**重建该节点的 Big Pod 并中断其上正在运行的沙箱**，请在维护窗口操作。
+
+身份来自完整的 Kubernetes 节点名，哈希成 `rcow-<8hex>`。Pod 重建仍是同一台机器。`cubeS3lvol.lvsName` 会给集群里每个节点钉同一个名字——多节点不要设。
+
+只有以下情况需要额外设置：
+
+- 外部 S3 端点为 path-style——显式设 `cubeS3lvol.s3.pathStyle: true`；
+- CPU 核做了隔离——设置 `cubeS3lvol.cpuMask`（默认 rcow 的 `0x3`）。
+
+```yaml
+cubeS3lvol:
+  enabled: true
+  # 可选：覆盖 endpoint / 密钥。桶必须与 cube-volumes 分开。
+  # s3:
+  #   endpoint: https://s3.example.com
+  #   accessKeyId: ...
+  #   secretAccessKey: ...
+  #   bucket: cube-s3lvol
+```
+
+首次启动时若 WAL 文件不存在会创建稀疏文件；`journalMB` / `walMB` / `cacheMB` 只在该文件出现之前生效。开启 sidecar 后，Big Pod 的 `terminationGracePeriodSeconds` 会提高到至少 180s，以便 `rcow_stop` 完成 disconnect 与 unload。
+
 ---
 
 ## 3. 每台节点的存储需求（重点是 WAL）
+
+每台运行 s3lvol 的节点需预留约 **2 核 CPU + 18 GiB 内存**；x86_64 节点需要 AVX2（Haswell）。
 
 快照对象存放在共享 S3 上，但**每台运行 s3lvol 的节点还需要一块本地 WAL 镜像盘**。
 跨机恢复依赖它：对快照的写入会先落到本地盘，再异步刷写回 S3；没有这块盘的节点既无法制作快照，
@@ -155,7 +191,7 @@ Cube 安装时默认安装 MinIO 作为 S3 服务，方便开箱体验。
 ### 3.1 WAL 镜像盘
 
 - 路径：`/data/cubelet/rcow/wal_bdev.img`
-- 逻辑大小：默认 **512 GiB**，由 `install.sh` 以**稀疏文件**方式创建
+- 逻辑大小：默认 **512 GiB**，由 one-click `install.sh` 或 Helm sidecar 入口在首次启动时以**稀疏文件**方式创建
 - 只创建一次：journal / WAL / cache 三段的划分在创建时就固定，之后无法调整（只能重新创建镜像）
 
 默认 512 GiB 由三段组成：
@@ -174,7 +210,8 @@ Cube 安装时默认安装 MinIO 作为 S3 服务，方便开箱体验。
 - **每台可能参与跨机恢复的节点都要在本地磁盘上准备自己的 WAL 镜像**——包括运行沙箱的计算节点，
   以及运行 s3lvol 的控制节点。
 - 三段大小在安装时通过 `RCOW_JOURNAL_MB` / `RCOW_WAL_MB` / `RCOW_CACHE_MB`
-  （一键安装）或 CubeS3lvol 运行时环境配置设置。调整只在**首次启动前**有意义——镜像一旦创建，布局即固定。
+  （一键安装）、chart 的 `cubeS3lvol.journalMB` / `walMB` / `cacheMB`（Helm）
+  或 CubeS3lvol 运行时环境配置设置。调整只在**首次启动前**有意义——镜像一旦创建，布局即固定。
 - 镜像不长期保存快照数据：它只是写缓冲加缓存，持久副本在 S3。
 
 ---
@@ -249,7 +286,7 @@ cubeopscli --address 127.0.0.1 --port 3010 node list
 cubeopscli --address 127.0.0.1 --port 3010 node list --json
 ```
 
-`--json` 中每个节点的 `HostFacts` 字段含义见 [1.4 跨机目标必须与源机 kernel / CPU 信息一致](#14-跨机目标必须与源机-kernel--cpu-信息一致)。
+`--json` 中每个节点的 `HostFacts` 字段含义见 [1.4 跨机目标必须与源机 kernel / CPU 信息一致](#_14-跨机目标必须与源机-kernel--cpu-信息一致)。
 跨机前请确认目标节点与源节点的 `cpuid_hash` / `host_kernel_release` 一致，并核对其余 HostFacts。
 
 ---
@@ -329,8 +366,21 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
    `rcow_deactive_bdev`），这一路径**不会**记录标记——它是调用方自己可以立即纠正的前置条件，而不是需要
    等待的阻塞原因。
 
-   阻塞原因解除后（导出被释放或过期、多余 clone 被删除、decouple 结束、卷被 deactivate），需要在该节点上
-   **手动重试**：
+   之后约 60 秒一次的 poller 会在阻塞消失后自动完成删除，覆盖：**带 lease 的 export**（importer 停止续约、
+   lease 变 stale）、多余 clone、已经结束的 decouple、以及仍在 publish 的 export。**没有 lease 的
+   export 不会自动删**：TTL 到期只说明时间过了，不能证明没有人在读，这类标记要等人工（或 `--retry-pending`）
+   决定。异步 destroy 已经失败的，也不会每分钟重试。
+
+   标记会写入 `<prefix>/meta/pending-deletes.json`，下次 attach 时恢复。删除 RPC **先返回、再 PUT**；若在
+   窗口内崩溃，意图会丢失，需要再发一次删除。poller 能自行完成的阻塞会返回成功，并带 **`deferred: true`**。
+   **没有 lease 的 export 仍返回 EBUSY**，标记两种情况都会记下。
+   用 `rcow_cancel_pending_delete` 撤回意图（必填 `lvol_name`，可选 `lvs_name` 消歧义），该 RPC 幂等。
+   若 poller 已经提交了 destroy，cancel 只丢掉标记，快照仍可能被删掉。
+
+   对仍在从 import decouple 的卷做快照会保留外部 parent，`rcow_create_snapshot` 此时返回
+   **`decouple_cancelled: true`**。
+
+   `--retry-pending` 仍用于无 lease 的 export、失败的 destroy，以及不想等 poller 的场景：
 
    ```sh
    # 在 CubeS3lvol 目录下
@@ -338,10 +388,9 @@ cubeopscli --address 127.0.0.1 --port 3010 node list --json
    test/tools/s3lvol_rpc.py --retry-pending   # 重试所有已标记且当前可删的快照
    ```
 
-   注意该机制的边界：标记**只存在于 s3lvol_tgt 进程内存中**，进程重启或 lvstore 卸载即丢失；**没有自动
-   重试**（无后台轮询），也**无法取消**已记录的标记；并且集群侧的删除路径（Cubelet `S3Cow.DeleteByKind`）
-   目前会把被拒绝的快照删除视为成功、且不会调用 `--retry-pending`，因此这类残留对象需要按上述方式在节点上
-   处理。详见 `CubeS3lvol/README.md` 的 "Retrying a refused snapshot delete"。
+   集群侧删除路径（Cubelet `S3Cow.DeleteByKind`）目前仍把被拒绝的快照删除视为成功、且不会调用
+   `--retry-pending`，因此那条路径上的残留对象仍需按上面方式在节点上处理。详见
+   `CubeS3lvol/README.md` 的 "Retrying a refused snapshot delete"。
 
 2. **DB / FS 结构相较 0.7.0 之前版本变化较大，老数据适配仅覆盖 0.6.0**：本版本相比 0.7.0 之前的版本，
    DB 表结构与文件系统目录结构均有较大调整。新版本会对老版本的数据结构做适配，用于用户清理老数据的场景，

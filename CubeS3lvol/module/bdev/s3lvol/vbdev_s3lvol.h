@@ -353,6 +353,27 @@ int s3lvol_nvmf_remove_ns(const char *nqn, uint32_t nsid,
 int s3lvol_nvmf_resolve_device(const char *uuid_str, char *out, size_t out_len);
 
 /**
+ * True when \p dev is the live host node for \p uuid_str.
+ *
+ * sysfs can publish a namespace before udev creates (or replaces) /dev, and
+ * after deactive then reactivate at the same nsid the leftover node can still
+ * belong to the previous occupant. Ready means: it is a block device, its
+ * major:minor matches /sys/block/<name>/dev, and that sysfs directory names
+ * this uuid.
+ */
+bool s3lvol_nvmf_device_is_ready(const char *dev, const char *uuid_str);
+
+/**
+ * True when udev has no events left to apply.
+ *
+ * A ready node is only stable once udev is done: a pending REMOVE for the
+ * previous occupant of the same nsid can still unlink /dev after the checks
+ * above pass. Steady state answers from a single access(2), so callers can
+ * test this before deciding to wait at all.
+ */
+bool s3lvol_nvmf_udev_settled(void);
+
+/**
  * Readahead, in KiB, to apply to a freshly discovered host device.
  *
  * The chunk size, and for the same reason the transport's max_io_size is: what a
@@ -543,13 +564,33 @@ int s3lvol_lvol_create(struct s3lvol_lvstore *lvs, const char *name,
  * the missing bdev.
  */
 /* True while the lvol is in the decouple queue, running or waiting its turn.
- * A snapshot or clone must not be taken of such a volume: the snapshot would
- * take the external snapshot identity with it, and the queued decouple would
- * then fail its detach after materialising the data. */
+ * A snapshot or clone must not be taken of such a volume while this holds: the
+ * snapshot would take the external snapshot identity with it, and the decouple
+ * would then fail its detach after materialising the data. create_snapshot
+ * cancels the decouple rather than refusing -- see s3lvol_decouple_cancel(). */
 bool s3lvol_lvol_decouple_pending(const struct spdk_lvol *lvol);
 
+/**
+ * Stop decoupling this lvol so that a snapshot may be taken of it.
+ *
+ * \return 0  nothing to cancel, or done synchronously -- carry on immediately
+ *         1  under way; cb_fn is called once the decouple has stopped
+ *         <0 error (-EBUSY if a cancellation is already pending)
+ */
+int s3lvol_decouple_cancel(struct spdk_lvol *lvol, spdk_lvol_op_complete cb_fn,
+			   void *cb_arg);
+
+/**
+ * Create a read-only snapshot of an lvol, and register it as a bdev.
+ *
+ * If a decouple is in flight on \p lvol it is cancelled first, which makes this
+ * asynchronous even before the snapshot itself starts; \p out_cancelled_decouple,
+ * when not NULL, is set synchronously to say whether that happened, so a caller
+ * can report that the volume it asked to be decoupled no longer will be.
+ */
 int s3lvol_lvol_create_snapshot(struct s3lvol_lvstore *lvs, struct spdk_lvol *lvol,
 				const char *snapshot_name,
+				bool *out_cancelled_decouple,
 				s3lvol_lvol_op_cb cb_fn, void *cb_arg);
 
 /**
@@ -745,25 +786,146 @@ int s3lvol_snapshot_query_lvol(struct spdk_lvol *lvol,
 			       bool *pending);
 
 /**
+ * How many layers a zero-copy export of \p lvol would have to walk.
+ *
+ * The same walk export_build_chain() performs, counting rather than collecting,
+ * so the number answers a question with a consequence: past
+ * S3LVOL_DEFAULT_MAX_CHAIN_DEPTH that export stops being zero-copy and becomes a
+ * full copy of the volume -- and the resulting dense export is permanent, since
+ * the reaper only ever collects reference exports (their snapshot going away is
+ * what makes them collectable, which says nothing about a self-contained one).
+ *
+ * Which is why this is reported rather than merely bounded. The fallback to
+ * copying is correct and silent, so without a number in hand there is no way to
+ * tell a node approaching it from one nowhere near, and the first evidence would
+ * be the duplicate objects after it happened.
+ *
+ * Includes \p lvol itself, so a volume with no parent is 1. Counts through an
+ * esnap clone to the clone and stops there: what lies beyond is another
+ * lvstore's, and the export names it out of the parent manifest rather than
+ * walking it. Not capped -- how far past a threshold a chain is, is the useful
+ * part.
+ *
+ * \return the depth, or 0 if the lvol has no open blob (a deactivated volume
+ *         cannot be asked, exactly as the cluster counts cannot).
+ */
+uint32_t s3lvol_lvol_chain_depth(struct s3lvol_lvstore *lvs,
+				 struct spdk_lvol *lvol);
+
+/**
+ * Why a delete could not be carried out when it was asked for.
+ *
+ * The distinction that matters is whether the blocker clears on its own, which
+ * is what decides if the poller may finish the job -- see
+ * vbdev_s3lvol_pending.c. EXPORT does: an importer's lease goes stale once it
+ * stops renewing, and that is positive evidence nobody is reading any more.
+ * EXPORT_LEGACY is the deliberate exception -- an export with no lease at all,
+ * where only a TTL speaks and it lapses whether or not somebody is reading.
+ */
+enum s3lvol_pending_reason {
+	S3LVOL_PENDING_EXPORT,		/* an export pins it; its lease will say when */
+	S3LVOL_PENDING_EXPORT_LEGACY,	/* an export with no lease pins it */
+	S3LVOL_PENDING_EXPORT_INFLIGHT,	/* an export is publishing right now */
+	S3LVOL_PENDING_CLONE_COUNT,	/* more than one clone */
+	S3LVOL_PENDING_DECOUPLE,	/* a decouple is running on it */
+	S3LVOL_PENDING_FAILED,		/* the destroy failed asynchronously */
+};
+
+const char *s3lvol_pending_reason_str(enum s3lvol_pending_reason reason);
+
+/**
  * Record / test / clear the "a delete of this snapshot was attempted and could
- * not complete" mark. There is no deferred-completion poller: the mark only
- * shows up in rcow_get_lvstores, and the caller (today
- * test/tools/s3lvol_rpc.py --retry-pending) reissues rcow_delete_lvol once the
- * blocker (export pin, clones, decouple) clears. The list lives in memory only
- * and is gone on restart.
+ * not complete" mark.
+ *
+ * The mark is reported by rcow_get_lvstores (the PEND column) and by
+ * rcow_get_pending_deletes, and a poller completes the delete once the blocker
+ * clears -- for the reasons that clear on their own. Marks are also written to
+ * `<prefix>/meta/pending-deletes.json` and restored on attach.
  *
  * Keyed by (lvstore uuid, lvol uuid) rather than by name: a name is unique only
  * inside one loaded lvstore and is reusable, so a name-keyed mark can end up
- * pointing at an object the delete was never refused for. \c name is carried
- * for log lines only.
+ * pointing at an object the delete was never refused for. The names are carried
+ * for reporting only.
+ *
+ * Recording an intent that is already recorded updates its reason -- the
+ * blocker may differ from the one the first attempt hit -- and never enqueues
+ * twice.
  */
 void s3lvol_snapshot_pending_set(const struct spdk_uuid *lvs_uuid,
 				 const struct spdk_uuid *lvol_uuid,
-				 const char *snapshot_name);
+				 const char *lvs_name,
+				 const char *snapshot_name,
+				 enum s3lvol_pending_reason reason);
 bool s3lvol_snapshot_pending_test(const struct spdk_uuid *lvs_uuid,
 				  const struct spdk_uuid *lvol_uuid);
 void s3lvol_snapshot_pending_clear(const struct spdk_uuid *lvs_uuid,
 				   const struct spdk_uuid *lvol_uuid);
+
+/**
+ * Whether a recorded intent is one the poller will finish on its own.
+ *
+ * This is what rcow_delete_lvol reports as \c deferred: the delete was accepted
+ * as an intent and needs nothing further from the caller. A mark whose blocker
+ * needs a decision (a published export) answers false, and the RPC reports the
+ * refusal as it always has.
+ */
+bool s3lvol_snapshot_pending_deferred(const struct spdk_uuid *lvs_uuid,
+				      const struct spdk_uuid *lvol_uuid);
+
+/** One entry of the pending-delete queue, as handed to s3lvol_pending_foreach(). */
+struct s3lvol_pending_entry {
+	struct spdk_uuid           lvs_uuid;
+	struct spdk_uuid           lvol_uuid;
+	const char                *lvs_name;
+	const char                *lvol_name;
+	uint64_t                   enqueued_at;
+	enum s3lvol_pending_reason reason;
+	bool                       deferred;	/* the poller will complete it */
+};
+
+typedef void (*s3lvol_pending_cb)(void *cb_arg,
+				  const struct s3lvol_pending_entry *entry);
+
+/**
+ * Walk the pending-delete queue.
+ *
+ * Safe for the callback to cancel the entry it is looking at.
+ *
+ * \return the number of entries visited, or -EINVAL for a NULL callback.
+ */
+int s3lvol_pending_foreach(s3lvol_pending_cb cb, void *cb_arg);
+
+/**
+ * Restore this lvstore's queue from `<prefix>/meta/pending-deletes.json`.
+ *
+ * Fire and forget, and deliberately so: unlike the exports and imports
+ * registries, nothing here protects data -- the worst case is a delete the
+ * caller has to ask for again -- so a failure is logged and the attach carries
+ * on rather than being held up or refused. Entries land in the queue as the
+ * load completes, and the poller re-checks them from scratch; nothing is
+ * trusted about whether they are still deletable.
+ *
+ * The load does not keep a pointer to the wrapper. HEAD/GET callbacks
+ * re-resolve the live lvstore by uuid and drop the body if it is gone (or has
+ * been replaced by a same-name store with a different uuid). An extra S3
+ * client reference keeps CRT alive if unload races the request.
+ */
+void s3lvol_pending_load(struct s3lvol_lvstore *lvs);
+
+/**
+ * Park pending-delete registry HEAD or GET completions until
+ * s3lvol_pending_load_release(). Tests only: production never holds attach.
+ *
+ * \param stage  "head", "get", or "none" / NULL.
+ * \return 0, or -EINVAL for an unknown stage.
+ */
+int s3lvol_pending_load_hold(const char *stage);
+
+unsigned s3lvol_pending_load_parked_count(void);
+
+const char *s3lvol_pending_load_hold_name(void);
+
+unsigned s3lvol_pending_load_release(void);
 
 /**
  * Drop every pending-delete mark belonging to one lvstore.
@@ -792,6 +954,27 @@ bool s3lvol_export_inflight_pinning(struct s3lvol_lvstore *lvs,
  * so it wants to be comfortably longer than an import takes and far shorter than
  * "forever". An importer renews while it still needs the export. */
 #define S3LVOL_EXPORT_DEFAULT_TTL_SEC 3600
+
+/* The two ends of the lease clock, together because they are one decision.
+ *
+ * An importer renews every max(remaining_ttl/3, RENEW_MIN); the source treats a
+ * lease as fresh for 3x the cadence the importer reports, but never less than
+ * MIN_GRACE. The two numbers are chosen so that 3 * RENEW_MIN == MIN_GRACE: an
+ * import at the floor and a source at its floor agree exactly, rather than by two
+ * values happening to be compatible. Change one and the other has to move.
+ *
+ * Why the source clamps at all, rather than believing renew_s: the verdict it
+ * feeds, STALE, is carried out by a poller with nobody watching, and renew_s is a
+ * number the importer chose. An importer whose export was already past its
+ * deadline used to derive a one-second interval -- remaining_ttl of zero -- and
+ * so asked to be declared dead after three seconds. Nothing refuses an expired
+ * export at import, so that was reachable, and three seconds is inside the
+ * ordinary jitter of a WAN and an object store.
+ *
+ * The direction of the error is what settles the values. Too long only delays
+ * reclaiming a snapshot nobody is reading; too short deletes one somebody is. */
+#define S3LVOL_LEASE_RENEW_MIN_SEC 20
+#define S3LVOL_LEASE_MIN_GRACE_SEC (3 * S3LVOL_LEASE_RENEW_MIN_SEC)
 
 struct s3lvol_import_opts {
 	const char *lvol_name;/* name of the clone to create here */
@@ -1023,6 +1206,44 @@ int s3lvol_esnap_dev_create(void *bs_ctx, void *blob_ctx, struct spdk_blob *blob
 
 struct s3lvol_export;
 
+/**
+ * Why the snapshot is (or is not) held, for callers that need more than
+ * yes/no.
+ *
+ * Ordered by how restrictive the answer is, so aggregating several exports over
+ * one snapshot is a max().
+ *
+ * The distinction that matters is STALE versus LEGACY, and it is the reason this
+ * exists alongside s3lvol_export_pinning(): both let a delete through, but only
+ * STALE is *evidence* that nobody is reading (an importer wrote the lease and
+ * stopped renewing it). LEGACY is an export that predates the lease machinery,
+ * where a TTL lapses on its own whether or not somebody is still reading -- so a
+ * delete on that basis stays a decision the caller makes, and is never carried
+ * out unattended, until GC treats a reference manifest as live.
+ */
+enum s3lvol_export_pin {
+	S3LVOL_EXPORT_PIN_NONE,		/* no reference export names it */
+	S3LVOL_EXPORT_PIN_STALE,	/* named, but its lease says nobody reads */
+	S3LVOL_EXPORT_PIN_LEGACY,	/* named, no lease at all: only the TTL speaks */
+	S3LVOL_EXPORT_PIN_LEASE,	/* an importer is reading, or may be */
+};
+
+static inline const char *
+s3lvol_export_pin_str(enum s3lvol_export_pin pin)
+{
+	switch (pin) {
+	case S3LVOL_EXPORT_PIN_STALE:
+		return "stale";
+	case S3LVOL_EXPORT_PIN_LEGACY:
+		return "legacy";
+	case S3LVOL_EXPORT_PIN_LEASE:
+		return "lease";
+	case S3LVOL_EXPORT_PIN_NONE:
+	default:
+		return "none";
+	}
+}
+
 struct s3lvol_export_entry {
 	const char *export_uuid;
 	const char *snapshot;
@@ -1031,6 +1252,15 @@ struct s3lvol_export_entry {
 	uint32_t    generation;
 	bool    is_ref;
 	bool    expired;
+	bool    lease_aware;
+	bool    lease_checked;
+	bool    lease_absent;
+	bool    lease_watch;
+	bool    snapshot_alive;
+	bool    reaping;
+	uint64_t    lease_updated_at;
+	uint32_t    lease_renew_s;
+	enum s3lvol_export_pin pin;
 };
 
 /**
@@ -1043,6 +1273,9 @@ struct s3lvol_export_entry {
 struct s3lvol_export *s3lvol_export_pinning(struct s3lvol_lvstore *lvs,
 					    const char *snapshot_name);
 
+enum s3lvol_export_pin s3lvol_export_pin_state(struct s3lvol_lvstore *lvs,
+					       const char *snapshot_name);
+
 struct s3lvol_export *s3lvol_export_find(struct s3lvol_lvstore *lvs,
 					 const char *uuid_str);
 bool s3lvol_export_is_expired(const struct s3lvol_export *exp);
@@ -1052,6 +1285,7 @@ struct s3lvol_export *s3lvol_export_add(struct s3lvol_lvstore *lvs,
 					const char *snapshot_name);
 void s3lvol_export_forget(struct s3lvol_export *exp);
 void s3lvol_export_set_materialised(struct s3lvol_export *exp, uint32_t generation);
+void s3lvol_export_set_local_ref(struct s3lvol_export *exp, uint32_t generation);
 
 struct s3lvol_export *s3lvol_export_first(struct s3lvol_lvstore *lvs);
 struct s3lvol_export *s3lvol_export_next(struct s3lvol_export *prev);
@@ -1076,6 +1310,39 @@ int s3lvol_xfer_exports_load(struct s3lvol_lvstore *lvs,
 			     spdk_lvs_op_complete cb_fn, void *cb_arg);
 
 void s3lvol_xfer_exports_fini(struct s3lvol_lvstore *lvs);
+
+/**
+ * Turn a reference export into a copied one, so this node stops owing anybody
+ * its snapshot.
+ *
+ * A reference export names this lvstore's live chunk objects, which is why it
+ * pins the snapshot behind it: those objects cannot be reclaimed while an
+ * importer may read them. There is no way out of that today -- the snapshot
+ * stays undeletable for as long as any importer keeps renewing, however little
+ * it still needs the data. Materialising is the way out: read the snapshot,
+ * upload the export's own copies, and publish the manifest again as dense with
+ * `generation` bumped.
+ *
+ * Afterwards the export owes nothing. It holds copies, so the pin goes, the
+ * lease watch stops, and the TTL is meaningless -- see
+ * s3lvol_export_set_materialised().
+ *
+ * **Importers are not told, and do not have to be.** The manifest is replaced in
+ * place, so an importer holding the old one keeps reading until the objects it
+ * names disappear; the 404 then makes it refetch, find the higher generation, and
+ * carry on against the copies. That is why the ordering here is not negotiable:
+ * the new manifest has to be published before the old objects can be deleted, or
+ * a reader hits a 404 and refetches into the manifest that sent it there.
+ *
+ * This does not delete the old chunk objects. They belong to the snapshot's chunk
+ * map, not to the export, and they go when the snapshot does -- which is now
+ * allowed to happen.
+ *
+ * \return 0 with the callback pending; -ENOENT if no such export; -EALREADY if it
+ * is already a copy; -EBUSY if a materialisation of it is already running.
+ */
+int s3lvol_export_materialise(struct s3lvol_lvstore *lvs, const char *export_uuid,
+			      spdk_lvol_op_complete cb_fn, void *cb_arg);
 
 struct s3lvol_import *s3lvol_import_first(struct s3lvol_lvstore *lvs);
 struct s3lvol_import *s3lvol_import_next(struct s3lvol_import *prev);

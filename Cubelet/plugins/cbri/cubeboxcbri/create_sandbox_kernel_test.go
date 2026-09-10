@@ -19,11 +19,11 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/require"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/controller/runtemplate/templatetypes"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 )
 
 func TestCreateSandboxCreateSnapshotRefreshesArtifactKernel(t *testing.T) {
@@ -66,6 +66,7 @@ func TestCreateSandboxCreateSnapshotRefreshesArtifactKernel(t *testing.T) {
 
 	spec := applySpecOpts(t, ctx, specOpts)
 	require.Equal(t, targetKernelPath, spec.Annotations[constants.AnnotationsVMKernelPath])
+	require.Equal(t, "true", spec.Annotations[constants.AnnotationUsePassfdIO])
 }
 
 func TestCreateSandboxRestoreDoesNotRefreshArtifactKernel(t *testing.T) {

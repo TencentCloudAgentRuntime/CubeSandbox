@@ -20,9 +20,6 @@ import (
 	"github.com/containerd/plugin/registry"
 	"github.com/opencontainers/runtime-spec/specs-go"
 
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
-	cubeimages "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/cbri"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/pmem"
@@ -36,7 +33,10 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/storage/cow"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	CubeLog "github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
+	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/errorcode/v1"
+	cubeimages "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/images/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -167,6 +167,7 @@ func (e *cubeboxInstancePlugin) CreateSandbox(ctx context.Context, flowOpts *wor
 	}
 	annotations[constants.AnnotationsVMKernelPath] = kernelPath
 	annotations[constants.AnnotationsProduct] = e.config.instanceType
+	annotations[constants.AnnotationUsePassfdIO] = "true"
 	if appImageID == "" {
 		annotations[constants.AnnotationsVMOSImagePath] = filepath.Join(e.config.BasePath, "cube-image", "cube-guest-image-cpu.img")
 		annotations[constants.AnnotationsVMAgentPath] = filepath.Join(e.config.BasePath, "cube-agent", "cube-agent.ext4")

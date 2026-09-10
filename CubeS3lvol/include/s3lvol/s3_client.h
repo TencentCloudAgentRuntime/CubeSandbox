@@ -89,6 +89,21 @@ int s3_client_get_or_create(const struct s3_target *target, struct s3_client **o
 
 void s3_client_put(struct s3_client *client);
 
+/**
+ * Take another reference on an existing client.
+ *
+ * Unload drops the lvstore's reference. An in-flight HEAD or GET started
+ * against that lvstore still needs the CRT client until its callback runs, so
+ * the load path holds an extra ref for the lifetime of that request.
+ */
+void s3_client_get(struct s3_client *client);
+
+/**
+ * Bucket this client signs requests for. CopyObject names the source bucket
+ * separately; this is the destination.
+ */
+const char *s3_client_bucket(const struct s3_client *client);
+
 /* ==========================================================================
  * Object operations
  *
@@ -180,17 +195,16 @@ int s3_delete_batch(struct s3_client *client, const char **keys, uint32_t count,
  * not modified by inflate / decouple can be copied server-side directly, saving
  * all data-plane traffic and leaving only control-plane RTT.
  *
- * **There is currently no caller, and that is deliberate** (2026-08-05). It was
- * meant for export "materialisation" (copying the objects into the exports
- * prefix before deleting a snapshot referenced by a zero-copy export); that
- * approach was rejected -- the reasoning and the alternative are in the header
- * comment of lib/s3bsdev/s3_gc.c. The inflate optimisation above still holds;
- * it just is not done yet.
+ * Used by decouple ingest: same-bucket CopyObject of export chunks into the
+ * destination lvstore's data/ prefix, so materialise does not GET+WAL the
+ * bytes. Export-prefix materialisation (copying into exports/ before deleting
+ * a referenced snapshot) was rejected -- see lib/s3bsdev/s3_gc.c.
  *
- * Before actually using it, know one trap: CopyObject returns **HTTP 200 with
- * `<Error>` in the body**. A DEFAULT-type meta request probably does not parse
- * the body, so after every object copy a HEAD verification is required -- the
- * status code alone is not enough.
+ * CopyObject can return HTTP 200 with `<Error>` in the body (S3 keeps the
+ * connection alive during a long server-side copy). The status code alone is
+ * not enough: this call accumulates up to 8 KiB of response XML and succeeds
+ * only when that prefix contains a complete CopyObjectResult opening tag.
+ * A truncated body without that tag is an error, not success.
  */
 int s3_copy_object(struct s3_client *client,
 		   const char *src_bucket, const char *src_key,

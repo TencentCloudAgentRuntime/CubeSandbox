@@ -3,7 +3,7 @@ package images
 import (
 	"testing"
 
-	cubebox "github.com/tencentcloud/CubeSandbox/Cubelet/api/services/cubebox/v1"
+	cubebox "github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
 )
 
 func TestRequiresImageEnsure(t *testing.T) {

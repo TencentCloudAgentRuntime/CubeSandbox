@@ -44,6 +44,7 @@
 
 #include "vbdev_s3lvol.h"
 #include "vbdev_s3lvol_json.h"
+#include "export_lease_term.h"
 
 /* Same reasoning as the import cap: the registry is read into a fixed decoder
  * table, and a node with more live exports than this has a different problem.
@@ -56,121 +57,6 @@
  * machinery below), so this bounds a registry nobody is maintaining rather
  * than a working set. */
 #define S3LVOL_MAX_EXPORTS 256
-
-/* === Pending-delete marks ==================================================
- * A delete that cannot complete because the snapshot is referenced (an export
- * pins it, it has clones, or a decouple is running) records the intent here.
- * rcow_get_lvstores reports it so the caller sees the snapshot was "tried to
- * delete" and can retry once the blocker clears. The deferred-completion poller
- * is a later step.
- *
- * Keyed by (lvstore uuid, lvol uuid), not by name. A name is unique only within
- * one loaded lvstore and is reusable: delete a snapshot and create another one
- * by the same name, or unload the lvstore and attach it again, and a name-keyed
- * mark would point at a different object than the one the delete was refused
- * for -- which --retry-pending would then delete. A lvol uuid is generated once
- * and never reused, so the mark can only ever name the object it was recorded
- * for. The lvstore uuid groups the marks so a teardown can drop them all
- * (s3lvol_snapshot_pending_clear_lvs()); the name is kept for log lines only.
- */
-
-struct s3lvol_pending_delete {
-	struct spdk_uuid           lvs_uuid;
-	struct spdk_uuid           lvol_uuid;
-	char                       name[SPDK_LVOL_NAME_MAX];
-	TAILQ_ENTRY(s3lvol_pending_delete) link;
-};
-
-static TAILQ_HEAD(, s3lvol_pending_delete) g_pending_deletes =
-	TAILQ_HEAD_INITIALIZER(g_pending_deletes);
-
-static struct s3lvol_pending_delete *
-pending_delete_find(const struct spdk_uuid *lvs_uuid,
-		    const struct spdk_uuid *lvol_uuid)
-{
-	struct s3lvol_pending_delete *pd;
-
-	TAILQ_FOREACH(pd, &g_pending_deletes, link) {
-		if (spdk_uuid_compare(&pd->lvs_uuid, lvs_uuid) == 0 &&
-		    spdk_uuid_compare(&pd->lvol_uuid, lvol_uuid) == 0) {
-			return pd;
-		}
-	}
-	return NULL;
-}
-
-void
-s3lvol_snapshot_pending_set(const struct spdk_uuid *lvs_uuid,
-			    const struct spdk_uuid *lvol_uuid,
-			    const char *name)
-{
-	struct s3lvol_pending_delete *pd;
-
-	if (!lvs_uuid || !lvol_uuid) {
-		return;
-	}
-	if (pending_delete_find(lvs_uuid, lvol_uuid)) {
-		return;
-	}
-	pd = calloc(1, sizeof(*pd));
-	if (!pd) {
-		SPDK_ERRLOG("failed to allocate pending-delete mark for '%s'\n",
-			    name ? name : "(unnamed)");
-		return;
-	}
-	spdk_uuid_copy(&pd->lvs_uuid, lvs_uuid);
-	spdk_uuid_copy(&pd->lvol_uuid, lvol_uuid);
-	snprintf(pd->name, sizeof(pd->name), "%s", name ? name : "");
-	TAILQ_INSERT_TAIL(&g_pending_deletes, pd, link);
-}
-
-bool
-s3lvol_snapshot_pending_test(const struct spdk_uuid *lvs_uuid,
-			     const struct spdk_uuid *lvol_uuid)
-{
-	if (!lvs_uuid || !lvol_uuid) {
-		return false;
-	}
-	return pending_delete_find(lvs_uuid, lvol_uuid) != NULL;
-}
-
-void
-s3lvol_snapshot_pending_clear(const struct spdk_uuid *lvs_uuid,
-			      const struct spdk_uuid *lvol_uuid)
-{
-	struct s3lvol_pending_delete *pd;
-
-	if (!lvs_uuid || !lvol_uuid) {
-		return;
-	}
-	pd = pending_delete_find(lvs_uuid, lvol_uuid);
-	if (pd) {
-		TAILQ_REMOVE(&g_pending_deletes, pd, link);
-		free(pd);
-	}
-}
-
-/* Every mark belonging to one lvstore, dropped in one go.
- *
- * Called from the unload / destroy / free paths: past a teardown the marks name
- * lvols that no longer exist, and an lvstore that is attached again can hand the
- * same names to different objects. Marks that outlive their lvstore are how
- * --retry-pending could end up deleting something nobody asked it to. */
-void
-s3lvol_snapshot_pending_clear_lvs(const struct spdk_uuid *lvs_uuid)
-{
-	struct s3lvol_pending_delete *pd, *tmp;
-
-	if (!lvs_uuid) {
-		return;
-	}
-	TAILQ_FOREACH_SAFE(pd, &g_pending_deletes, link, tmp) {
-		if (spdk_uuid_compare(&pd->lvs_uuid, lvs_uuid) == 0) {
-			TAILQ_REMOVE(&g_pending_deletes, pd, link);
-			free(pd);
-		}
-	}
-}
 
 /* One in-flight lease check. Defined below, next to the machinery that uses it;
  * named here because an export points at the check it is waiting for. */
@@ -203,6 +89,16 @@ struct s3lvol_export {
 	 *                    not exist (no importer ever, or legacy export).
 	 *   lease_renew_s    the importer's renew interval in seconds, so the
 	 *                    grace period is 3x *its* cadence, not a guess.
+	 *   lease_absent     the last completed check was a definite miss
+	 *                    (404 or an empty/unreadable body), not a failed
+	 *                    HEAD. export_lease_failed() never sets this: a
+	 *                    bucket this node cannot reach must not look like
+	 *                    "nobody imported", or the reaper would delete a
+	 *                    live export's manifest during an outage.
+	 *   lease_absent_at  when that miss's check was submitted. Terminal reap
+	 *                    requires this >= expires_at: a 404 from before the
+	 *                    deadline does not speak for an importer that PUTs
+	 *                    the lease in the remaining window.
 	 *
 	 * lease_poller refreshes these on the lvstore's thread. Dense exports get
 	 * no poller: they hold their own copies and pin nothing, so there is no
@@ -219,16 +115,76 @@ struct s3lvol_export {
 	 * 404, so a bucket this node cannot reach does not pin every snapshot for
 	 * ever: see the fallback in export_lease_failed(). */
 	bool                       lease_checked;
+	bool                       lease_absent;
+	uint64_t                   lease_absent_at;
 	uint64_t                   lease_updated_at;
 	uint32_t                   lease_renew_s;
 	uint32_t                   lease_failures;
 	struct spdk_poller        *lease_poller;
 	struct export_lease_get_ctx *lease_fetch;
 
+	/* The other direction: leases this export *writes*, because its manifest
+	 * references somebody else's objects.
+	 *
+	 * A derived export -- one published from a volume imported from elsewhere --
+	 * names prefixes belonging to the nodes it passed through. Those nodes decide
+	 * independently whether to keep their snapshots, and they decide by lease. So
+	 * until now a derived export that nobody had imported yet was protected by
+	 * nothing: its own reader would have renewed, but there was no reader, and
+	 * the exporting node upstream would let its lease go stale and delete the
+	 * objects. What was left was a manifest that looked perfectly valid and
+	 * resolved to nothing.
+	 *
+	 * So the export renews on its own behalf, from the moment it is published.
+	 * "E pins A while E is alive" rather than "while somebody reads
+	 * E", which is the difference between a publish-then-leave flow working and
+	 * silently rotting.
+	 *
+	 * Nothing releases these automatically. An export whose sources are all its
+	 * own has none; a derived one holds them until rcow_release_export, which is
+	 * the deliberate choice -- there is no way to tell "nobody will ever import
+	 * this" from "nobody has yet", and guessing wrong destroys data. Held keys
+	 * cost one PUT each per interval and are visible in the log at publish.
+	 *
+	 * One client and one poller for all of them, since every source of a manifest
+	 * shares its endpoint, bucket and region -- the writer refuses to reference
+	 * anything else. */
+	char                     (*src_lease_keys)[S3_EXPORT_KEY_MAX];
+	uint32_t                   num_src_leases;
+	struct spdk_poller        *src_lease_poller;
+	struct s3_client          *src_lease_client;
+	uint64_t                   src_lease_interval_us;
+
+	/* This export was created by a build whose importers renew a lease.
+	 *
+	 * It is what makes "no lease object" readable. Without it the absence is
+	 * ambiguous -- nobody ever imported, or an importer from before leases
+	 * existed is reading right now and leaves no trace -- and the only safe
+	 * reading of an ambiguous answer is the second one, which means the
+	 * export pins its snapshot until somebody releases it by hand. With it,
+	 * an absent lease past the deadline means exactly one thing: no importer
+	 * ever came. That is the common case for an export nobody consumed, and
+	 * it is the one this flag lets the delete path finish on its own.
+	 *
+	 * Written into the registry, so it survives a restart; absent from
+	 * entries written by older builds, which therefore keep the old
+	 * behaviour. */
+	bool                       lease_aware;
+
+	/* A reap of this entry is in flight. The reaper is a poller, the release
+	 * it starts is asynchronous, and the entry stays in the list until that
+	 * release completes -- so without this the next tick would start a second
+	 * release of the same export. */
+	bool                       reaping;
+
 	TAILQ_ENTRY(s3lvol_export) link;
 };
 
 static TAILQ_HEAD(, s3lvol_export) g_exports = TAILQ_HEAD_INITIALIZER(g_exports);
+
+/* Reaps entries whose snapshot is gone; see the reaping section below. */
+static struct spdk_poller *g_exports_reaper;
+static void exports_reaper_sync(void);
 
 /* Liveness lease machinery. Declared here because s3lvol_export_add()
  * starts the watch, while the implementations live further down where the
@@ -312,15 +268,15 @@ s3lvol_export_find(struct s3lvol_lvstore *lvs, const char *uuid_str)
  * leases existed, and says so once. */
 #define S3LVOL_LEASE_MAX_FAILURES 5
 
-/* Grace period assumed when a lease carries updated_at but no renew_s.
+/* The shortest grace period this node will apply, and the one it assumes when a
+ * lease carries updated_at but no renew_s.
  *
- * That means a newer source reading an older importer's lease. Deriving the
- * interval from the remaining TTL is wrong here: this situation is most likely
- * *after* the TTL has passed, which is exactly when the lease matters, and the
- * derivation would then collapse to the one-second floor -- far too tight for
- * cross-node clock skew plus S3 latency, so a live importer would look stale.
- * A fixed, generous value is the safe reading of an ambiguous object. */
-#define S3LVOL_LEASE_DEFAULT_GRACE_SEC 60
+ * Both cases and the reasoning behind the value live with the constant, in
+ * vbdev_s3lvol.h, next to the renew floor it is tied to. The second case is a
+ * newer source reading an older importer's lease: deriving a grace from the
+ * remaining TTL is wrong there, because that situation is most likely *after* the
+ * deadline has passed -- which is exactly when the lease matters -- and the
+ * derivation would collapse to a second or two. */
 
 static void
 s3lvol_export_lease_key(struct s3lvol_export *exp, char *out, size_t out_len)
@@ -336,7 +292,49 @@ struct export_lease_get_ctx {
 	char                  key[S3_EXPORT_KEY_MAX];
 	char                 *body;
 	uint64_t              size;
+	/* time(NULL) at s3_head, not at completion: a check that left before
+	 * expires_at cannot confirm the lease is gone after it. */
+	uint64_t              submitted_at;
 };
+
+/* A lease-aware reference export whose lease object is confirmed gone, after
+ * the deadline. No importer can appear later -- they must write the lease
+ * before they can read -- so watching it, and keeping the registry entry, is
+ * a leak. Distinct from lease_updated_at == 0: that is also the fallback
+ * after S3LVOL_LEASE_MAX_FAILURES, which must not reap. The miss itself has
+ * to post-date the deadline; see export_lease_miss_confirms_gone(). */
+static bool
+export_lease_is_terminal(const struct s3lvol_export *exp)
+{
+	return exp->layout == S3_EXPORT_LAYOUT_REF
+	       && exp->lease_aware
+	       && export_lease_miss_confirms_gone(exp->lease_absent,
+						   exp->lease_absent_at,
+						   exp->expires_at,
+						   (uint64_t)time(NULL));
+}
+
+static void
+export_lease_note_absent(struct s3lvol_export *exp, uint64_t submitted_at)
+{
+	exp->lease_checked = true;
+	exp->lease_absent = true;
+	exp->lease_absent_at = submitted_at;
+	exp->lease_updated_at = 0;
+	exp->lease_failures = 0;
+	exp->lease_renew_s = 0;
+}
+
+static void
+export_lease_stop_if_terminal(struct s3lvol_export *exp)
+{
+	if (!export_lease_is_terminal(exp) || !exp->lease_poller) {
+		return;
+	}
+	SPDK_NOTICELOG("lease of export %s is absent past the deadline; "
+		       "stopping the watch\n", exp->uuid_str);
+	s3lvol_export_lease_stop(exp);
+}
 
 static void
 export_lease_get_done(struct export_lease_get_ctx *ctx)
@@ -406,13 +404,12 @@ export_lease_got_body(void *cb_arg, uint64_t bytes_read, int status)
 		if (status == -ENOENT) {
 			/* Deleted between the HEAD and the GET -- release does
 			 * exactly this. No lease means the TTL decides. */
-			exp->lease_checked = true;
-			exp->lease_updated_at = 0;
-			exp->lease_failures = 0;
+			export_lease_note_absent(exp, ctx->submitted_at);
 		} else {
 			export_lease_failed(exp, status);
 		}
 		export_lease_get_done(ctx);
+		export_lease_stop_if_terminal(exp);
 		return;
 	}
 
@@ -433,12 +430,48 @@ export_lease_got_body(void *cb_arg, uint64_t bytes_read, int status)
 	/* A lease that carries no updated_at is not a lease we recognise. Treat
 	 * it as absent: legacy TTL fallback, which is exactly what a pre-lease
 	 * object would need. */
+	if (updated_at == 0) {
+		export_lease_note_absent(exp, ctx->submitted_at);
+		export_lease_get_done(ctx);
+		export_lease_stop_if_terminal(exp);
+		return;
+	}
+
 	exp->lease_checked = true;
 	exp->lease_updated_at = updated_at;
-	exp->lease_renew_s = (updated_at != 0) ? renew_s : 0;
 	exp->lease_failures = 0;
+	exp->lease_absent = false;
+	exp->lease_absent_at = 0;
+
+	/* The high-water mark, not the last value read, and that is load-bearing.
+	 *
+	 * One key holds one object and the last writer wins, but there
+	 * can be several writers with wildly different cadences: an importer renews
+	 * at remaining_ttl/3 -- 1200 s at the default TTL -- while a *derived export*
+	 * referencing this prefix renews at the 20 s floor, because it has no TTL of
+	 * its own to derive from. The frequent writer then wins nearly every race, so
+	 * taking the last renew_s read would set the grace period from the fastest
+	 * writer and apply it to the slowest: 60 s of grace against a writer that
+	 * speaks every 1200 s. The export going away would make this snapshot STALE
+	 * within a minute, and STALE is carried out unattended by the pending-delete
+	 * poller -- deleting objects an importer is still reading, which is the exact
+	 * corruption the lease exists to prevent.
+	 *
+	 * The grace period has to cover the slowest writer, so it is derived from the
+	 * largest cadence anyone claimed. Monotonic within the life of this entry;
+	 * an attach starts it over, which is right because the set of readers may
+	 * have changed while this node was down. Cost of being wrong in this
+	 * direction is a snapshot reclaimed later than it could have been. */
+	if (updated_at != 0) {
+		if (renew_s > exp->lease_renew_s) {
+			exp->lease_renew_s = renew_s;
+		}
+	} else {
+		exp->lease_renew_s = 0;
+	}
 
 	export_lease_get_done(ctx);
+	export_lease_stop_if_terminal(exp);
 }
 
 static void
@@ -454,10 +487,9 @@ export_lease_head_done(void *cb_arg, int status)
 	}
 
 	if (status == -ENOENT) {
-		exp->lease_checked = true;
-		exp->lease_updated_at = 0;
-		exp->lease_failures = 0;
+		export_lease_note_absent(exp, ctx->submitted_at);
 		export_lease_get_done(ctx);
+		export_lease_stop_if_terminal(exp);
 		return;
 	}
 	if (status != 0) {
@@ -468,10 +500,9 @@ export_lease_head_done(void *cb_arg, int status)
 	/* Empty or implausible: not a lease we can read, and not an error either.
 	 * The TTL decides, as it does for an export nobody ever imported. */
 	if (ctx->size == 0 || ctx->size > 4096) {
-		exp->lease_checked = true;
-		exp->lease_updated_at = 0;
-		exp->lease_failures = 0;
+		export_lease_note_absent(exp, ctx->submitted_at);
 		export_lease_get_done(ctx);
+		export_lease_stop_if_terminal(exp);
 		return;
 	}
 
@@ -497,6 +528,15 @@ export_lease_renew(void *arg)
 	struct export_lease_get_ctx *ctx;
 	int rc;
 
+	/* Deadline passed and a check submitted at or after it missed: further
+	 * HEADs cannot change that, and they are the 404 storm a restart used to
+	 * amplify. The reaper collects the entry; this just stops asking. A miss
+	 * from before the deadline is not enough -- an importer may still PUT. */
+	if (export_lease_is_terminal(exp)) {
+		export_lease_stop_if_terminal(exp);
+		return SPDK_POLLER_IDLE;
+	}
+
 	/* One check at a time. A slow bucket must not queue a check per tick,
 	 * and the completion writes to fields a second check would race on. */
 	if (exp->lease_fetch) {
@@ -508,6 +548,7 @@ export_lease_renew(void *arg)
 		return SPDK_POLLER_IDLE;
 	}
 	ctx->exp = exp;
+	ctx->submitted_at = (uint64_t)time(NULL);
 	s3lvol_export_lease_key(exp, ctx->key, sizeof(ctx->key));
 	exp->lease_fetch = ctx;
 
@@ -550,14 +591,23 @@ s3lvol_export_lease_start(struct s3lvol_export *exp)
 
 	/* Poll at the cadence the importer is expected to renew at, so a stopped
 	 * renewer is noticed within one grace period. The importer's interval is
-	 * max(1 s, remaining_ttl/3) computed at import time; this is the same
-	 * formula against this node's clock, which is close enough -- and the
-	 * grace period is 3x the *importer's* reported interval, not this poll
-	 * interval, so the safety margin does not depend on the two clocks
-	 * agreeing exactly. */
+	 * max(S3LVOL_LEASE_RENEW_MIN_SEC, remaining_ttl/3) computed at import
+	 * time; this is the same formula against this node's clock, which is
+	 * close enough -- and the grace period is 3x the *importer's* reported
+	 * interval, not this poll interval, so the safety margin does not depend
+	 * on the two clocks agreeing exactly.
+	 *
+	 * The floor has to be the same one, or the mirror stops being a mirror:
+	 * without it an export past its deadline polls every second for the life
+	 * of the import, which is a GET per second per export and buys nothing --
+	 * the lease it is reading cannot go stale any sooner than the grace period
+	 * allows. */
 	remaining = (exp->expires_at > (uint64_t)time(NULL))
 		    ? (exp->expires_at - (uint64_t)time(NULL)) : 0;
-	interval = (remaining / 3) ? (remaining / 3) : 1;
+	interval = remaining / 3;
+	if (interval < S3LVOL_LEASE_RENEW_MIN_SEC) {
+		interval = S3LVOL_LEASE_RENEW_MIN_SEC;
+	}
 
 	exp->lease_poller = SPDK_POLLER_REGISTER(export_lease_renew, exp,
 						 interval * SPDK_SEC_TO_USEC);
@@ -569,6 +619,364 @@ s3lvol_export_lease_start(struct s3lvol_export *exp)
 
 	SPDK_NOTICELOG("watching lease of export %s every %" PRIu64
 		       " second(s)\n", exp->uuid_str, interval);
+
+	/* And check once now, rather than at the end of the first interval.
+	 *
+	 * The interval is a third of the TTL, which is twenty minutes at the
+	 * default hour -- so without this, "has anybody imported this" stays
+	 * unanswered for twenty minutes after the export was published, and every
+	 * delete in that window is held on the possibility of an importer. The
+	 * first answer is the one that matters most: an export nobody consumed can
+	 * only be recognised by its lease being absent. */
+	export_lease_renew(exp);
+}
+
+/* ==========================================================================
+ * Leases this export writes, rather than reads
+ *
+ * A derived export names prefixes belonging to other nodes. Each of those decides
+ * on its own whether to keep the snapshot behind them, and decides by reading a
+ * lease -- so somebody has to write one, or the objects this manifest references
+ * are deleted while it still names them.
+ *
+ * The importer of a derived export does write them (see import_lease_start), and
+ * that covers an export somebody is reading. It does not cover one that has been
+ * published and not yet imported, which is exactly the state a
+ * publish-then-hand-over flow leaves behind. So the export renews for itself, from
+ * publication until it is released.
+ * ========================================================================== */
+
+static void
+export_src_lease_put_done(void *cb_arg, int status)
+{
+	char *key = cb_arg;
+
+	/* Fire and forget, like every other lease PUT: a lost one is absorbed by the
+	 * grace period at the other end and the next tick tries again. The key rather
+	 * than the export uuid, because an export may renew several and the one that
+	 * fails is the prefix whose node may now delete data this manifest needs. */
+	if (status != 0) {
+		SPDK_WARNLOG("source lease renew failed for '%s': %s\n",
+			     key, spdk_strerror(-status));
+	}
+	free(key);
+}
+
+static int
+export_src_lease_renew(void *arg)
+{
+	struct s3lvol_export *exp = arg;
+	char body[160];
+	struct iovec iov;
+	uint64_t now = (uint64_t)time(NULL);
+	uint64_t remaining;
+	uint32_t claim;
+	uint32_t i;
+
+	/* What this asks the upstream for, and why it is not the PUT interval.
+	 *
+	 * The source turns renew_s into a grace period of 3x it: "nobody has written
+	 * for that long, so nobody is reading". For an importer the two coincide,
+	 * because the importer is the only writer and its cadence is what going
+	 * quiet means. For an export they do not, and reporting the cadence here
+	 * caused the corruption this comment exists to prevent.
+	 *
+	 * A key can have several writers -- this export, plus every importer of
+	 * *this* export, which renews the same upstream key -- and the object holds
+	 * only the last one. This export writes every 20 s; an importer writes every
+	 * remaining_ttl/3, which is 1200 s at the default TTL. So this export wins
+	 * nearly every race, and a cadence reported here would set the upstream's
+	 * grace to 60 s and then apply it to a writer that speaks every 1200 s.
+	 * Losing this node would make the upstream snapshot STALE within a minute,
+	 * and the pending-delete poller carries STALE out unattended -- deleting
+	 * objects an importer of this export is still reading.
+	 *
+	 * So what is reported is the *protection wanted*, not the write rate: keep
+	 * the objects until this export's own promise to its readers runs out. Same
+	 * quantity an importer of this export would ask for, which is what makes the
+	 * two comparable when they overwrite each other. Writing more often than
+	 * claimed is harmless in the safe direction -- it only keeps updated_at
+	 * fresher than required. Paired with the source taking the high-water mark
+	 * of renew_s (see export_lease_got_body), because this value shrinks as the
+	 * deadline approaches while an importer's stays fixed at what it read. */
+	remaining = (exp->expires_at > now) ? (exp->expires_at - now) : 0;
+	claim = (uint32_t)(remaining / 3);
+	if (claim < S3LVOL_LEASE_RENEW_MIN_SEC) {
+		claim = S3LVOL_LEASE_RENEW_MIN_SEC;
+	}
+
+	/* Same document an importer writes, so the reading side needs no new case.
+	 * importer_id says which node is holding the reference and why -- an operator
+	 * looking at a lease that will not go away needs to know it belongs to an
+	 * export rather than to a volume, since the way to clear it is
+	 * rcow_release_export and not deleting anything. */
+	snprintf(body, sizeof(body),
+		 "{\"importer_id\":\"export:%s\",\"updated_at\":%" PRIu64
+		 ",\"renew_s\":%lu}",
+		 exp->uuid_str, now, (unsigned long)claim);
+	iov.iov_base = body;
+	iov.iov_len  = strlen(body);
+
+	for (i = 0; i < exp->num_src_leases; i++) {
+		char *key;
+
+		/* Owned by the completion: s3_put copies the body but not cb_arg, and
+		 * the callback outlives both the poller and, after forget(), the array
+		 * these were copied from. */
+		key = strdup(exp->src_lease_keys[i]);
+		if (!key) {
+			continue;
+		}
+		/* Each submitted independently: they protect different nodes'
+		 * snapshots, so one unreachable prefix must not take the rest stale
+		 * with it. */
+		if (s3_put(exp->src_lease_client, key, &iov, 1, false,
+			   export_src_lease_put_done, key) != 0) {
+			SPDK_WARNLOG("source lease renew submit failed for '%s'\n", key);
+			free(key);
+		}
+	}
+
+	return SPDK_POLLER_IDLE;
+}
+
+static void
+export_src_lease_stop(struct s3lvol_export *exp)
+{
+	if (exp->src_lease_poller) {
+		spdk_poller_unregister(&exp->src_lease_poller);
+		exp->src_lease_poller = NULL;
+	}
+	if (exp->src_lease_client) {
+		s3_client_put(exp->src_lease_client);
+		exp->src_lease_client = NULL;
+	}
+	/* Safe with PUTs in flight: each carries its own copy of the key, which is
+	 * why the renew strdup()s rather than passing these. */
+	free(exp->src_lease_keys);
+	exp->src_lease_keys = NULL;
+	exp->num_src_leases = 0;
+}
+
+/* Bring the poller up for keys already in exp->src_lease_keys. Shared by the
+ * publish path, which derives the keys from a manifest, and the attach path, which
+ * reads them back from the registry -- the difference between the two is only
+ * where the keys came from. \p src describes where to reach them. */
+static void
+export_src_lease_arm(struct s3lvol_export *exp, const struct s3_export_source *src)
+{
+	struct s3_target target = {0};
+	uint32_t j;
+	int rc;
+
+	if (exp->num_src_leases == 0) {
+		free(exp->src_lease_keys);
+		exp->src_lease_keys = NULL;
+		return;
+	}
+
+	/* Every source shares the manifest's endpoint, bucket and region, so one
+	 * client serves all of them -- the writer refuses to reference another
+	 * bucket, which is what makes that true. */
+	target.endpoint  = (char *)src->endpoint;
+	target.region    = (char *)src->region;
+	target.bucket    = (char *)src->bucket;
+	target.auth_mode = S3_AUTH_ENV;
+	rc = s3_client_get_or_create(&target, &exp->src_lease_client);
+	if (rc != 0) {
+		SPDK_WARNLOG("export %s: no S3 client for its source leases: %s. The "
+			     "nodes it references may delete their snapshots.\n",
+			     exp->uuid_str, spdk_strerror(-rc));
+		export_src_lease_stop(exp);
+		return;
+	}
+
+	/* The floor, and deliberately unrelated to what the renew *claims*.
+	 *
+	 * How often to write and how long to ask the upstream to wait are two
+	 * questions here, unlike for an importer where one answer serves both. This
+	 * is the first: write often, so updated_at stays fresh and a lost PUT is
+	 * covered by the next one soon after. The second is answered per renew, from
+	 * this export's own deadline -- see export_src_lease_renew(), which explains
+	 * why conflating them deleted data. */
+	exp->src_lease_interval_us = S3LVOL_LEASE_RENEW_MIN_SEC * SPDK_SEC_TO_USEC;
+	exp->src_lease_poller = SPDK_POLLER_REGISTER(export_src_lease_renew, exp,
+						     exp->src_lease_interval_us);
+	if (!exp->src_lease_poller) {
+		SPDK_WARNLOG("export %s: could not start its source lease poller\n",
+			     exp->uuid_str);
+		export_src_lease_stop(exp);
+		return;
+	}
+
+	/* Now, not one interval from now. At publish there may be no upstream lease
+	 * at all yet; at attach, whatever was there has been going stale for however
+	 * long this node was down, and an absent or stale lease is what lets the
+	 * other end delete. */
+	export_src_lease_renew(exp);
+
+	SPDK_NOTICELOG("export %s renews %u upstream lease(s) every %u second(s) "
+		       "because it references other prefixes; rcow_release_export is "
+		       "what stops it\n", exp->uuid_str, exp->num_src_leases,
+		       S3LVOL_LEASE_RENEW_MIN_SEC);
+	for (j = 0; j < exp->num_src_leases; j++) {
+		SPDK_NOTICELOG("export %s upstream lease [%u]: %s\n", exp->uuid_str, j,
+			       exp->src_lease_keys[j]);
+	}
+}
+
+/* Start renewing on behalf of \p m 's sources. Does nothing for a manifest that
+ * references only its own prefix, which is every non-derived export. */
+static void
+export_src_lease_start(struct s3lvol_export *exp, const struct s3_export_manifest *m)
+{
+	uint32_t j;
+
+	/* num_srcs <= 1 means entry 0 only, i.e. this lvstore's own prefix, whose
+	 * objects this node already owns. Nothing to ask anybody else for. */
+	if (m->layout != S3_EXPORT_LAYOUT_REF || m->num_srcs <= 1) {
+		return;
+	}
+
+	exp->src_lease_keys = calloc(m->num_srcs, sizeof(*exp->src_lease_keys));
+	if (!exp->src_lease_keys) {
+		SPDK_WARNLOG("export %s: no memory for its source leases; the nodes it "
+			     "references may delete their snapshots\n", exp->uuid_str);
+		return;
+	}
+
+	/* From entry 1: entry 0 is this export's own prefix. Each later entry names
+	 * the export that governs it, and the lease goes *there* rather than to
+	 * whoever this manifest was derived from -- that middleman may be gone, and
+	 * the objects are not its to protect. */
+	for (j = 1; j < m->num_srcs; j++) {
+		if (m->srcs[j].export_uuid[0] == '\0') {
+			SPDK_WARNLOG("export %s names prefix '%s' with no export uuid, "
+				     "so nothing can renew its lease; that node may "
+				     "delete the snapshot behind those chunks\n",
+				     exp->uuid_str, m->srcs[j].prefix);
+			continue;
+		}
+		snprintf(exp->src_lease_keys[exp->num_src_leases],
+			 sizeof(exp->src_lease_keys[0]), "%s/meta/exports/%s.lease",
+			 m->srcs[j].prefix, m->srcs[j].export_uuid);
+		exp->num_src_leases++;
+	}
+
+	export_src_lease_arm(exp, &m->src);
+}
+
+/* One export's verdict on one snapshot. Split out of s3lvol_export_pinning()
+ * because two callers need different amounts of detail from the same decision:
+ * the delete path only asks "may I delete this now", while the pending-delete
+ * poller also has to know *why* the answer is yes.
+ *
+ * That distinction is the whole point. A lease that has gone stale is positive
+ * evidence -- an importer wrote it and stopped renewing, so nobody is reading --
+ * and a delete on that basis is safe to carry out unattended. An export with no
+ * lease object at all is the legacy case, where the only signal is a TTL that
+ * lapses on its own whether or not somebody is still reading; that one has to
+ * stay a decision a human (or an explicit retry) makes, until GC treats a
+ * reference manifest as live. Collapsing both into "not pinned" is what would
+ * turn expiry into the automatic path to deleting data underneath a reader. */
+static enum s3lvol_export_pin
+export_pin_verdict(const struct s3lvol_export *exp)
+{
+	uint64_t now, grace;
+
+	/* A dense export holds copies, so it does not pin the snapshot. */
+	if (exp->layout != S3_EXPORT_LAYOUT_REF) {
+		return S3LVOL_EXPORT_PIN_NONE;
+	}
+
+	/* Before the first GET completes, assume the lease may exist and an
+	 * importer may be reading it: refuse, and let the next poll decide. */
+	if (!exp->lease_checked) {
+		return S3LVOL_EXPORT_PIN_LEASE;
+	}
+
+	/* No lease object. Two very different situations, and the flag is what
+	 * tells them apart.
+	 *
+	 * On a lease-aware export any importer would have written one, so an
+	 * absent lease means nobody ever imported -- but only once the deadline
+	 * has passed. Before that, the export is a standing promise to an
+	 * importer the control plane may not have started yet: the lease is
+	 * written when the esnap clone exists, so an import that is under way has
+	 * not written one either, and deleting the snapshot on the strength of
+	 * "no lease" would break exactly the importer the TTL exists to admit.
+	 *
+	 * Past the deadline, STALE only if the miss itself was observed on a
+	 * check submitted at or after expires_at. A 404 from before the
+	 * deadline is not evidence that nobody imported: the control plane can
+	 * still PUT a lease in the remaining window, and the reaper must not
+	 * drop that import's manifest. Until a post-deadline check misses,
+	 * keep LEASE -- refuse the unattended delete.
+	 *
+	 * Without the flag the absence stays ambiguous (an importer from before
+	 * leases existed reads without writing one), so it remains LEGACY: the TTL
+	 * still lets a delete through, but never one nobody asked for twice. */
+	if (exp->lease_updated_at == 0) {
+		if (exp->lease_aware) {
+			if (exp->lease_absent) {
+				return export_lease_miss_confirms_gone(
+					       true, exp->lease_absent_at,
+					       exp->expires_at,
+					       (uint64_t)time(NULL))
+				       ? S3LVOL_EXPORT_PIN_STALE
+				       : S3LVOL_EXPORT_PIN_LEASE;
+			}
+			return s3lvol_export_is_expired(exp)
+			       ? S3LVOL_EXPORT_PIN_STALE
+			       : S3LVOL_EXPORT_PIN_LEASE;
+		}
+		return S3LVOL_EXPORT_PIN_LEGACY;
+	}
+
+	now = (uint64_t)time(NULL);
+	grace = 3 * (uint64_t)exp->lease_renew_s;
+	if (grace < S3LVOL_LEASE_MIN_GRACE_SEC) {
+		/* Either no renew_s at all (an older importer), or one small enough
+		 * that honouring it would delete data under a reader that is merely
+		 * slow. See the constant. */
+		grace = S3LVOL_LEASE_MIN_GRACE_SEC;
+	}
+	/* Guard against a lease stamped in the future -- a skewed importer clock
+	 * would otherwise make now - updated_at wrap and read as ancient. */
+	if (exp->lease_updated_at > now || now - exp->lease_updated_at < grace) {
+		return S3LVOL_EXPORT_PIN_LEASE;
+	}
+	return S3LVOL_EXPORT_PIN_STALE;
+}
+
+enum s3lvol_export_pin
+s3lvol_export_pin_state(struct s3lvol_lvstore *lvs, const char *snapshot_name)
+{
+	enum s3lvol_export_pin worst = S3LVOL_EXPORT_PIN_NONE;
+	struct s3lvol_export *exp;
+
+	if (!lvs || !snapshot_name) {
+		return S3LVOL_EXPORT_PIN_NONE;
+	}
+
+	/* Several exports can name the same snapshot, and the most restrictive
+	 * verdict wins: one live reader is enough to pin it, and one export whose
+	 * liveness is unknowable is enough to keep the delete a decision. */
+	TAILQ_FOREACH(exp, &g_exports, link) {
+		enum s3lvol_export_pin v;
+
+		if (exp->lvs != lvs || strcmp(exp->snapshot, snapshot_name) != 0) {
+			continue;
+		}
+		v = export_pin_verdict(exp);
+		if (v == S3LVOL_EXPORT_PIN_LEASE) {
+			return S3LVOL_EXPORT_PIN_LEASE;
+		}
+		if (v > worst) {
+			worst = v;
+		}
+	}
+	return worst;
 }
 
 struct s3lvol_export *
@@ -581,57 +989,29 @@ s3lvol_export_pinning(struct s3lvol_lvstore *lvs, const char *snapshot_name)
 	}
 
 	TAILQ_FOREACH(exp, &g_exports, link) {
-		uint64_t now, grace;
-
 		if (exp->lvs != lvs || strcmp(exp->snapshot, snapshot_name) != 0) {
 			continue;
 		}
-		/* A dense export holds copies, so it does not pin the snapshot.
-		 * Reported as "not pinning", which lets the delete proceed. */
-		if (exp->layout != S3_EXPORT_LAYOUT_REF) {
+
+		switch (export_pin_verdict(exp)) {
+		case S3LVOL_EXPORT_PIN_LEASE:
+			/* An importer is reading, or may be. */
+			return exp;
+		case S3LVOL_EXPORT_PIN_LEGACY:
+			/* No lease: the TTL decides, as it always has. */
+			if (!s3lvol_export_is_expired(exp)) {
+				return exp;
+			}
+			continue;
+		case S3LVOL_EXPORT_PIN_STALE:
+			/* Nobody has renewed in three intervals. The TTL has
+			 * almost certainly passed too (the lease is younger
+			 * than the TTL), but even if not, nobody is reading. */
+			continue;
+		case S3LVOL_EXPORT_PIN_NONE:
+		default:
 			continue;
 		}
-
-		/* Lease first. Once the first GET has completed, a lease that
-		 * exists decides the question on its own: fresh means an importer
-		 * is still reading, stale means nobody has renewed in 3 intervals
-		 * and the snapshot can go. Before that first GET, assume the
-		 * lease may exist (safe direction). */
-		if (exp->lease_checked) {
-			if (exp->lease_updated_at != 0) {
-				now = (uint64_t)time(NULL);
-				grace = 3 * (uint64_t)exp->lease_renew_s;
-				if (grace == 0) {
-					/* A lease with no renew_s: an older
-					 * importer. See the constant for why this
-					 * is a fixed value and not derived from
-					 * the deadline. */
-					grace = S3LVOL_LEASE_DEFAULT_GRACE_SEC;
-				}
-				/* Guard against a lease stamped in the future --
-				 * a skewed importer clock would otherwise make
-				 * now - updated_at wrap and read as ancient. */
-				if (exp->lease_updated_at > now ||
-				    now - exp->lease_updated_at < grace) {
-					return exp;
-				}
-				/* Stale lease: no importer has renewed. The TTL
-				 * has almost certainly passed too (the lease is
-				 * younger than the TTL), but even if not, nobody
-				 * is reading, so the delete may proceed. */
-				continue;
-			}
-			/* No lease object. Legacy: TTL decides, as it always
-			 * has. */
-			if (s3lvol_export_is_expired(exp)) {
-				continue;
-			}
-			return exp;
-		}
-
-		/* First GET not done yet. Behave as if an importer may be
-		 * reading: refuse, and let the next poll decide. */
-		return exp;
 	}
 	return NULL;
 }
@@ -665,6 +1045,8 @@ s3lvol_export_next(struct s3lvol_export *prev)
 void
 s3lvol_export_get(const struct s3lvol_export *exp, struct s3lvol_export_entry *out)
 {
+	struct spdk_lvol *lvol;
+
 	out->export_uuid = exp->uuid_str;
 	out->snapshot    = exp->snapshot;
 	out->blob_id     = exp->blob_id;
@@ -672,6 +1054,18 @@ s3lvol_export_get(const struct s3lvol_export *exp, struct s3lvol_export_entry *o
 	out->generation  = exp->generation;
 	out->is_ref      = (exp->layout == S3_EXPORT_LAYOUT_REF);
 	out->expired     = s3lvol_export_is_expired(exp);
+	out->lease_aware = exp->lease_aware;
+	out->lease_checked = exp->lease_checked;
+	out->lease_absent = exp->lease_absent;
+	out->lease_watch = exp->lease_poller != NULL;
+	out->lease_updated_at = exp->lease_updated_at;
+	out->lease_renew_s = exp->lease_renew_s;
+	out->pin = export_pin_verdict(exp);
+	out->reaping = exp->reaping;
+
+	lvol = s3lvol_lvol_find(exp->lvs, exp->snapshot);
+	out->snapshot_alive = lvol &&
+			      (exp->blob_id == 0 || lvol->blob_id == exp->blob_id);
 }
 
 /* ==========================================================================
@@ -693,6 +1087,8 @@ s3lvol_export_add(struct s3lvol_lvstore *lvs, const struct s3_export_manifest *m
 	exp->blob_id    = m->src.blob_id;
 	exp->expires_at = m->expires_at;
 	exp->generation = m->generation;
+	/* Created by this build, so any importer of it renews a lease. */
+	exp->lease_aware = true;
 	snprintf(exp->uuid_str, sizeof(exp->uuid_str), "%s", m->uuid_str);
 	snprintf(exp->snapshot, sizeof(exp->snapshot), "%s", snapshot_name);
 
@@ -704,6 +1100,11 @@ s3lvol_export_add(struct s3lvol_lvstore *lvs, const struct s3_export_manifest *m
 	 * and an attach resurrecting the registry because the importers it
 	 * describes may still be reading. */
 	s3lvol_export_lease_start(exp);
+	/* And, if this export references anybody else's prefixes, start renewing
+	 * *their* leases too -- from now rather than from the first import. See the
+	 * fields' comment in struct s3lvol_export. */
+	export_src_lease_start(exp, m);
+	exports_reaper_sync();
 
 	return exp;
 }
@@ -712,8 +1113,235 @@ void
 s3lvol_export_forget(struct s3lvol_export *exp)
 {
 	s3lvol_export_lease_stop(exp);
+	/* The only thing that stops the upstream renewals. Deliberately: nothing can
+	 * tell "nobody will ever import this" from "nobody has yet", so releasing the
+	 * export is the caller's statement that the reference is finished with. */
+	export_src_lease_stop(exp);
 	TAILQ_REMOVE(&g_exports, exp, link);
 	free(exp);
+	exports_reaper_sync();
+}
+
+/* ==========================================================================
+ * Reaping exports nothing can serve any more
+ *
+ * A reference export is its snapshot: the manifest names the snapshot's live
+ * chunk objects, and deleting the snapshot releases them. So once the snapshot
+ * is gone the export cannot be imported by anyone, ever -- what is left is a
+ * registry entry and a manifest object that nothing will read.
+ *
+ * The other terminal state is a lease-aware export nobody imported, once its
+ * deadline has passed. The lease object is confirmed absent (HEAD 404), and an
+ * importer has to write one before it can read, so nothing will appear later.
+ * The snapshot may still be here -- a control plane that treats a refused
+ * delete as success never comes back -- but the registry entry is already
+ * garbage, and leaving it up is a HEAD against a missing key for the life of
+ * the process, resurrected on every attach.
+ *
+ * They used to leave only by an explicit rcow_release_export. A control plane
+ * that deletes snapshots but never releases therefore accumulates entries, and
+ * that is not merely untidy: the registry is read into a fixed decoder table at
+ * attach (S3LVOL_MAX_EXPORTS), so crossing it makes the whole lvstore
+ * un-attachable, live exports and all.
+ *
+ * Reaping is exactly a release, reusing the same path: it deletes the manifest,
+ * drops the entry and rewrites the registry. For a reference layout that is all
+ * a release does anyway -- it owns no objects of its own (see
+ * release_delete_chunks) -- so nothing that belongs to anyone else is touched.
+ * The snapshot is not deleted.
+ *
+ * Only reference exports. A dense export is self-contained: its snapshot
+ * disappearing says nothing about whether it can still be imported, and
+ * deleting its manifest would destroy a working export. Entries without
+ * lease_aware are left alone on an absent lease: a pre-lease importer reads
+ * without writing one, so 404 is not evidence.
+ * ========================================================================== */
+
+/* The same cadence as the pending-delete poller, and for the same reason:
+ * nothing here is urgent -- the cost of a dead entry lingering is one row in a
+ * registry -- but a completed delete is what makes a snapshot-gone export
+ * reapable, so a matching period keeps that step from trailing the first by
+ * an awkward margin. An unimported export past its deadline is noticed on the
+ * next tick after the lease check, without waiting for a delete that may
+ * never come. */
+#define S3LVOL_EXPORT_REAP_US (60ULL * SPDK_SEC_TO_USEC)
+
+/* Reaps started per tick, so a node that just deleted a thousand snapshots does
+ * not answer with a thousand simultaneous manifest deletes and registry
+ * rewrites. */
+#define S3LVOL_EXPORT_REAP_BATCH 8
+
+struct export_reap_ctx {
+	struct s3lvol_lvstore *lvs;
+	char                   uuid_str[SPDK_UUID_STRING_LEN];
+};
+
+static void
+export_reaped(void *cb_arg, int lvolerrno)
+{
+	struct export_reap_ctx *ctx = cb_arg;
+	struct s3lvol_export *exp;
+
+	if (lvolerrno == 0) {
+		SPDK_NOTICELOG("export %s reaped\n", ctx->uuid_str);
+		goto out;
+	}
+
+	if (lvolerrno == -ENOENT) {
+		/* No manifest to delete. The export is dead twice over then, and
+		 * the release stopped short of dropping the entry -- which is the
+		 * right call for a release somebody asked for (it says so and
+		 * changes nothing), and the wrong one here, where the entry is
+		 * precisely what is being collected. Drop it directly. */
+		exp = s3lvol_export_find(ctx->lvs, ctx->uuid_str);
+		if (exp) {
+			s3lvol_export_forget(exp);
+			if (s3lvol_export_registry_save(ctx->lvs, NULL, NULL) != 0) {
+				SPDK_WARNLOG("Dropped dead export %s but could not "
+					     "rewrite the registry of '%s'\n",
+					     ctx->uuid_str,
+					     s3lvol_lvstore_get_name(ctx->lvs));
+			}
+		}
+		SPDK_NOTICELOG("export %s reaped: neither its snapshot nor its "
+			       "manifest is left\n", ctx->uuid_str);
+		goto out;
+	}
+
+	/* The entry keeps its reaping flag, so it is not tried again: something
+	 * about this export needs looking at, and a poller repeating the same
+	 * failure every minute would only fill the log. rcow_release_export still
+	 * works by hand. */
+	SPDK_WARNLOG("export %s could not be reaped: %s. It will not be retried; "
+		     "release it explicitly if it is really dead.\n",
+		     ctx->uuid_str, spdk_strerror(-lvolerrno));
+out:
+	free(ctx);
+}
+
+/* Whether the snapshot this export references still exists.
+ *
+ * Matched on blob id when the registry has one, so a snapshot deleted and
+ * recreated under the same name reads as gone -- which it is, as far as this
+ * export is concerned: the objects its manifest names went with the original
+ * blob. Entries written before blob_id was recorded fall back to the name. */
+static bool
+export_snapshot_alive(struct s3lvol_export *exp)
+{
+	struct spdk_lvol *lvol = s3lvol_lvol_find(exp->lvs, exp->snapshot);
+
+	if (!lvol) {
+		return false;
+	}
+	if (exp->blob_id != 0 && lvol->blob_id != exp->blob_id) {
+		return false;
+	}
+	return true;
+}
+
+static int
+exports_reap(void *arg)
+{
+	struct s3lvol_export *dead[S3LVOL_EXPORT_REAP_BATCH];
+	struct s3lvol_lvstore *lvs;
+	unsigned n = 0;
+	unsigned i;
+
+	/* Iterating the *lvstores* rather than g_exports, because only a loaded
+	 * lvstore can answer whether a snapshot exists. An lvstore reaches
+	 * g_lvstores only once its blobstore is up and its lvols are open, so
+	 * this cannot mistake a half-loaded store for one whose snapshots are all
+	 * gone -- which would reap every export it has. */
+	for (lvs = s3lvol_lvstore_first(); lvs;
+	     lvs = s3lvol_lvstore_next(lvs)) {
+		struct s3lvol_export *exp;
+
+		if (!s3lvol_lvstore_get_lvs(lvs)) {
+			continue;
+		}
+
+		for (exp = s3lvol_export_first(lvs); exp;
+		     exp = s3lvol_export_next(exp)) {
+			if (exp->layout != S3_EXPORT_LAYOUT_REF || exp->reaping) {
+				continue;
+			}
+			if (export_lease_is_terminal(exp)) {
+				/* Even if this tick's batch is full, the watch
+				 * has nothing left to learn. */
+				export_lease_stop_if_terminal(exp);
+			}
+			if (n >= S3LVOL_EXPORT_REAP_BATCH) {
+				continue;
+			}
+			if (export_snapshot_alive(exp) &&
+			    !export_lease_is_terminal(exp)) {
+				continue;
+			}
+			dead[n++] = exp;
+		}
+	}
+
+	/* Collected first: the release is asynchronous but can fail inline, and
+	 * its completion removes the entry from the list being walked. */
+	for (i = 0; i < n; i++) {
+		struct export_reap_ctx *ctx;
+		int rc;
+
+		ctx = calloc(1, sizeof(*ctx));
+		if (!ctx) {
+			continue;
+		}
+		ctx->lvs = dead[i]->lvs;
+		snprintf(ctx->uuid_str, sizeof(ctx->uuid_str), "%s",
+			 dead[i]->uuid_str);
+		dead[i]->reaping = true;
+
+		if (export_snapshot_alive(dead[i])) {
+			SPDK_NOTICELOG("reaping export %s: nobody imported it "
+				       "past the deadline\n", ctx->uuid_str);
+		} else {
+			SPDK_NOTICELOG("reaping export %s: the snapshot it "
+				       "referenced is gone\n", ctx->uuid_str);
+		}
+
+		rc = s3lvol_export_release(ctx->lvs, ctx->uuid_str, export_reaped,
+					   ctx);
+		if (rc != 0) {
+			/* -EBUSY: a volume in this process still reads through
+			 * the export. Leave it and look again -- for a
+			 * snapshot-gone export that is an esnap clone of a
+			 * deleted snapshot; for an unimported one past its
+			 * deadline, a same-host reader that has not gone yet. */
+			dead[i]->reaping = false;
+			SPDK_DEBUGLOG(vbdev_s3lvol,
+				      "export %s not reaped this time: %s\n",
+				      ctx->uuid_str, spdk_strerror(-rc));
+			free(ctx);
+		}
+	}
+
+	return n ? SPDK_POLLER_BUSY : SPDK_POLLER_IDLE;
+}
+
+/* Runs only while this node has exports at all, like the pending-delete poller:
+ * a target with nothing published should have no timer ticking. */
+static void
+exports_reaper_sync(void)
+{
+	bool want = !TAILQ_EMPTY(&g_exports);
+
+	if (want && !g_exports_reaper) {
+		g_exports_reaper = SPDK_POLLER_REGISTER(exports_reap, NULL,
+							S3LVOL_EXPORT_REAP_US);
+		if (!g_exports_reaper) {
+			SPDK_WARNLOG("could not start the export reaper; dead "
+				     "export entries will have to be released by "
+				     "hand\n");
+		}
+	} else if (!want && g_exports_reaper) {
+		spdk_poller_unregister(&g_exports_reaper);
+		g_exports_reaper = NULL;
+	}
 }
 
 void
@@ -726,6 +1354,23 @@ s3lvol_export_set_materialised(struct s3lvol_export *exp, uint32_t generation)
 	exp->expires_at = 0;
 	/* Nor a snapshot to protect, so the lease watch stops with it. */
 	s3lvol_export_lease_stop(exp);
+	/* And it references nobody else's objects any more: materialising uploaded
+	 * copies of everything it used to point at, including whatever it inherited
+	 * from another prefix. Holding those upstream leases now would keep another
+	 * node's snapshot alive for data this export no longer needs. */
+	export_src_lease_stop(exp);
+}
+
+void
+s3lvol_export_set_local_ref(struct s3lvol_export *exp, uint32_t generation)
+{
+	/* The replacement manifest is still a reference export: its objects belong
+	 * to the local snapshot, so the ordinary export lease continues to pin that
+	 * snapshot. What changed is that no chunk points at another lvstore any
+	 * more, hence only the upstream leases are retired. */
+	assert(exp->layout == S3_EXPORT_LAYOUT_REF);
+	exp->generation = generation;
+	export_src_lease_stop(exp);
 }
 
 void
@@ -778,6 +1423,39 @@ exports_serialize(struct s3lvol_lvstore *lvs, char **out, size_t *out_len)
 					     S3_EXPORT_LAYOUT_DENSE_STR);
 		spdk_json_write_named_uint64(w, "expires_at", exp->expires_at);
 		spdk_json_write_named_uint32(w, "generation", exp->generation);
+		/* Only written when true. An older build ignores the unknown
+		 * field, and this build reads its absence as "not lease-aware",
+		 * which is what an entry written by an older build means. */
+		if (exp->lease_aware) {
+			spdk_json_write_named_bool(w, "lease_aware", true);
+		}
+		/* The upstream leases this export renews, written as the keys rather
+		 * than as the prefixes they came from.
+		 *
+		 * Persisted because without them a restart forgets an obligation to
+		 * *another node*: the entry comes back, its own lease is watched again,
+		 * and nothing renews upstream -- so the node this manifest references
+		 * sees a stale lease and deletes the snapshot behind chunks this export
+		 * still names. Exactly the failure this whole mechanism exists to
+		 * prevent, arriving by way of a restart.
+		 *
+		 * Keys and not prefixes so that reloading needs no manifest: the
+		 * manifest is on S3 and fetching it at attach would make the registry
+		 * load depend on a GET per derived export. What is stored is precisely
+		 * what has to be written.
+		 *
+		 * Absent for a non-derived export, which is the common case, and absent
+		 * in anything an older build wrote -- read as "renews nothing", which is
+		 * what such an entry meant. */
+		if (exp->num_src_leases > 0) {
+			uint32_t k;
+
+			spdk_json_write_named_array_begin(w, "src_leases");
+			for (k = 0; k < exp->num_src_leases; k++) {
+				spdk_json_write_string(w, exp->src_lease_keys[k]);
+			}
+			spdk_json_write_array_end(w);
+		}
 		spdk_json_write_object_end(w);
 	}
 
@@ -795,6 +1473,72 @@ exports_serialize(struct s3lvol_lvstore *lvs, char **out, size_t *out_len)
 	return 0;
 }
 
+/* The upstream lease keys of one entry. A fixed table rather than allocations,
+ * because the whole registry is decoded into fixed tables and one exception would
+ * be one more thing to free on every error path here. */
+struct src_leases_holder {
+	char  *k[S3_EXPORT_MAX_SOURCES];
+	size_t n;
+};
+
+static int
+decode_src_leases(const struct spdk_json_val *val, void *out)
+{
+	struct src_leases_holder *h = out;
+
+	return spdk_json_decode_array(val, spdk_json_decode_string, h->k,
+				      S3_EXPORT_MAX_SOURCES, &h->n, sizeof(h->k[0]));
+}
+
+/* Resume renewing the upstream leases of an export read back from the registry.
+ *
+ * The keys are stored verbatim, so nothing has to be derived -- but the endpoint,
+ * bucket and region to reach them do, and there is no manifest here to read them
+ * from. They come from this lvstore's own namespace, which is correct because a
+ * manifest may not reference another bucket: the writer refuses, so every source
+ * of it is necessarily in the same place as the export itself. If that rule ever
+ * relaxes, this is one of the places that has to learn about it. */
+static void
+export_src_lease_restart(struct s3lvol_export *exp,
+			 const struct src_leases_holder *stored)
+{
+	struct s3_export_source src = {0};
+	const struct s3_target *tgt;
+	const char *ns;
+	size_t i;
+
+	if (stored->n == 0) {
+		return;
+	}
+
+	ns  = s3lvol_lvstore_get_namespace(exp->lvs);
+	tgt = rcow_namespace_to_target(ns);
+	if (!tgt || !tgt->endpoint || !tgt->bucket) {
+		SPDK_WARNLOG("export %s references other prefixes but namespace '%s' "
+			     "does not resolve, so its upstream leases cannot be "
+			     "renewed; those nodes may delete their snapshots\n",
+			     exp->uuid_str, ns ? ns : "(none)");
+		return;
+	}
+
+	exp->src_lease_keys = calloc(stored->n, sizeof(*exp->src_lease_keys));
+	if (!exp->src_lease_keys) {
+		SPDK_WARNLOG("export %s: no memory to resume its source leases\n",
+			     exp->uuid_str);
+		return;
+	}
+	for (i = 0; i < stored->n; i++) {
+		snprintf(exp->src_lease_keys[i], sizeof(exp->src_lease_keys[0]), "%s",
+			 stored->k[i]);
+	}
+	exp->num_src_leases = (uint32_t)stored->n;
+
+	snprintf(src.endpoint, sizeof(src.endpoint), "%s", tgt->endpoint);
+	snprintf(src.region, sizeof(src.region), "%s", tgt->region ? tgt->region : "");
+	snprintf(src.bucket, sizeof(src.bucket), "%s", tgt->bucket);
+	export_src_lease_arm(exp, &src);
+}
+
 struct export_entry_json {
 	char *export_uuid;
 	char    *snapshot;
@@ -802,6 +1546,8 @@ struct export_entry_json {
 	uint64_t blob_id;
 	uint64_t expires_at;
 	uint32_t generation;
+	bool     lease_aware;
+	struct src_leases_holder src_leases;
 };
 
 static const struct spdk_json_object_decoder export_entry_decoders[] = {
@@ -811,6 +1557,10 @@ static const struct spdk_json_object_decoder export_entry_decoders[] = {
 	{"blob_id",     offsetof(struct export_entry_json, blob_id),     spdk_json_decode_uint64, true},
 	{"expires_at",  offsetof(struct export_entry_json, expires_at),  spdk_json_decode_uint64, true},
 	{"generation",  offsetof(struct export_entry_json, generation),  spdk_json_decode_uint32, true},
+	{"lease_aware", offsetof(struct export_entry_json, lease_aware), spdk_json_decode_bool, true},
+	/* Optional: absent for a non-derived export and for anything an older build
+	 * wrote, both of which mean "renews nothing upstream". */
+	{"src_leases",  offsetof(struct export_entry_json, src_leases),  decode_src_leases, true},
 };
 
 struct export_entries_holder {
@@ -908,6 +1658,7 @@ exports_parse(struct s3lvol_lvstore *lvs, const void *json, size_t len)
 		exp->blob_id    = e->blob_id;
 		exp->expires_at = e->expires_at;
 		exp->generation = e->generation;
+		exp->lease_aware = e->lease_aware;
 		exp->layout     = strcmp(e->layout, S3_EXPORT_LAYOUT_REF_STR) == 0 ?
 				  S3_EXPORT_LAYOUT_REF : S3_EXPORT_LAYOUT_DENSE;
 		snprintf(exp->uuid_str, sizeof(exp->uuid_str), "%s", e->export_uuid);
@@ -925,8 +1676,10 @@ exports_parse(struct s3lvol_lvstore *lvs, const void *json, size_t len)
 		 * query. Safe, but permanent: an export whose importer went away
 		 * years ago still pins its snapshot, and the registry only grows.
 		 * With the poller running, a lease that is absent or stale lets the
-		 * delete through, and releasing the export is what takes the entry
-		 * out of the registry.
+		 * delete through. A lease-aware entry whose lease is a confirmed
+		 * miss past the deadline is then reaped -- releasing the export
+		 * is what takes the entry out of the registry, whether that
+		 * release is asked for or collected.
 		 *
 		 * Deliberately *not* a filter on expires_at. That stamp is written
 		 * once at export creation and never refreshed, while the importer
@@ -936,6 +1689,15 @@ exports_parse(struct s3lvol_lvstore *lvs, const void *json, size_t len)
 		 * TTL here would forget a live importer's pin, and a later delete of
 		 * that snapshot would leave it reading holes. */
 		s3lvol_export_lease_start(exp);
+
+		/* And resume renewing upstream, which is an obligation to another
+		 * node rather than to this one. Without it a restart quietly hands
+		 * whoever this export references permission to delete the snapshot
+		 * behind chunks it still names.
+		 *
+		 * Restarted from the stored keys rather than from the manifest, so the
+		 * registry load needs no S3 GET per derived export. */
+		export_src_lease_restart(exp, &e->src_leases);
 
 		if (exp->layout == S3_EXPORT_LAYOUT_REF) {
 			SPDK_NOTICELOG("lvstore '%s' still owes export %s the snapshot "
@@ -950,9 +1712,16 @@ exports_parse(struct s3lvol_lvstore *lvs, const void *json, size_t len)
 		       s3lvol_lvstore_get_name(lvs), j.entries.n);
 out:
 	for (i = 0; i < j.entries.n; i++) {
+		size_t k;
+
 		free(j.entries.e[i].export_uuid);
 		free(j.entries.e[i].snapshot);
 		free(j.entries.e[i].layout);
+		/* spdk_json_decode_string strdup()s into the table, so each element is
+		 * its own allocation. The restart above copied what it needed. */
+		for (k = 0; k < j.entries.e[i].src_leases.n; k++) {
+			free(j.entries.e[i].src_leases.k[k]);
+		}
 	}
 	free(values);
 	free(copy);
