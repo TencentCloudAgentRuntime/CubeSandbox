@@ -160,30 +160,49 @@ S5.5c 实测进一步证明网络 backend 的直接耗时已经达标，但原�
 - 失败回滚后 TAP、qdisc/filter、netns FD 和 lease 全部归零。
 
 `CRI receive→start vm` 在本阶段作为非阻断累计 checkpoint 报告；若超过串行 300ms/并发
-450ms，必须带非重叠分段转交 S5.5d.1/S5.5d.2，不能扩大 S5.5c 的实现边界。
+450ms，必须带不重复计费的偏序分段转交 S5.5d.1/S5.5d.2，不能扩大 S5.5c 的实现边界。
 
 ### S5.5d.1：CRI/CNI dispatch 与 Shim 连接前快路径
 
-目标：先建立无重叠时间线，再消除 `RunPodSandbox` 接收至 CubeShim create 开始前的排队、
+目标：先建立允许 CNI/controller 并行的偏序时间线，再消除 `RunPodSandbox` 接收至 CubeShim create 开始前的排队、
 重复配置发现和非必要进程/IPC；不在本子阶段修改 durable journal 或 Host cgroup 状态机。
 
 工作项：
 
 - 补齐同一时钟域的 CRI receive、CNI begin/end、shim resolve/spawn/connect 和 Shim create begin
-  事件，逐项相减，不再把重叠区间相加成“上界”。
+  事件；分别验证 CNI 链与 controller 链的单调性，显式计算重叠，不再把并行区间相加成“上界”。
 - 修正性能 runner：新 run 启动时截断 append-only manifest/output，结果中写入真实分位数算法，
   并在验收前断言 manifest、Pod UID、sandbox ID 的期望数和唯一数，禁止复用目录污染样本。
 - 区分 containerd CRI 排队、CNI、shim manager 查找/连接和新 Shim 拉起；只优化 Cube 可控且有
   实测占比的步骤。
-- 保持 RuntimeClass handler、CNI 调用顺序、sandbox ownership 和 containerd shim v2 契约不变。
+- 保持 RuntimeClass handler、sandbox ownership 和 containerd shim v2 契约不变。若实测 CNI 是冻结
+  绝对门禁的主因，可为 external shim sandboxer 增加默认关闭的 opt-in：先 dispatch CNI，再并行
+  `CreateSandbox`，但必须等二者都成功后才 `StartSandbox`，并完整处理任一分支失败的取消/回滚；
+  runc 和其他未开启 runtime 的既有顺序不得改变。
+
+本阶段同时保留两条口径：`CRI receive→Shim create begin` 是冻结硬门禁；顺序路径的
+`Cube-controlled pre-Shim` 可扣除同一 Pod、同一单调时钟上与 controller 相邻的 CNI ADD，
+只用于内部归因。并行路径不能再次扣除已经重叠的 CNI 时间，此时诊断值等于绝对值。不得扣除
+CRI 排队、containerd dispatch、Shim resolve/spawn/connect，也不得用限并发或删样本降低分位数。
+S5.5f 仍以完整
+`PodScheduled→Ready` 验收，CNI 不从任何最终 SLO 中排除。
 
 验收：
 
-- 50 串行和 5×10 并发样本均能一一绑定 Pod UID、sandbox ID、Shim PID 和 worker PID，时间段
-  无重叠、无负数、总和与端到端残差有解释。
-- `CRI receive→Shim create begin` 串行 P95≤80ms、10 并发 P95≤150ms；成功率 100%。
+- 50 串行和 5×10 并发样本均能一一绑定 Pod UID、sandbox ID、Shim PID 和 worker PID；CNI 与
+  controller 两条链各自单调，重叠量显式记录，controller 关键路径总和与绝对 pre-Shim 残差为 0。
+- 绝对 `CRI receive→Shim create begin` 串行 P95≤80ms、10 并发 P95≤150ms；成功率 100%；
+  Cube-controlled 数值只做根因定位。
 - DNS、ClusterIP、跨节点 PodIP、NetworkPolicy、创建中取消、containerd restart 和 exact-zero
   无回退。
+
+修复版 `overlap-v2` 首次正式 50+50 结果为串行/并发绝对 pre-Shim
+P95=75.812/147.511ms，均通过≤80/150ms；Ready P95=1833.551/2297.276ms，继续转交
+S5.5d.2/e/f。早期 `overlap-v1` 因 duration 结束点和 Create 后、Start 前回滚缺口全部作废。
+同一 reviewer 终审 `PASS`（P0/P1/P2=0），实现 commit 为
+`8129b3a9451b21f496f75d3faa8d8ca72ff3b265`。
+完整原始证据和失败回滚语义见
+[S5.5d.1 阶段证据](../../handoffs/kubernetes-runtime/evidence/s5.5/s5.5d.1-pre-shim-fastpath.md)。
 
 ### S5.5d.2：durable create、持久化与 Host cgroup 快路径
 
@@ -206,6 +225,23 @@ S5.5c 实测进一步证明网络 backend 的直接耗时已经达标，但原�
 - `Shim create begin→start vm` 串行 P95≤140ms、10 并发 P95≤150ms。
 - `CRI receive→start vm` 串行 P95≤220 ms、10 并发 P95≤300 ms。
 - 每轮 10 Pod 的 absolute VMM start 展开≤250 ms。
+
+首次正式 d.2c-r1 在 `49313e43` 上得到串行 111.431/182.333ms，但并发
+385.254/489.974ms；一次 gateway neighbor 超时还造成 CRI retry 和 11.184s round spread。
+同一 reviewer 判定 `FAIL`。Cilium CNI ADD P95=431.321ms，且成功样本全部在 network prepare
+完成后才 start-vm；因此不能只靠 group commit 或放宽门禁关闭本阶段，后续增加以下三个子阶段：
+
+### S5.5d.3：VMM 与网络关键路径解耦
+
+- **S5.5d.3a neighbor reliability**：把 gateway neighbor 获取改成 context-bounded probe/poll，
+  覆盖延迟超过 20ms 后成功、永久缺失时有界失败并完整回滚、10 并发无 CRI retry 与 exact-zero。
+- **S5.5d.3b VMM/network overlap**：优先在 TAP FD 可用后立即 start VMM，把邻居解析、TC redirect
+  和 network commit 与 Guest boot 重叠；若该边界不能满足门禁，再使用 hypervisor NIC hotplug
+  实现无 NIC preboot。`StartSandbox` 返回前必须 join VMM-ready 与 network-committed；任一分支失败
+  必须取消另一分支，状态机可在 Shim/containerd/RuntimeResource restart 后收敛。
+- **S5.5d.3c formal close**：同一新 commit/artifact/analyzer 重新执行完整串行 50、5×10 并发、
+  网络/跨节点/NetworkPolicy、创建中取消、service/worker/Shim kill 与双节点 exact-zero。不得拼接
+  不同实现结果；d.2 原门禁 140/150、220/300、spread≤250ms 与 no-retry 全部保持不变。
 
 ### S5.5e：Guest 冷启动、内存与 worker/VMM 细化
 
@@ -231,6 +267,20 @@ S5.5c 实测进一步证明网络 backend 的直接耗时已经达标，但原�
   因换取稳态数字出现未解释回退。
 - Guest capability、网络、volume、privileged、device、sysctl、hostname 和多容器冒烟无回归。
 - 新 Guest asset 使用独立 digest，可一条命令切回基线版本。
+
+S5.5e.3 实测采用两项相互独立的优化：PVM Guest 关闭运行时 BTF（保留 DWARF、BPF/JIT、
+kallsyms、kprobe/uprobe、ftrace、perf 和 livepatch），以及默认启用 size=0 的 virtio-balloon
+free-page reporting。后者可通过 containerd 与 watchdog 环境变量
+`CUBE_FREE_PAGE_REPORTING=0` 移除设备并恢复旧 PCI 拓扑；修改后需重启这两个服务，只影响
+新建 Pod，运行中的 VM 不热切换设备。
+
+20 Pod 三轮稳态 `memory.current` mean 为 `94.857/94.859/94.860MiB/Pod`，相对
+S5.5e.1 的 `104.93MiB/Pod` 下降约 `9.6%`，通过 `≤100MiB/Pod` 门禁。50 次串行正式
+`PodScheduled→Ready` P50/P95/max 为 `1222.148/1235.888/1254.664ms`，50/50 成功且
+没有启动回退。free-page reporting 单独对从未分配过大量内存的 idle baseline 没有显著收益；
+它的价值由 128MiB 两轮工作集压力后 Host PSS/cgroup 回落证明，不能与 BTF 常驻段节省重复
+计算。完整能力、回退和 exact-zero 证据见
+[S5.5e 阶段记录](../../handoffs/kubernetes-runtime/evidence/s5.5/s5.5e-guest-cold-memory.md)。
 
 ### S5.5f：端到端门禁与 Kubernetes 回归
 

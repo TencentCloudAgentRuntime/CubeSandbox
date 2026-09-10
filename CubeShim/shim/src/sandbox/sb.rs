@@ -986,6 +986,11 @@ impl SandBox {
             .add_virtiofs(&self.conf.virtiofs)
             .add_vsock(self.id.clone());
 
+        if Utils::guest_boot_trace_enabled() {
+            let (serial_path, console_path) = Utils::prepare_guest_boot_trace(&self.id)?;
+            vc.enable_guest_boot_trace(serial_path, console_path);
+        }
+
         // Enable ivshmem device when the template build path sets the internal annotation.
         if self.is_ivshmem_enabled() {
             Self::enable_default_ivshmem(&mut vc, &self.id)
@@ -1359,7 +1364,7 @@ impl SandBox {
         // is silently absent from the guest PCI topology.
         let runtime_virtiofs = Utils::restore_virtiofs_configs(&self.conf.virtiofs);
         let mut nets = Utils::restore_nets_config(&self.conf.net.interfaces)?;
-        let runtime_net = if let Some(tap) = self.runtime_tap.as_ref() {
+        if let Some(tap) = self.runtime_tap.as_ref() {
             if nets.len() != 1 {
                 return Err(format!(
                     "RuntimeResource requires exactly one restored VM network, got {}",
@@ -1371,10 +1376,7 @@ impl SandBox {
             nets[0].fds = Some(vec![tap.as_raw_fd()]);
             nets[0].fds_from_other_netns = true;
             nets[0].num_queues = 2;
-            Some(nets.remove(0))
-        } else {
-            None
-        };
+        }
         let disks = Utils::restore_disks_config(&self.conf.disk);
         // Always rebuild builtin pmem0/pmem1 then append business pmems (order is guest device order).
         let mut pmems = VmConfig::builtin_pmems(&self.conf.os_image_path, &self.conf.agent_path);
@@ -1385,8 +1387,8 @@ impl SandBox {
         let config = RestoreConfig {
             source_url: PathBuf::from(snapshot),
             fs: Some(fss),
-            // Runtime templates have no NIC. Restore first, then hotplug the
-            // Pod TAP so the guest driver negotiates a fresh virtio-net queue.
+            // Runtime templates have no NIC. VMM adds this Pod TAP after the
+            // snapshot device tree is restored but before vCPUs resume.
             net: Some(nets),
             disks: Some(disks),
             pmem: Some(pmems),
@@ -1401,9 +1403,6 @@ impl SandBox {
         };
 
         ch.restore_vm(config).await?;
-        if let Some(net) = runtime_net {
-            ch.add_net(net).await?;
-        }
         for fs in runtime_virtiofs {
             ch.add_fs(fs).await?;
         }

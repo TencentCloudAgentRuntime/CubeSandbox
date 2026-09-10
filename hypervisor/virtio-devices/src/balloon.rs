@@ -142,19 +142,23 @@ impl BalloonEpollHandler {
         let region = memory.find_region(range_base).ok_or(Error::GuestMemory(
             GuestMemoryError::InvalidGuestAddress(range_base),
         ))?;
-        if let Some(f_off) = region.file_offset() {
-            let offset = range_base.0 - region.start_addr().0;
-            let res = unsafe {
-                libc::fallocate64(
-                    f_off.file().as_raw_fd(),
-                    libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
-                    (offset + f_off.start()) as libc::off64_t,
-                    range_len as libc::off64_t,
-                )
-            };
+        // Restored template memory is a MAP_PRIVATE mapping of the template
+        // snapshot. Its backing file is read-only and must not be modified.
+        if region.flags() & libc::MAP_SHARED == libc::MAP_SHARED {
+            if let Some(f_off) = region.file_offset() {
+                let offset = range_base.0 - region.start_addr().0;
+                let res = unsafe {
+                    libc::fallocate64(
+                        f_off.file().as_raw_fd(),
+                        libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+                        (offset + f_off.start()) as libc::off64_t,
+                        range_len as libc::off64_t,
+                    )
+                };
 
-            if res != 0 {
-                return Err(Error::FallocateFail(io::Error::last_os_error()));
+                if res != 0 {
+                    return Err(Error::FallocateFail(io::Error::last_os_error()));
+                }
             }
         }
 
@@ -577,4 +581,38 @@ impl Snapshottable for Balloon {
     }
 }
 impl Transportable for Balloon {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{GuestRegionMmap, MmapRegion};
+    use std::fs::OpenOptions;
+    use std::sync::Arc;
+    use vm_memory::FileOffset;
+    use vmm_sys_util::tempfile::TempFile;
+
+    #[test]
+    fn release_private_snapshot_mapping() {
+        let snapshot = TempFile::new().unwrap();
+        snapshot.as_file().set_len(4096).unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .open(snapshot.as_path())
+            .unwrap();
+        let region = GuestRegionMmap::new(
+            MmapRegion::build(
+                Some(FileOffset::new(file, 0)),
+                4096,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE,
+            )
+            .unwrap(),
+            GuestAddress(0),
+        )
+        .unwrap();
+        let memory = GuestMemoryMmap::from_arc_regions(vec![Arc::new(region)]).unwrap();
+
+        BalloonEpollHandler::release_memory_range(&memory, GuestAddress(0), 4096).unwrap();
+    }
+}
 impl Migratable for Balloon {}

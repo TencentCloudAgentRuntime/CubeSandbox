@@ -51,6 +51,7 @@ const DEV_URANDOM: &str = "/dev/urandom";
 const PASSFD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const PASSFD_ACK_MAX_LINE_LEN: usize = 64;
 const PERF_TRACE_PATH: &str = "/data/log/CubeShim/cube-perf.log";
+const GUEST_BOOT_TRACE_DIR: &str = "/data/log/CubeShim/guest-boot";
 static PERF_TRACE_FILE: OnceLock<Mutex<Option<File>>> = OnceLock::new();
 
 /// Reject OCI exec fields before `oci-spec` deserialization can discard them.
@@ -177,6 +178,36 @@ impl Utils {
         std::env::var_os("CUBE_PERF_TRACE").is_some_and(|value| value == "1")
     }
 
+    /// Return whether per-sandbox Guest serial/console capture is enabled.
+    ///
+    /// This diagnostic is opt-in because console capture is intended for
+    /// startup attribution, not for the normal runtime data path.
+    pub fn guest_boot_trace_enabled() -> bool {
+        std::env::var_os("CUBE_GUEST_BOOT_TRACE").is_some_and(|value| value == "1")
+    }
+
+    /// Create the fixed trace directory and return sandbox-isolated output
+    /// paths for the legacy serial port and virtio console.
+    pub fn prepare_guest_boot_trace(sandbox_id: &str) -> CResult<(PathBuf, PathBuf)> {
+        let paths = Self::guest_boot_trace_paths(sandbox_id)?;
+        fs::create_dir_all(GUEST_BOOT_TRACE_DIR).map_err(|error| {
+            format!(
+                "create Guest boot trace directory {}: {}",
+                GUEST_BOOT_TRACE_DIR, error
+            )
+        })?;
+        Ok(paths)
+    }
+
+    fn guest_boot_trace_paths(sandbox_id: &str) -> CResult<(PathBuf, PathBuf)> {
+        Self::validate_sandbox_id(sandbox_id)?;
+        let base = PathBuf::from(GUEST_BOOT_TRACE_DIR);
+        Ok((
+            base.join(format!("{sandbox_id}.serial.log")),
+            base.join(format!("{sandbox_id}.console.log")),
+        ))
+    }
+
     /// Append one structured performance trace without touching the shim
     /// bootstrap stdout/stderr protocol. Each process opens the file once;
     /// O_APPEND keeps independent Shim and worker writes from sharing offsets.
@@ -238,12 +269,17 @@ impl Utils {
     }
 
     /// Validate sandbox_id before using it in filesystem paths.
-    fn validate_sandbox_id(id: &str) -> CResult<()> {
-        if id.is_empty() || id.len() > 255 {
-            return Err("invalid sandbox_id length".into());
+    pub(crate) fn validate_sandbox_id(id: &str) -> CResult<()> {
+        if id.is_empty() || id.len() > 128 {
+            return Err("invalid sandbox_id length; expected 1..128 bytes".into());
         }
-        if id.contains("..") || id.contains('/') || id.contains('\\') {
-            return Err("sandbox_id contains invalid path characters".into());
+        if matches!(id, "." | "..")
+            || id.contains("..")
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err("sandbox_id has invalid containerd ID syntax".into());
         }
         Ok(())
     }
@@ -462,6 +498,7 @@ impl Utils {
     }
 
     pub fn clean_sandbox_resource(sandbox_id: &String) -> CResult<()> {
+        Self::validate_sandbox_id(sandbox_id)?;
         //delete vmm workdir
         let vm_dir = PathBuf::from(VM_PATH).join(sandbox_id);
         let ret_vmdir: Result<(), String> = match fs::remove_dir_all(&vm_dir) {
@@ -1323,39 +1360,77 @@ mod tests {
     fn test_ivshmem_path_traversal_dotdot() {
         let result = Utils::ivshmem_path("../etc/passwd");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("invalid path characters"));
+        assert!(result.unwrap_err().contains("invalid containerd ID syntax"));
     }
 
     #[test]
     fn test_ivshmem_path_traversal_slash() {
         let result = Utils::ivshmem_path("foo/bar");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("invalid path characters"));
+        assert!(result.unwrap_err().contains("invalid containerd ID syntax"));
     }
 
     #[test]
     fn test_ivshmem_path_traversal_backslash() {
         let result = Utils::ivshmem_path("foo\\bar");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("invalid path characters"));
+        assert!(result.unwrap_err().contains("invalid containerd ID syntax"));
     }
 
     #[test]
     fn test_ivshmem_path_embedded_dotdot() {
         let result = Utils::ivshmem_path("foo..bar");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("invalid path characters"));
+        assert!(result.unwrap_err().contains("invalid containerd ID syntax"));
     }
 
     #[test]
     fn test_ivshmem_path_max_length() {
-        let id = "a".repeat(255);
+        let id = "a".repeat(128);
         let result = Utils::ivshmem_path(&id);
         assert!(result.is_ok());
         assert_eq!(
             result.unwrap(),
-            PathBuf::from(format!("/dev/shm/ivshmem-{}", "a".repeat(255)))
+            PathBuf::from(format!("/dev/shm/ivshmem-{}", "a".repeat(128)))
         );
+    }
+
+    #[test]
+    fn guest_boot_trace_paths_are_sandbox_isolated() {
+        let (serial, console) = Utils::guest_boot_trace_paths("sandbox-123").unwrap();
+        assert_eq!(
+            serial,
+            PathBuf::from("/data/log/CubeShim/guest-boot/sandbox-123.serial.log")
+        );
+        assert_eq!(
+            console,
+            PathBuf::from("/data/log/CubeShim/guest-boot/sandbox-123.console.log")
+        );
+    }
+
+    #[test]
+    fn guest_boot_trace_paths_reject_traversal() {
+        assert!(Utils::guest_boot_trace_paths("../sandbox").is_err());
+    }
+
+    #[test]
+    fn clean_sandbox_resource_rejects_root_alias_before_removal() {
+        for id in [
+            ".",
+            "..",
+            "bad/id",
+            "bad\\id",
+            "bad:id",
+            "bad\nline",
+            "沙箱",
+        ] {
+            let result = Utils::clean_sandbox_resource(&id.to_string());
+            assert!(result.is_err(), "sandbox id {id:?} was accepted");
+            assert!(
+                result.unwrap_err().contains("invalid containerd ID syntax"),
+                "sandbox id {id:?} did not fail validation"
+            );
+        }
     }
 
     #[test]
