@@ -1,0 +1,27 @@
+FROM debian@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+
+ARG LMBENCH_COMMIT=5a386c1c32a84898151dade7754031813e33994e
+ARG STREAM_SHA256=a52bae5e175bea3f7832112af9c085adab47117f7d2ce219165379849231692b
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl git fio iperf3 iputils-ping jq \
+      numactl rt-tests sysbench util-linux \
+ && rm -rf /var/lib/apt/lists/*
+
+# 不使用 -march=native，确保 Host/runc/Cube 执行同一套 ISA 指令。
+RUN git clone https://github.com/intel/lmbench.git /opt/lmbench \
+ && git -C /opt/lmbench checkout --detach "$LMBENCH_COMMIT" \
+ && make -C /opt/lmbench/src CC=gcc CFLAGS='-O3 -mtune=generic' \
+ && curl -fsSL https://www.cs.virginia.edu/stream/FTP/Code/stream.c -o /opt/stream.c \
+ && echo "$STREAM_SHA256  /opt/stream.c" | sha256sum -c - \
+ && gcc -O3 -mtune=generic -DSTREAM_ARRAY_SIZE=20000000 -DNTIMES=20 /opt/stream.c -o /opt/stream
+
+COPY scripts/run-case.sh /opt/cube-cri-perf/run-case.sh
+COPY scripts/collect-environment.sh /opt/cube-cri-perf/collect-environment.sh
+COPY scripts/run-host.sh /opt/cube-cri-perf/run-host.sh
+RUN chmod 0755 /opt/cube-cri-perf/*.sh \
+ && { dpkg-query -W -f='${binary:Package}=${Version}\n' > /opt/cube-cri-perf/packages.txt; \
+      printf 'lmbench_commit=%s\nstream_sha256=%s\n' "$LMBENCH_COMMIT" "$STREAM_SHA256" > /opt/cube-cri-perf/sources.txt; }
+
+ENTRYPOINT ["/bin/sh", "-c", "sleep infinity"]
