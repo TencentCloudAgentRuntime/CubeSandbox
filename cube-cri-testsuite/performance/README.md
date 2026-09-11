@@ -12,12 +12,14 @@
 | --- | --- | --- | --- |
 | 执行位置 | 节点宿主机 | 同一节点 Pod | 同一节点 Pod，`RuntimeClass=cube` |
 | CPU/内存 | 受独立 cgroup 限制 | 相同 request/limit | 相同 request/limit，另记录 RuntimeClass overhead |
-| CPU | 相同 1 CPU quota，记录可见 CPU/频率 | 同左 | 同左 |
+| CPU | 相同 quota，记录可见 CPU/频率 | 同左 | 同左 |
 | 镜像 | 相同基准镜像及 SHA-256 | 同左 | 同左 |
 | 存储 | 节点本地文件系统 | runtime `emptyDir` | runtime `emptyDir`；块卷场景单列 |
 | 网络 | Host 网络栈 | CNI Pod 网络 | CNI + virtio/vhost 路径 |
 
-每项先预热 1 次，再按固定随机种子轮转 Host/runc/Cube，正式采样 15 次；所有原始 stdout、节点/内核/运行时版本、RuntimeClass、镜像 digest、CPU 拓扑、频率、cgroup、磁盘设备和网络 MTU 均归档。测试期间禁止其他压测及运行时发布。
+每项先预热 1 次，再按固定随机种子轮转 Host/runc/Cube，正式采样 15 次；所有原始 stdout、节点/内核/运行时版本、RuntimeClass、镜像 digest、CPU 拓扑、频率、cgroup、磁盘设备和网络 MTU 均归档。测试期间禁止其他压测及运行时发布。完整预设默认 fio 使用 `512M/30s`，iperf 使用 `30s`，并将实际值写入 `run-config.json`。
+
+`--profile fast` 用于同节点内核 A/B 快速筛查：默认采样 3 次，仅保留 CPU、内存/缺页、进程/上下文切换、三类 fio 和 TCP 单/四流；fio 为 `16M/3s`，iperf、sysbench 为 `3s`，并使用较小的 STREAM、hackbench 和 LMbench 负载。它以约 15 分钟为目标，不代替完整预设的容量与尾延迟结论；两组比较必须使用相同预设、镜像、资源和种子。
 
 主结果为中位数、P5/P95、bootstrap 95% CI 和原始指标相对变化 `Cube/基线 - 1`；报告在测试名中标记 `↑好` 或 `↓好`，避免把吞吐增益误读为“负损耗”。只有 CI 显著且绝对差异达到预先登记门槛时才标记回归；不以单次结果下结论。
 
@@ -51,7 +53,7 @@
 
 实现放在本目录：固定版本基准镜像、Host/runc/Cube 编排器、逐轮执行器、环境采集器和 JSONL 汇总器。镜像不得使用 `latest`，应记录源码 tag/commit、编译器和镜像 digest；结果写入 `_output/cube-cri-perf/<run-id>/`，含原始结果、`environment.json`、汇总 CSV/Markdown 和绘图输入。
 
-新增 `task test:performance`，参数至少包括 `--node`、`--rounds`、`--suite`、`--output`、`--seed`、`--keep`。默认运行 `micro,storage,network` 三个必测 suite；综合和第二阶段项显式启用。脚本须在运行前检查 TS4/PVM 内核、`cube`/`runc` RuntimeClass、节点空闲资源、镜像可用性和 CPU 隔离条件；测试后清理 Pod、临时文件和 Host cgroup。
+新增 `task test:performance`，参数至少包括 `--node`、`--rounds`、`--suite`、`--output`、`--seed`、`--profile`、`--cpu`、`--memory`、`--fio-size`、`--fio-runtime`、`--iperf-runtime`、`--keep`。默认 CPU 为 4；同批各组必须显式使用相同规格。默认运行 `micro,storage,network` 三个必测 suite；综合和第二阶段项显式启用。脚本须在运行前检查 TS4/PVM 内核、`cube`/`runc` RuntimeClass、节点空闲资源、镜像可用性和 CPU 隔离条件；测试后清理 Pod、临时文件和 Host cgroup。
 
 验收：同机三组均完成 15 个有效样本；每个 LMbench 核心项、STREAM、sysbench、fio、iperf3、hackbench 均有原始数据；结果可由汇总器离线再现；测试集群无残留 Pod、VM、TAP、mount 和临时 Host 文件。完成数据采集后再形成结论，当前方案不预设 Cube 的具体损耗数值。
 

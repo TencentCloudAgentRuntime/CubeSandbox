@@ -71,4 +71,10 @@ run 1
 grep -q '缺少镜像内 PVM RPM' /fixture/result
 test "$(cat /fixture/actions)" = $'install\nreboot'
 echo 'PASS: missing RPM fails before host changes'
+mkdir -p /fixture/kvm_pvm
+export PVM_MODULE_DIR=/fixture/kvm_pvm
+run 0
+grep -q 'PVM ready (external)' /fixture/result
+test "$(cat /fixture/actions)" = $'install\nreboot'
+echo 'PASS: externally loaded PVM skips RPM regardless of kernel naming'
 TEST

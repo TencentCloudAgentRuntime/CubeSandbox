@@ -11,6 +11,24 @@ seed=20260909
 suites="micro,storage,network"
 test_filter=""
 output_dir=""
+profile="full"
+rounds_set=false
+fio_size_set=false
+fio_runtime_set=false
+iperf_runtime_set=false
+cpu="4"
+memory="2Gi"
+fio_size="512M"
+fio_runtime=30
+iperf_runtime=30
+sysbench_runtime=10
+hackbench_loops=1000
+hackbench_groups=10
+lmbench_memory_size="128M"
+lmbench_file_size_mib=64
+lmbench_samples=3
+lmbench_iterations=1000000
+stream_profile="full"
 keep=false
 
 usage() {
@@ -23,6 +41,12 @@ usage() {
   --tests LIST      仅执行指定测试名，逗号分隔；用于定向复测
   --seed N          runtime 轮转随机种子，默认 20260909
   --output DIR      结果目录，默认 _output/cube-cri-perf/<run-id>
+  --profile NAME    full（默认）或 fast；fast 使用短载荷和核心测例
+  --cpu N           三组统一 CPU limit/request，默认 4
+  --memory SIZE     三组统一内存 limit/request，默认 2Gi
+  --fio-size SIZE   fio 文件大小，默认 512M
+  --fio-runtime N   fio 每轮时长（秒），默认 30
+  --iperf-runtime N iperf 每轮时长（秒），默认 30
   --keep            失败时保留 namespace 与 Host 临时根目录
 EOF
 }
@@ -31,18 +55,69 @@ while (($#)); do
   case "$1" in
     --node) node="$2"; shift 2 ;;
     --image) image="$2"; shift 2 ;;
-    --rounds) rounds="$2"; shift 2 ;;
+    --rounds) rounds="$2"; rounds_set=true; shift 2 ;;
     --suite) suites="$2"; shift 2 ;;
     --tests) test_filter="$2"; shift 2 ;;
     --seed) seed="$2"; shift 2 ;;
     --output) output_dir="$2"; shift 2 ;;
+    --profile) profile="$2"; shift 2 ;;
+    --cpu) cpu="$2"; shift 2 ;;
+    --memory) memory="$2"; shift 2 ;;
+    --fio-size) fio_size="$2"; fio_size_set=true; shift 2 ;;
+    --fio-runtime) fio_runtime="$2"; fio_runtime_set=true; shift 2 ;;
+    --iperf-runtime) iperf_runtime="$2"; iperf_runtime_set=true; shift 2 ;;
     --keep) keep=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+case "$profile" in
+  full) ;;
+  fast)
+    [[ "$rounds_set" == true ]] || rounds=3
+    [[ "$fio_size_set" == true ]] || fio_size="16M"
+    [[ "$fio_runtime_set" == true ]] || fio_runtime=3
+    [[ "$iperf_runtime_set" == true ]] || iperf_runtime=3
+    sysbench_runtime=3
+    hackbench_loops=200
+    hackbench_groups=5
+    lmbench_memory_size="32M"
+    lmbench_file_size_mib=16
+    lmbench_samples=1
+    lmbench_iterations=1000000
+    stream_profile="fast"
+    # 覆盖内核关键路径，避免把 Pod 编排开销放大为测试主体。
+    [[ -n "$test_filter" ]] || test_filter="sysbench-cpu,stream-triad,lmbench-lat-mem-rd,lmbench-pagefault,lmbench-fork,lmbench-ctx,fio-randread,fio-randwrite,fio-seqwrite,iperf-tcp1,iperf-tcp4"
+    ;;
+  *) echo '--profile 仅支持 full 或 fast' >&2; exit 2 ;;
+esac
 [[ "$rounds" =~ ^[1-9][0-9]*$ ]] || { echo '--rounds 必须是正整数' >&2; exit 2; }
 [[ "$seed" =~ ^[0-9]+$ ]] || { echo '--seed 必须是整数' >&2; exit 2; }
+[[ "$cpu" =~ ^[1-9][0-9]*$ ]] || { echo '--cpu 必须是正整数' >&2; exit 2; }
+[[ "$memory" =~ ^[1-9][0-9]*([KMGTE]i?|[kMGTPE])?$ ]] || { echo '--memory 必须是 Kubernetes 容量值' >&2; exit 2; }
+[[ "$fio_size" =~ ^[1-9][0-9]*([KMGT]i?|[kMGT])?$ ]] || { echo '--fio-size 必须是容量值' >&2; exit 2; }
+[[ "$fio_runtime" =~ ^[1-9][0-9]*$ ]] || { echo '--fio-runtime 必须是正整数' >&2; exit 2; }
+[[ "$iperf_runtime" =~ ^[1-9][0-9]*$ ]] || { echo '--iperf-runtime 必须是正整数' >&2; exit 2; }
+[[ "$sysbench_runtime" =~ ^[1-9][0-9]*$ && "$hackbench_loops" =~ ^[1-9][0-9]*$ && "$hackbench_groups" =~ ^[1-9][0-9]*$ ]] || { echo '微基准负载必须为正整数' >&2; exit 2; }
+[[ "$lmbench_memory_size" =~ ^[1-9][0-9]*[M]$ && "$lmbench_file_size_mib" =~ ^[1-9][0-9]*$ && "$lmbench_samples" =~ ^[1-9][0-9]*$ && "$lmbench_iterations" =~ ^[1-9][0-9]*$ ]] || { echo 'LMbench 负载参数无效' >&2; exit 2; }
+memory_bytes() {
+  local amount unit factor=1
+  if [[ "$1" =~ ^([1-9][0-9]*)(Ki|Mi|Gi|Ti)?$ ]]; then
+    amount="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]:-}"
+    case "$unit" in
+      Ki) factor=1024 ;;
+      Mi) factor=$((1024 * 1024)) ;;
+      Gi) factor=$((1024 * 1024 * 1024)) ;;
+      Ti) factor=$((1024 * 1024 * 1024 * 1024)) ;;
+    esac
+    echo $((amount * factor))
+  else
+    echo '--memory 传给 Host cgroup 时仅支持整数或 Ki/Mi/Gi/Ti' >&2
+    exit 2
+  fi
+}
+memory_max="$(memory_bytes "$memory")"
 
 if [[ -z "$node" ]]; then
   node="$(kubectl get nodes -l agc.cloud.tencent.com/cube-ready=true -o jsonpath='{range .items[?(@.spec.unschedulable!=true)]}{.metadata.name}{"\n"}{end}' | head -n1)"
@@ -55,6 +130,14 @@ output_dir="${output_dir:-$repo_dir/_output/cube-cri-perf/$run_id}"
 mkdir -p "$output_dir"
 raw="$output_dir/results.jsonl"
 : > "$raw"
+jq -n \
+  --arg node "$node" --arg image "$image" --arg profile "$profile" --argjson rounds "$rounds" --argjson seed "$seed" \
+  --arg cpu "$cpu" --arg memory "$memory" --arg fio_size "$fio_size" \
+  --arg lmbench_memory_size "$lmbench_memory_size" --arg stream_profile "$stream_profile" --argjson fio_runtime "$fio_runtime" --argjson iperf_runtime "$iperf_runtime" \
+  --argjson sysbench_runtime "$sysbench_runtime" --argjson hackbench_loops "$hackbench_loops" --argjson hackbench_groups "$hackbench_groups" \
+  --argjson lmbench_file_size_mib "$lmbench_file_size_mib" --argjson lmbench_samples "$lmbench_samples" --argjson lmbench_iterations "$lmbench_iterations" \
+  '{node:$node,image:$image,profile:$profile,rounds:$rounds,seed:$seed,cpu:$cpu,memory:$memory,fio_size:$fio_size,fio_runtime_seconds:$fio_runtime,iperf_runtime_seconds:$iperf_runtime,sysbench_runtime_seconds:$sysbench_runtime,hackbench_loops:$hackbench_loops,hackbench_groups:$hackbench_groups,lmbench_memory_size:$lmbench_memory_size,lmbench_file_size_mib:$lmbench_file_size_mib,lmbench_samples:$lmbench_samples,lmbench_iterations:$lmbench_iterations,stream_profile:$stream_profile}' \
+  > "$output_dir/run-config.json"
 
 contains_suite() { [[ ",$suites," == *",$1,"* ]]; }
 wait_phase() {
@@ -72,10 +155,10 @@ wait_phase() {
   kubectl -n "$namespace" describe "pod/$pod" >&2 || true
   return 1
 }
-record_log() {
-  local pod="$1" mode="$2" line
-  line="$(kubectl -n "$namespace" logs "$pod" | awk '/^\{/{last=$0} END{print last}')"
-  [[ -n "$line" ]] || { echo "未从 $pod 取得 JSON 测试结果" >&2; return 1; }
+record_line() {
+  local log_file="$1" mode="$2" line
+  line="$(awk '/^\{/{last=$0} END{print last}' "$log_file")"
+  [[ -n "$line" ]] || { echo "未从 $log_file 取得 JSON 测试结果" >&2; return 1; }
   jq -ce --arg mode "$mode" '. + {mode:$mode}' <<<"$line" >> "$raw"
 }
 create_host_agent() {
@@ -86,7 +169,7 @@ metadata: {name: host-agent}
 spec:
   hostPID: true
   hostNetwork: true
-  nodeSelector: {kubernetes.io/hostname: "${node}"}
+  nodeName: "${node}"
   volumes: [{name: host-root, hostPath: {path: /, type: Directory}}]
   initContainers:
   - name: prepare-rootfs
@@ -112,12 +195,43 @@ spec:
 EOF
   kubectl -n "$namespace" wait --for=condition=Ready pod/host-agent --timeout=10m >/dev/null
 }
+create_runtime_agents() {
+  local mode role pod
+  for mode in runc cube; do
+    for role in client server; do
+      pod="${mode}-${role}-agent"
+      cat <<EOF | kubectl -n "$namespace" apply -f - >/dev/null
+apiVersion: v1
+kind: Pod
+metadata: {name: ${pod}}
+spec:
+  runtimeClassName: ${mode}
+  nodeName: "${node}"
+  volumes: [{name: work, emptyDir: {}}]
+  containers:
+  - name: benchmark
+    image: ${image}
+    imagePullPolicy: IfNotPresent
+    command: ["sleep", "infinity"]
+    volumeMounts: [{name: work, mountPath: /work}]
+    resources:
+      requests: {cpu: "${cpu}", memory: "${memory}"}
+      limits: {cpu: "${cpu}", memory: "${memory}"}
+EOF
+    done
+  done
+  for mode in runc cube; do
+    for role in client server; do
+      kubectl -n "$namespace" wait --for=condition=Ready "pod/${mode}-${role}-agent" --timeout=10m >/dev/null
+    done
+  done
+}
 run_host() {
   local test="$1"
   local round="$2"
   local pod="host-agent"
   local iperf_host="${3:-}"
-  kubectl -n "$namespace" exec "$pod" -- env ROUND="$round" FIO_SIZE="${FIO_SIZE:-512M}" FIO_RUNTIME="${FIO_RUNTIME:-30}" IPERF_HOST="$iperf_host" \
+  kubectl -n "$namespace" exec "$pod" -- env ROUND="$round" CPU_LIMIT="$cpu" MEMORY_LIMIT_BYTES="$memory_max" FIO_SIZE="$fio_size" FIO_RUNTIME="$fio_runtime" IPERF_RUNTIME="$iperf_runtime" SYSBENCH_RUNTIME="$sysbench_runtime" HACKBENCH_LOOPS="$hackbench_loops" HACKBENCH_GROUPS="$hackbench_groups" LMBENCH_MEMORY_SIZE="$lmbench_memory_size" LMBENCH_FILE_SIZE_MIB="$lmbench_file_size_mib" LMBENCH_SAMPLES="$lmbench_samples" LMBENCH_ITERATIONS="$lmbench_iterations" STREAM_PROFILE="$stream_profile" IPERF_HOST="$iperf_host" \
     /opt/cube-cri-perf/run-host.sh "$test" > "$output_dir/${test}.host.${round}.log"
   local line
   line="$(awk '/^\{/{last=$0} END{print last}' "$output_dir/${test}.host.${round}.log")"
@@ -128,137 +242,73 @@ run_pod() {
   local mode="$1"
   local test="$2"
   local round="$3"
-  local pod="${mode}-${test}-${round}"
+  local pod="${mode}-client-agent"
   local iperf_host="${4:-}"
   local result_mode="${5:-$mode}"
-  cat <<EOF | kubectl -n "$namespace" apply -f - >/dev/null
-apiVersion: v1
-kind: Pod
-metadata: {name: ${pod}}
-spec:
-  restartPolicy: Never
-  runtimeClassName: ${mode}
-  nodeSelector: {kubernetes.io/hostname: "${node}"}
-  volumes: [{name: work, emptyDir: {}}]
-  containers:
-  - name: benchmark
-    image: ${image}
-    imagePullPolicy: IfNotPresent
-    command: ["/bin/bash", "/opt/cube-cri-perf/run-case.sh", "${test}"]
-    env:
-    - {name: ROUND, value: "${round}"}
-    - {name: FIO_SIZE, value: "${FIO_SIZE:-512M}"}
-    - {name: FIO_RUNTIME, value: "${FIO_RUNTIME:-30}"}
-    - {name: IPERF_HOST, value: "${iperf_host}"}
-    volumeMounts: [{name: work, mountPath: /work}]
-    resources:
-      requests: {cpu: "1", memory: "2Gi"}
-      limits: {cpu: "1", memory: "2Gi"}
-EOF
-  wait_phase "$pod"
-  record_log "$pod" "$result_mode"
-  kubectl -n "$namespace" delete "pod/$pod" --wait=true >/dev/null
+  local log_file="$output_dir/${test}.${result_mode}.${round}.log"
+  kubectl -n "$namespace" exec "$pod" -- env ROUND="$round" WORK_DIR="/work/${test}.${round}" FIO_SIZE="$fio_size" FIO_RUNTIME="$fio_runtime" IPERF_RUNTIME="$iperf_runtime" SYSBENCH_RUNTIME="$sysbench_runtime" HACKBENCH_LOOPS="$hackbench_loops" HACKBENCH_GROUPS="$hackbench_groups" LMBENCH_MEMORY_SIZE="$lmbench_memory_size" LMBENCH_FILE_SIZE_MIB="$lmbench_file_size_mib" LMBENCH_SAMPLES="$lmbench_samples" LMBENCH_ITERATIONS="$lmbench_iterations" STREAM_PROFILE="$stream_profile" IPERF_HOST="$iperf_host" \
+    /opt/cube-cri-perf/run-case.sh "$test" > "$log_file"
+  record_line "$log_file" "$result_mode"
 }
 start_iperf_server() {
-  local mode="$1"
-  local round="$2"
-  local pod="iperf-server-${mode}-${round}"
-  cat <<EOF | kubectl -n "$namespace" apply -f - >/dev/null
-apiVersion: v1
-kind: Pod
-metadata: {name: ${pod}}
-spec:
-  restartPolicy: Never
-  runtimeClassName: ${mode}
-  nodeSelector: {kubernetes.io/hostname: "${node}"}
-  containers:
-  - name: server
-    image: ${image}
-    imagePullPolicy: IfNotPresent
-    command: ["iperf3", "-s", "-1", "-p", "5201"]
-    resources:
-      requests: {cpu: "1", memory: "2Gi"}
-      limits: {cpu: "1", memory: "2Gi"}
-EOF
-  local deadline=$((SECONDS + 600)) phase
-  while ((SECONDS < deadline)); do
-    phase="$(kubectl -n "$namespace" get "pod/$pod" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-    [[ "$phase" == Running ]] && break
-    [[ "$phase" == Failed ]] && { kubectl -n "$namespace" describe "pod/$pod" >&2; return 1; }
-    sleep 1
-  done
-  [[ "$phase" == Running ]] || { echo "iperf server $pod 未启动" >&2; return 1; }
+  local mode="$1" pod="${mode}-server-agent" pid
+  pid="$(kubectl -n "$namespace" exec "$pod" -- sh -c 'iperf3 -s -1 -p 5201 >/tmp/iperf-server.log 2>&1 & echo $!')"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || { echo "iperf server $pod 未返回 PID" >&2; return 1; }
+  sleep 1
+  kubectl -n "$namespace" exec "$pod" -- sh -c "kill -0 $pid" >/dev/null || { kubectl -n "$namespace" exec "$pod" -- cat /tmp/iperf-server.log >&2 || true; return 1; }
   kubectl -n "$namespace" get "pod/$pod" -o jsonpath='{.status.podIP}'
 }
 run_network_round() {
   local round="$1"
   local streams="$2"
   local test="iperf-tcp${streams}"
-  local ip client server
+  local ip client
   # runc server 固定，三种 client 形成可直接比较的一端 PVM 网络数据。
   # iperf3 的 -1 服务端只接受一个连接，故每个 client 使用独立服务端。
   for client in host runc cube; do
-    server="${round}-${streams}-baseline-${client}"
-    ip="$(start_iperf_server runc "$server")"
+    ip="$(start_iperf_server runc)"
     if [[ "$client" == host ]]; then
       run_host "$test" "$round" "$ip"
     else
       run_pod "$client" "$test" "$round" "$ip"
     fi
-    kubectl -n "$namespace" delete pod "iperf-server-runc-${server}" --wait=true >/dev/null
   done
   # 两端均进入虚拟路径的结果单独保存，不与单端结果混合。
-  ip="$(start_iperf_server cube "${round}-${streams}-cube")"
+  ip="$(start_iperf_server cube)"
   run_pod cube "$test" "${round}00" "$ip" cube_to_cube
-  kubectl -n "$namespace" delete pod "iperf-server-cube-${round}-${streams}-cube" --wait=true >/dev/null
 }
 collect_runtime_environment() {
   local mode="$1"
-  local pod="${mode}-environment"
-  cat <<EOF | kubectl -n "$namespace" apply -f - >/dev/null
-apiVersion: v1
-kind: Pod
-metadata: {name: ${pod}}
-spec:
-  runtimeClassName: ${mode}
-  nodeSelector: {kubernetes.io/hostname: "${node}"}
-  volumes: [{name: work, emptyDir: {}}]
-  containers:
-  - name: benchmark
-    image: ${image}
-    imagePullPolicy: IfNotPresent
-    command: ["sleep", "600"]
-    volumeMounts: [{name: work, mountPath: /work}]
-    resources:
-      requests: {cpu: "1", memory: "2Gi"}
-      limits: {cpu: "1", memory: "2Gi"}
-EOF
-  kubectl -n "$namespace" wait --for=condition=Ready "pod/$pod" --timeout=10m >/dev/null
-  kubectl -n "$namespace" exec "$pod" -- /opt/cube-cri-perf/collect-environment.sh > "$output_dir/${mode}-environment.json"
-  kubectl -n "$namespace" delete "pod/$pod" --wait=true >/dev/null
+  kubectl -n "$namespace" exec "${mode}-client-agent" -- /opt/cube-cri-perf/collect-environment.sh > "$output_dir/${mode}-environment.json"
 }
 preflight() {
   kubectl get runtimeclass cube runc >/dev/null
   kubectl get node "$node" -o json > "$output_dir/node.json"
   kubectl get runtimeclass cube runc -o json > "$output_dir/runtimeclass.json"
-  kubectl node-shell "$node" -- sh -c 'uname -a; lscpu; free -b; findmnt -J; systemctl show -p DefaultCPUAccounting -p DefaultMemoryAccounting' > "$output_dir/host-environment.txt"
-  kubectl node-shell "$node" -- sh -c "ctr -n k8s.io images ls | awk 'NR==1 || /${image%%:*}/'" > "$output_dir/node-images.txt"
-  grep -q "${image%%:*}" "$output_dir/node-images.txt" || { echo "节点未导入镜像 $image；先运行 build-image.sh" >&2; exit 1; }
+  # host-agent 已实际使用基准镜像并进入目标节点；无需依赖 node-shell 的独立
+  # 工具镜像，避免受测试节点镜像仓库访问策略影响。
+  kubectl -n "$namespace" exec host-agent -- nsenter -t 1 -m -u -i -n -p -- \
+    sh -c 'uname -a; lscpu; free -b; findmnt -J; systemctl show -p DefaultCPUAccounting -p DefaultMemoryAccounting' \
+    > "$output_dir/host-environment.txt"
+  printf '基准镜像已由 host-agent 在节点验证：%s\n' "$image" > "$output_dir/node-images.txt"
 }
 cleanup() {
   local code=$?
   if [[ "$keep" != true ]]; then
+    # host-agent 已挂载节点根目录；在删 namespace 前清理 Host 临时根目录，
+    # 不依赖 node-shell 工具镜像。
+    kubectl -n "$namespace" exec host-agent -- rm -rf "/host${host_root}" >/dev/null 2>&1 || true
     kubectl -n "$namespace" delete pod --all --wait=true >/dev/null 2>&1 || true
     kubectl delete namespace "$namespace" --wait=true >/dev/null 2>&1 || true
-    kubectl node-shell "$node" -- rm -rf "$host_root" >/dev/null 2>&1 || true
   fi
   exit "$code"
 }
 trap cleanup EXIT
 
 kubectl create namespace "$namespace" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-preflight
 create_host_agent
+create_runtime_agents
+preflight
 collect_runtime_environment runc
 collect_runtime_environment cube
 micro=(sysbench-cpu stream-triad lmbench-lat-mem-rd lmbench-bw-mem lmbench-pagefault lmbench-mmap lmbench-fork lmbench-exec lmbench-ctx lmbench-syscall hackbench-process hackbench-socket)

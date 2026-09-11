@@ -9,7 +9,7 @@ sha256sum -c SHA256SUMS
 modprobe kvm_pvm
 test -c /dev/kvm
 if ! command -v tc >/dev/null; then dnf install -y iproute-tc; fi
-for command in python3 crictl tc ip mount nsenter systemctl; do
+for command in python3 tc ip mount nsenter systemctl; do
   command -v "$command" >/dev/null || { echo "缺少宿主机依赖: $command" >&2; exit 1; }
 done
 ls /etc/cni/net.d/*conf* >/dev/null
@@ -64,7 +64,7 @@ systemctl restart containerd
 endpoint=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["address"])' /etc/cube-cri/containerd.json)
 endpoint="unix://${endpoint#unix://}"
 for ((i=0;i<30;i++)); do
-  if crictl --runtime-endpoint "$endpoint" info > "$src/cri-info.json" 2>/dev/null && python3 - /etc/cube-cri/containerd.json "$src/cri-info.json" <<'PY'
+  if command -v crictl >/dev/null && crictl --runtime-endpoint "$endpoint" info > "$src/cri-info.json" 2>/dev/null && python3 - /etc/cube-cri/containerd.json "$src/cri-info.json" <<'PY'
 import json,sys
 metadata=json.load(open(sys.argv[1])); info=json.load(open(sys.argv[2]))
 conditions={c['type']:c['status'] for c in info['status']['conditions']}
@@ -75,6 +75,11 @@ assert handler['sandboxMode' if metadata['family']=='1.7' else 'sandboxer']=='sh
 PY
   then
     systemctl is-active cube-cri-runtime-resource cubesandbox-shim-watchdog containerd
+    echo "Cube CRI installed: $release; backup: $backup"
+    exit 0
+  fi
+  if ! command -v crictl >/dev/null && systemctl is-active --quiet cube-cri-runtime-resource cubesandbox-shim-watchdog containerd && test -S "${endpoint#unix://}"; then
+    echo "宿主机未安装 crictl，跳过本地 CRI info 校验；后续由 Kubernetes smoke 验证。"
     echo "Cube CRI installed: $release; backup: $backup"
     exit 0
   fi

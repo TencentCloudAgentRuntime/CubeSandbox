@@ -23,7 +23,7 @@ def bootstrap_median_ci(values, seed, samples=5000):
 def relative(cube, baseline, higher_is_better):
     # 原始指标变化。保留“越高/越低越好”供报告解释，不能把吞吐增益写成
     # 超过 -100% 的“负损耗”。
-    return cube / baseline - 1
+    return None if baseline == 0 else cube / baseline - 1
 
 
 def main():
@@ -104,9 +104,11 @@ def main():
             low, high = summary["median_ci95"]
             return f'{summary["median"]:.4g} [{low:.4g}, {high:.4g}] {summary["unit"]}'
         direction = "↑好" if item["higher_is_better"] else "↓好"
-        lines.append("| {test} ({direction}) | {host} | {runc} | {cube} | {h:+.2%} | {r:+.2%} |".format(
+        def percentage(change):
+            return "不可计算（基线为 0）" if change is None else f"{change:+.2%}"
+        lines.append("| {test} ({direction}) | {host} | {runc} | {cube} | {h} | {r} |".format(
             test=item["test"], host=value(item["host"]), runc=value(item["runc"]), cube=value(item["cube"]),
-            h=item["cube_vs_host_relative_change"], r=item["cube_vs_runc_relative_change"], direction=direction,
+            h=percentage(item["cube_vs_host_relative_change"]), r=percentage(item["cube_vs_runc_relative_change"]), direction=direction,
         ))
     extra_path_summaries = [summary for summary in summaries
                             if summary["mode"] not in ("host", "runc", "cube")]

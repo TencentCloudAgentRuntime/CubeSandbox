@@ -3,9 +3,17 @@
 set -euo pipefail
 rpm_file=${1:?PVM RPM path}
 state=/var/lib/cube-cri/pvm
+module_dir=${PVM_MODULE_DIR:-/sys/module/kvm_pvm}
 source /etc/os-release
 [[ $VERSION_ID == 4* && $(uname -m) == x86_64 ]] || { echo '需要 TS4 x86_64 节点' >&2; exit 1; }
 mkdir -p "$state"
+# OS 团队预装的 PVM 宿主内核可能不使用 cubesandbox.pvm.host 命名。模块已
+# 加载且 KVM 设备可用时，视为可用的外部 PVM 环境，绝不安装或替换宿主机 RPM。
+if test -d "$module_dir" && test -c /dev/kvm; then
+  rm -f "$state/reboot-request"
+  echo "PVM ready (external): $(uname -r)"
+  exit 0
+fi
 if [[ $(uname -r) == *cubesandbox.pvm.host* ]]; then
   modprobe kvm_pvm
   test -c /dev/kvm

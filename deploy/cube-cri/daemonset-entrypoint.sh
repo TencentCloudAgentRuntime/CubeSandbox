@@ -11,14 +11,16 @@ ca_file=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
 set_ready_label() {
   value=${1:?label value}
   test -r "$token_file" && test -r "$ca_file"
-  curl --fail --silent --show-error --cacert "$ca_file" \
+  curl --fail --silent --show-error --connect-timeout 5 --max-time 15 --cacert "$ca_file" \
     -H "Authorization: Bearer $(cat "$token_file")" \
     -H 'Content-Type: application/merge-patch+json' \
     -X PATCH "$api_server/api/v1/nodes/$node_name" \
     --data "{\"metadata\":{\"labels\":{\"agc.cloud.tencent.com/cube-ready\":$value}}}" >/dev/null
 }
 pvm_ready() {
-  host bash -c '[[ $(uname -r) == *cubesandbox.pvm.host* ]] && test -d /sys/module/kvm_pvm && test -c /dev/kvm'
+  # 外部预装的 PVM 宿主内核不保证沿用 CubeSandbox 的版本命名；以已加载
+  # kvm_pvm 和可用 KVM 设备为准，避免把它误判为未安装后覆盖宿主机内核。
+  host bash -c 'test -d /sys/module/kvm_pvm && test -c /dev/kvm'
 }
 running() {
   case "$(host systemctl show "$unit" --property=ActiveState --value)" in active|activating|reloading) return 0;; *) return 1;; esac
