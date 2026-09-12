@@ -1,0 +1,23 @@
+{
+  "providers": {
+    "tokenhub": {
+      "baseUrl": "https://tokenhub.tencentmaas.com/v1",
+      "api": "openai-completions",
+      "apiKey": "$OPENAI_API_KEY",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false
+      },
+      "models": [
+        {
+          "id": "ep-s55rmple",
+          "contextWindow": 128000,
+          "maxTokens": 16384,
+          "samplingParams": {
+            "temperature": 0
+          }
+        }
+      ]
+    }
+  }
+}

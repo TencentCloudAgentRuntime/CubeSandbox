@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "status": "preflight_in_progress",
+  "primary_comparison": ["runc", "cube"],
+  "formal_pairs_per_task": 6,
+  "selection_goal": "在真实 Coding Agent 终端工作负载下比较 Cube/PVM 与 runc 的 t_agent，不评估 Agent 总体能力。",
+  "selection_rules": {
+    "formal_task_count": {"min": 8, "max": 10},
+    "minimum_by_stratum": {"build_debug": 3, "system_operations": 3, "security": 2},
+    "include": ["多轮 shell/fork/exec", "文件 I/O", "编译或构建", "服务或多进程操作", "修改后测试"],
+    "exclude": ["swe-* / SWE-Bench 类任务", "GPU 训练", "纯模型推理", "纯数据处理", "单次长计算"],
+    "preflight_gate": ["镜像可复建", "原始验证入口可运行", "runc 与 Cube 各至少一次验证通过", "Pi 轨迹存在多轮终端操作或构建/服务/测试活动"]
+  },
+  "terminal_bench": {
+    "source_commit": "d28711d0da2675d0bb1d56de45ae5df6082438a3",
+    "source_root": "terminal-bench/original-tasks",
+    "tasks": [
+      {"id": "build-tcc-qemu", "stratum": "build_debug", "workload": "C 工具链编译与调试"},
+      {"id": "modernize-fortran-build", "stratum": "build_debug", "workload": "代码修改、构建与测试", "preflight": {"status": "passed", "runc_t_agent_s": 39.738901785, "cube_t_agent_s": 41.581096681}},
+      {"id": "sqlite-with-gcov", "stratum": "build_debug", "workload": "C/C++ 构建、覆盖率与测试"},
+      {"id": "polyglot-c-py", "stratum": "build_debug", "workload": "C/Python 编译与互操作"},
+      {"id": "debug-long-program", "stratum": "build_debug", "workload": "调试与多服务交互"},
+      {"id": "build-pmars", "stratum": "build_debug", "workload": "编译、命令行构建与测试"},
+      {"id": "nginx-request-logging", "stratum": "system_operations", "workload": "服务配置、启动与调试"},
+      {"id": "configure-git-webserver", "stratum": "system_operations", "workload": "Web 服务配置与进程操作"},
+      {"id": "qemu-startup", "stratum": "system_operations", "workload": "系统启动与多进程操作"},
+      {"id": "jupyter-notebook-server", "stratum": "system_operations", "workload": "服务启动、配置与调试"},
+      {"id": "db-wal-recovery", "stratum": "system_operations", "workload": "SQLite/WAL 恢复与文件分析"},
+      {"id": "openssl-selfsigned-cert", "stratum": "security", "workload": "证书与 OpenSSL 工具链", "preflight": {"status": "passed", "runc_t_agent_s": 63.725164695, "cube_t_agent_s": 65.267748673}},
+      {"id": "new-encrypt-command", "stratum": "security", "workload": "加密命令实现与验证", "preflight": {"status": "passed_low_intensity", "runc_t_agent_s": 18.916339956, "cube_t_agent_s": 38.567639837}},
+      {"id": "fix-code-vulnerability", "stratum": "security", "workload": "漏洞修复、代码修改与测试", "preflight": {"status": "passed", "runc_t_agent_s": 47.808913536, "cube_t_agent_s": 80.531834912}},
+      {"id": "crack-7z-hash", "stratum": "security", "workload": "密码学工具与命令行分析"}
+    ],
+    "preflight_exclusions": [
+      {
+        "id": "build-tcc-qemu",
+        "reason": "任务镜像 4.5 GiB，导入 50 GiB Cube 节点后触发 disk-pressure:NoSchedule；不在资源压力状态下强行测量。"
+      },
+      {
+        "id": "sqlite-with-gcov",
+        "reason": "runc 预检成功，但 Cube Pi 在 900 秒超时且原始验证失败；不满足双侧成功门槛。"
+      },
+      {
+        "id": "polyglot-c-py",
+        "reason": "runc Pi 成功退出，但原始验证发现额外 cmain 文件，未通过；不运行 Cube 对照。"
+      },
+      {
+        "id": "nginx-request-logging",
+        "reason": "runc 预检成功；Cube Pi 900 秒超时，原始验证失败，未形成成功配对。"
+      },
+      {
+        "id": "configure-git-webserver",
+        "reason": "runc 预检成功；Cube Pi 退出码 0，但原始验证 HTTP 404，未形成成功配对。"
+      },
+      {
+        "id": "jupyter-notebook-server",
+        "reason": "runc Pi 900 秒超时且原始验证失败；不运行 Cube 对照。"
+      },
+      {
+        "id": "build-pmars",
+        "reason": "runc Pi 900 秒超时且原始验证失败；不运行 Cube 对照。"
+      }
+    ],
+    "infrastructure_incidents": [
+      {
+        "id": "openssl-selfsigned-cert",
+        "reason": "此前 Cube 连续两次在 Pi 启动前失败；节点修复后 cube-v4 预检通过，保留历史事件但不再阻塞。"
+      },
+      {
+        "id": "crack-7z-hash",
+        "reason": "runc 预检成功；Cube 在 Pi 启动前等待 Pod Ready 超时，未产生 Cube t_agent。"
+      },
+      {
+        "id": "debug-long-program",
+        "reason": "任务声明 2 个服务；当前无侵入外层 harness 仅支持单 client 服务，未执行。"
+      },
+      {
+        "id": "db-wal-recovery",
+        "reason": "task.yaml 指令格式不符合当前外层解析器支持的 instruction: |-，未执行。"
+      }
+    ]
+  }
+}
