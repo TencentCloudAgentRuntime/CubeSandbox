@@ -41,9 +41,12 @@ kubectl label node <node> agc.cloud.tencent.com/cube=true
 export CUBE_CRI_IMAGE=<仓库>/cube-cri-installer@sha256:<digest>
 task deploy
 
-# 或构建运行时、构建并推送安装镜像后部署。
-export CUBE_CRI_IMAGE_REPOSITORY=<仓库>/cube-cri-installer
-task deploy:all
+# 或先构建运行时，再显式构建并推送安装镜像，最后部署。
+# 默认推送到 ccr.ccs.tencentyun.com/journeyyou/cube-cri-installer。
+task build
+task package:image
+source _output/cube-cri/image.env
+task deploy
 
 task test:cri -- --node 10.0.244.89
 ```
@@ -73,7 +76,7 @@ Cube 制品位于 `/opt/cube-cri/releases/<校验和>/`，`current` 指向当前
 
 通过 Helm 管理的原生 `apps/v1` DaemonSet 部署：带 `agc.cloud.tencent.com/cube=true` 标签的节点自动安装；安装器在升级开始时移除、仅在运行时与服务检查通过后写入 `agc.cloud.tencent.com/cube-ready=true`。镜像携带运行时制品及 PVM 宿主机内核 RPM，先准备内核、必要时重启，恢复后自动继续安装运行时。已有可用 PVM 内核时跳过内核安装；重启后仍未进入 PVM 内核则报错，避免循环重启。Pod 重建时，同版本跳过安装。删除 DaemonSet 不卸载运行时或内核；节点退役时请先迁移 Cube Pod，再同时移除两个标签。
 
-`CUBE_CRI_IMAGE_REPOSITORY` 指定可推送且节点可拉取的仓库；构建镜像需要 `PVM_HOST_RPM` 指定的内核包，默认 `_output/cube-cri/pvm-host.rpm`。`CUBE_CRI_IMAGE` 可直接使用已有的完整 digest 安装镜像，无需本地制品。`CUBE_CRI_NAMESPACE`、`CUBE_CRI_RELEASE` 分别指定 Helm 命名空间和 release；`CUBE_CRI_IMAGE_PULL_SECRET` 指定同命名空间已有的拉取凭据。`task deploy` 在 Helm 安装前直接 apply `RuntimeClass/cube`，不接管该资源。安装失败可查看 DaemonSet Pod 日志及宿主机 `/var/lib/cube-cri/installer/<Pod UID>/install.log`。
+`CUBE_CRI_IMAGE_REPOSITORY` 指定可推送且节点可拉取的仓库，默认 `ccr.ccs.tencentyun.com/journeyyou/cube-cri-installer`；构建镜像需要 `PVM_HOST_RPM` 指定的内核包，默认 `_output/cube-cri/pvm-host.rpm`。`CUBE_CRI_IMAGE` 可直接使用已有的完整 digest 安装镜像，无需本地制品。`CUBE_CRI_NAMESPACE`、`CUBE_CRI_RELEASE` 分别指定 Helm 命名空间和 release；`CUBE_CRI_IMAGE_PULL_SECRET` 指定同命名空间已有的拉取凭据。`task deploy` 在 Helm 安装前直接 apply `RuntimeClass/cube`，不接管该资源。安装失败可查看 DaemonSet Pod 日志及宿主机 `/var/lib/cube-cri/installer/<Pod UID>/install.log`。
 
 账号需有 DaemonSet、特权 Pod、RuntimeClass 和节点标签权限，无需 exec 或 SSH 密钥。原默认内核保存在 `/var/lib/cube-cri/pvm/previous-default-kernel`；`reboot-request` 记录本次内核包与启动 ID，排查并修复启动配置后可删除该记录重试。
 

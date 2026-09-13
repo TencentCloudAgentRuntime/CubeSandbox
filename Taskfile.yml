@@ -1,6 +1,7 @@
 version: '3'
 vars:
   BUILD: bash ./deploy/cube-cri/build.sh
+  IMAGE_TASK: bash ./deploy/cube-cri/image.sh
   HELM_TASK: bash ./deploy/cube-cri/helm.sh
   ARGS: '{{.CLI_ARGS | default ""}}'
 tasks:
@@ -41,14 +42,17 @@ tasks:
   package:
     desc: 校验并打包已有制品。
     cmds: [bash ./deploy/cube-cri/package.sh]
+  package:image:
+    aliases: [image]
+    desc: 构建并推送 Cube CRI 安装镜像，输出 CUBE_CRI_IMAGE。
+    cmds: ['{{.IMAGE_TASK}}']
   deploy:runtime:
     aliases: [deploy]
     desc: 通过 Helm DaemonSet 在带 Cube 标签的节点安装 Cube 运行时。
     cmds: ['{{.HELM_TASK}}']
   deploy:all:
-    desc: 构建运行时代码并通过 Helm DaemonSet 部署到带 Cube 标签的节点（基础制品须已准备）。
+    desc: 通过 Helm DaemonSet 部署已有 digest 安装镜像。
     cmds:
-      - '{{.BUILD}} runtime'
       - task: deploy:runtime
   package:helm:
     desc: 校验并打包 Cube CRI Helm Chart。
