@@ -53,6 +53,27 @@ const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
 const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
 const AGENT_PROTOCOL_VERSION_LEGACY: u32 = 0;
+const ENV_GUEST_KERNEL_CMDLINE_APPEND: &str = "CUBE_GUEST_KERNEL_CMDLINE_APPEND";
+
+fn global_guest_kernel_params() -> CResult<Vec<String>> {
+    let Some(raw) = std::env::var_os(ENV_GUEST_KERNEL_CMDLINE_APPEND) else {
+        return Ok(Vec::new());
+    };
+    let raw = raw.to_string_lossy();
+    let params = serde_json::from_str::<Vec<String>>(&raw)
+        .map_err(|error| format!("parse {ENV_GUEST_KERNEL_CMDLINE_APPEND}: {error}"))?;
+    Ok(params
+        .into_iter()
+        .filter_map(|param| {
+            let trimmed = param.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .collect())
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct AgentCapabilities {
@@ -1015,6 +1036,24 @@ impl SandBox {
 
         // Add externally passed pmem
         vc.add_pmems(&self.conf.pmem);
+
+        let global_kernel_params = global_guest_kernel_params()?;
+        let allowed_global_duplicate_keys = HashSet::from(["console", "earlyprintk", "earlycon"]);
+        if !global_kernel_params.is_empty() {
+            let conflicts = vc.check_cmdline_conflicts_except(
+                &global_kernel_params,
+                &allowed_global_duplicate_keys,
+            );
+            if !conflicts.is_empty() {
+                return Err(format!(
+                    "global kernel parameter conflicts detected, cannot create container: {}",
+                    conflicts.join("; ")
+                ));
+            }
+        }
+        for param in global_kernel_params.iter() {
+            vc.add_cmdline(param.clone());
+        }
 
         // Check if extra kernel parameters conflict with existing ones
         if !self.conf.extra_kernel_params.is_empty() {
@@ -2153,6 +2192,7 @@ mod tests {
     use super::Log;
     use super::SandBox;
     use super::AGENT_PROTOCOL_VERSION_LEGACY;
+    use super::ENV_GUEST_KERNEL_CMDLINE_APPEND;
 
     fn capability(name: &str, version: u32) -> health::AgentCapability {
         let mut capability = health::AgentCapability::new();
@@ -2274,6 +2314,36 @@ mod tests {
             "missing expected cmdlines: {:?}",
             set_expect
         );
+    }
+
+    #[tokio::test]
+    async fn prepare_resource_appends_global_debug_kernel_params() {
+        let original = std::env::var_os(ENV_GUEST_KERNEL_CMDLINE_APPEND);
+        std::env::set_var(
+            ENV_GUEST_KERNEL_CMDLINE_APPEND,
+            r#"["earlyprintk=serial,ttyS0,115200","console=ttyS0,115200","loglevel=8"]"#,
+        );
+
+        let log = Log::default();
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(128);
+        let mut sb = SandBox::new("global-kernel-debug".to_string(), log, false, tx);
+        sb.conf.kernel = "ut_kernel".to_string();
+
+        let vm_config = sb.prepare_resource().await.unwrap();
+
+        assert!(vm_config
+            .cmdlines
+            .contains(&"earlyprintk=serial,ttyS0,115200".to_string()));
+        assert!(vm_config
+            .cmdlines
+            .contains(&"console=ttyS0,115200".to_string()));
+        assert!(vm_config.cmdlines.contains(&"loglevel=8".to_string()));
+
+        if let Some(value) = original {
+            std::env::set_var(ENV_GUEST_KERNEL_CMDLINE_APPEND, value);
+        } else {
+            std::env::remove_var(ENV_GUEST_KERNEL_CMDLINE_APPEND);
+        }
     }
 
     #[test]

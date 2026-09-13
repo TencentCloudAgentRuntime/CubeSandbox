@@ -50,6 +50,10 @@ spec:
                   fieldPath: spec.nodeName
             - name: CUBE_CRI_MODE
               value: runtime
+            - name: CUBE_GUEST_KERNEL_CMDLINE_APPEND
+              value: {{ toJson .Values.guest.kernelCmdlineAppend | quote }}
+            - name: CUBE_GUEST_BOOT_TRACE
+              value: {{ ternary "1" "0" .Values.guest.bootTrace | quote }}
           resources:
             {{- toYaml .Values.daemonSet.resources | nindent 12 }}
           readinessProbe:

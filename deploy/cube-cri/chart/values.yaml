@@ -11,6 +11,15 @@ image:
 
 imagePullSecrets: []
 
+guest:
+  # 追加到所有 Cube Guest kernel cmdline 的参数。Pod annotation
+  # cube.vm.kernel.cmdline.append 仍可用于单 Pod 追加。
+  kernelCmdlineAppend: []
+  # 捕获每个 Guest 的串口与 virtio console 启动日志到宿主机：
+  # /data/log/CubeShim/guest-boot/<sandbox-id>.serial.log
+  # /data/log/CubeShim/guest-boot/<sandbox-id>.console.log
+  bootTrace: false
+
 daemonSet:
   hostStatePath: /var/lib/cube-cri/installer
   updateStrategy:

@@ -51,6 +51,32 @@ task deploy
 task test:cri -- --node 10.0.244.89
 ```
 
+调试 Guest 内核启动时，可以通过 Helm values 全局追加 kernel cmdline，并捕获每个 Pod 的串口日志：
+
+```yaml
+guest:
+  kernelCmdlineAppend:
+    - earlyprintk=serial,ttyS0,115200
+    - console=ttyS0,115200
+    - loglevel=8
+    - ignore_loglevel
+    - initcall_debug
+    - rd.debug
+    - rd.shell
+    - rd.break=pre-pivot
+    - log_buf_len=1M
+  bootTrace: true
+```
+
+将上述内容保存为 values 文件后，通过 `CUBE_CRI_HELM_VALUES=/path/to/values.yaml task deploy` 生效。
+
+部署后，新建 Cube Pod 的日志会写到目标节点：
+
+```bash
+/data/log/CubeShim/guest-boot/<sandbox-id>.serial.log
+/data/log/CubeShim/guest-boot/<sandbox-id>.console.log
+```
+
 ## Helm 安装
 
 面向多节点安装请使用 [Helm Chart](chart/README.md)。`agc.cloud.tencent.com/cube=true` 触发安装 DaemonSet；安装完成后安装器写入 `agc.cloud.tencent.com/cube-ready=true`，`RuntimeClass/cube` 只调度到后者。无需 cordon/uncordon。

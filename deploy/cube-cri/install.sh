@@ -16,7 +16,14 @@ ls /etc/cni/net.d/*conf* >/dev/null
 base=/opt/cube-cri
 containerd_config=/etc/containerd/config.toml
 test -f "$containerd_config"
-python3 containerd.py "$src/prepared" --config-path "$containerd_config"
+containerd_args=("$src/prepared" --config-path "$containerd_config")
+if [[ -s $src/guest-kernel-cmdline-append.json ]]; then
+  containerd_args+=(--guest-kernel-cmdline-append-file "$src/guest-kernel-cmdline-append.json")
+fi
+if [[ -f $src/guest-boot-trace.enabled ]]; then
+  containerd_args+=(--guest-boot-trace)
+fi
+python3 containerd.py "${containerd_args[@]}"
 release=$base/releases/$(sha256sum SHA256SUMS | cut -c1-16)
 backup=$base/backups/$(date -u +%Y%m%dT%H%M%S)-$$
 mkdir -p "$release" "$backup" /etc/cube-cri /etc/systemd/system/containerd.service.d

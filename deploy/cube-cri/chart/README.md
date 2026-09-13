@@ -33,5 +33,7 @@ kubectl get node <node> -L agc.cloud.tencent.com/cube-ready
 | `runtimeClass.nodeSelector` | `agc.cloud.tencent.com/cube-ready=true` | RuntimeClass 的可调度节点标签选择器 |
 | `image.repository` / `image.digest` | 必填 | 安装镜像仓库和 SHA-256 digest |
 | `imagePullSecrets` | `[]` | 私有仓库拉取凭据 |
+| `guest.kernelCmdlineAppend` | `[]` | 追加到所有 Cube Guest kernel cmdline 的参数 |
+| `guest.bootTrace` | `false` | 捕获 Guest serial/console 日志到宿主机 `/data/log/CubeShim/guest-boot/` |
 | `runtimeClass.name` | `cube` | 创建的 RuntimeClass 名称 |
 | `runtimeClass.enabled` | `true` | 已有同名 RuntimeClass 时设为 `false` |

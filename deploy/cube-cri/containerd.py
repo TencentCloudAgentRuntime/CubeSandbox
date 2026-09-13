@@ -74,7 +74,18 @@ def runtime_table(data, major):
     raise ValueError("containerd 2.x 配置缺少 CRI 插件")
 
 
-def configure(text, major):
+def shim_env(kernel_cmdline_append, guest_boot_trace, include_privileged=True):
+    env = []
+    if include_privileged:
+        env.append("CUBE_ALLOW_PRIVILEGED=true")
+    if guest_boot_trace:
+        env.append("CUBE_GUEST_BOOT_TRACE=1")
+    if kernel_cmdline_append:
+        env.append("CUBE_GUEST_KERNEL_CMDLINE_APPEND=" + json.dumps(kernel_cmdline_append, ensure_ascii=False))
+    return env
+
+
+def configure(text, major, kernel_cmdline_append, guest_boot_trace):
     data = tomllib.loads(text)
     plugin, sandbox_key = runtime_table(data, major)
     runtimes = data["plugins"][plugin]["containerd"]["runtimes"]
@@ -94,8 +105,14 @@ def configure(text, major):
     expected["plugins"][plugin]["containerd"]["runtimes"]["cube"] = handler
     if major == "2":
         manager = expected["plugins"].setdefault(SHIM_MANAGER, {})
-        manager["env"] = [value for value in manager.get("env", [])
-                          if not value.startswith("CUBE_ALLOW_PRIVILEGED=")] + ["CUBE_ALLOW_PRIVILEGED=true"]
+        cube_env_prefixes = (
+            "CUBE_ALLOW_PRIVILEGED=",
+            "CUBE_GUEST_BOOT_TRACE=",
+            "CUBE_GUEST_KERNEL_CMDLINE_APPEND=",
+        )
+        manager["env"] = [
+            value for value in manager.get("env", []) if not value.startswith(cube_env_prefixes)
+        ] + shim_env(kernel_cmdline_append, guest_boot_trace)
     # Parse headers instead of relying on the quote style used by a particular
     # containerd/TOML library version. This keeps all unrelated node settings
     # byte-for-byte intact.
@@ -144,7 +161,16 @@ def unit_arg(arg):
     return '"' + arg.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$") + '"'
 
 
-def prepare(pid, output, config_path):
+def load_kernel_cmdline_append(path):
+    if path is None:
+        return []
+    params = json.loads(path.read_text())
+    if not isinstance(params, list) or not all(isinstance(param, str) for param in params):
+        raise ValueError("guest kernel cmdline append must be a JSON string array")
+    return [param.strip() for param in params if param.strip()]
+
+
+def prepare(pid, output, config_path, kernel_cmdline_append, guest_boot_trace):
     proc = pathlib.Path(f"/proc/{pid}")
     binary = str((proc / "exe").resolve(strict=True))
     if not pathlib.Path(binary).is_file():
@@ -159,7 +185,7 @@ def prepare(pid, output, config_path):
     major = family(version)
     source_text = source.read_text()
     source_data = tomllib.loads(source_text)
-    rendered = configure(source_text, major)
+    rendered = configure(source_text, major, kernel_cmdline_append, guest_boot_trace)
     output.mkdir(parents=True, exist_ok=True)
     (output / "containerd.toml").write_text(rendered)
     validation = output / "containerd.validation.toml"
@@ -186,6 +212,8 @@ Environment=CUBE_RUNTIME_RESOURCE_REAPER_DIR=/data/cubelet/runtime-resource-reap
 Environment=CUBE_CRI_METRICS_SOCKET=/run/cube-cri/metrics.sock
 Environment=CUBE_VMM_WORKER_PATH=/opt/cube-cri/current/bin/cube-vmm-worker
 """
+    for env in shim_env(kernel_cmdline_append, guest_boot_trace, include_privileged=False):
+        unit += "Environment=" + unit_arg(env) + "\n"
     unit += "Environment=ENABLE_CRI_SANDBOXES=1\nEnvironment=CUBE_ALLOW_PRIVILEGED=true\n" if major == "1.7" else "UnsetEnvironment=ENABLE_CRI_SANDBOXES\n"
     (output / "containerd.service.conf").write_text(unit)
     metadata = {"binary": binary, "version": version, "family": major, "source_config": str(source),
@@ -199,8 +227,16 @@ if __name__ == "__main__":
     parser.add_argument("output", type=pathlib.Path)
     parser.add_argument("--pid", type=int, help="测试隔离实例；默认使用 containerd.service MainPID")
     parser.add_argument("--config-path", type=pathlib.Path)
+    parser.add_argument("--guest-kernel-cmdline-append-file", type=pathlib.Path)
+    parser.add_argument("--guest-boot-trace", action="store_true", help="捕获每个 Guest 的 serial/console 日志")
     options = parser.parse_args()
     pid = options.pid or int(command("systemctl", "show", "containerd", "--property=MainPID", "--value"))
     if pid <= 0:
         parser.error("节点 containerd.service 未运行")
-    prepare(pid, options.output, options.config_path or options.output / "containerd.toml")
+    prepare(
+        pid,
+        options.output,
+        options.config_path or options.output / "containerd.toml",
+        load_kernel_cmdline_append(options.guest_kernel_cmdline_append_file),
+        options.guest_boot_trace,
+    )

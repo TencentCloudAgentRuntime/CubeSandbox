@@ -242,6 +242,14 @@ impl VmConfig {
     }
 
     pub fn check_cmdline_conflicts(&self, extra_params: &[String]) -> Vec<String> {
+        self.check_cmdline_conflicts_except(extra_params, &HashSet::new())
+    }
+
+    pub fn check_cmdline_conflicts_except(
+        &self,
+        extra_params: &[String],
+        allowed_duplicate_keys: &HashSet<&str>,
+    ) -> Vec<String> {
         let mut existing_keys = HashSet::new();
         let mut existing_params = HashSet::new();
 
@@ -270,7 +278,7 @@ impl VmConfig {
 
             if let Some(equal_pos) = trimmed.find('=') {
                 let key = &trimmed[..equal_pos];
-                if existing_keys.contains(key) {
+                if existing_keys.contains(key) && !allowed_duplicate_keys.contains(key) {
                     conflicts.push(format!(
                         "kernel parameter '{}' conflicts with existing parameter (key '{}' already exists)",
                         trimmed, key
