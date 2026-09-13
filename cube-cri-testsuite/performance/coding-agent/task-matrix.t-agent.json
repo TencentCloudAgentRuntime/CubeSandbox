@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "preflight_in_progress",
+  "status": "preflight_gate_satisfied",
   "primary_comparison": ["runc", "cube"],
   "formal_pairs_per_task": 6,
   "selection_goal": "在真实 Coding Agent 终端工作负载下比较 Cube/PVM 与 runc 的 t_agent，不评估 Agent 总体能力。",
@@ -16,20 +16,21 @@
     "source_root": "terminal-bench/original-tasks",
     "tasks": [
       {"id": "build-tcc-qemu", "stratum": "build_debug", "workload": "C 工具链编译与调试"},
-      {"id": "modernize-fortran-build", "stratum": "build_debug", "workload": "代码修改、构建与测试", "preflight": {"status": "passed", "runc_t_agent_s": 39.738901785, "cube_t_agent_s": 41.581096681}},
-      {"id": "sqlite-with-gcov", "stratum": "build_debug", "workload": "C/C++ 构建、覆盖率与测试"},
-      {"id": "polyglot-c-py", "stratum": "build_debug", "workload": "C/Python 编译与互操作"},
-      {"id": "debug-long-program", "stratum": "build_debug", "workload": "调试与多服务交互"},
-      {"id": "build-pmars", "stratum": "build_debug", "workload": "编译、命令行构建与测试"},
-      {"id": "nginx-request-logging", "stratum": "system_operations", "workload": "服务配置、启动与调试"},
-      {"id": "configure-git-webserver", "stratum": "system_operations", "workload": "Web 服务配置与进程操作"},
-      {"id": "qemu-startup", "stratum": "system_operations", "workload": "系统启动与多进程操作"},
-      {"id": "jupyter-notebook-server", "stratum": "system_operations", "workload": "服务启动、配置与调试"},
-      {"id": "db-wal-recovery", "stratum": "system_operations", "workload": "SQLite/WAL 恢复与文件分析"},
-      {"id": "openssl-selfsigned-cert", "stratum": "security", "workload": "证书与 OpenSSL 工具链", "preflight": {"status": "passed", "runc_t_agent_s": 63.725164695, "cube_t_agent_s": 65.267748673}},
-      {"id": "new-encrypt-command", "stratum": "security", "workload": "加密命令实现与验证", "preflight": {"status": "passed_low_intensity", "runc_t_agent_s": 18.916339956, "cube_t_agent_s": 38.567639837}},
-      {"id": "fix-code-vulnerability", "stratum": "security", "workload": "漏洞修复、代码修改与测试", "preflight": {"status": "passed", "runc_t_agent_s": 47.808913536, "cube_t_agent_s": 80.531834912}},
-      {"id": "crack-7z-hash", "stratum": "security", "workload": "密码学工具与命令行分析"}
+      {"id": "modernize-fortran-build", "stratum": "build_debug", "workload": "代码修改、构建与测试", "preflight": {"status": "passed", "runc_t_agent_s": 39.738901785, "cube_t_agent_s": 41.581096681}, "formal": {"status": "complete", "report": "_output/agc37-terminal-formal/modernize-fortran-build-formal-v1/report.json", "formal_records": 12, "paired_successes": 6, "median_cube_over_runc_minus_1_t_agent": -0.30013041875602164, "median_cube_minus_runc_t_agent_ns": -13882183412}},
+      {"id": "sqlite-with-gcov", "stratum": "build_debug", "workload": "C/C++ 构建、覆盖率与测试", "preflight": {"status": "failed_cube_dpkg_stale_file_handle", "runc_t_agent_s": 601.102096818, "cube_t_agent_s": 900.317744226}},
+      {"id": "polyglot-c-py", "stratum": "build_debug", "workload": "C/Python 编译与互操作", "preflight": {"status": "agent_left_build_artifact_official_solution_passes_both", "runc_t_agent_s": 293.440663633, "manual_solution_runc_verify_exit": 0, "manual_solution_cube_verify_exit": 0}},
+      {"id": "debug-long-program", "stratum": "build_debug", "workload": "调试与多服务交互", "preflight": {"status": "passed_after_sidecar_harness", "runc_t_agent_s": 216.354669672, "cube_t_agent_s": 256.309791954}, "formal": {"status": "complete_with_infra_retries", "report": "_output/agc37-terminal-formal/debug-long-program-formal-v1/report.json", "formal_records": 12, "paired_successes": 6, "median_cube_over_runc_minus_1_t_agent": -0.2965576823004927, "median_cube_minus_runc_t_agent_ns": -66509094104.5, "note": "cube r3/r5 each had one Pi-before init StartError caused by container create ttrpc timeout; missing cube sides were rerun and the failures are retained in orchestration-failures.jsonl."}},
+      {"id": "build-pmars", "stratum": "build_debug", "workload": "编译、命令行构建与测试", "preflight": {"status": "passed_after_debian_mirror_cube_retry", "runc_t_agent_s": 311.125919657, "cube_t_agent_s": 794.577301213, "cube_retry_note": "cube-mirror-v1 failed because debian/ was left at /app/debian; cube-mirror-v3 passed all 4 official tests."}, "formal": {"status": "complete_with_timeout_retry", "report": "_output/agc37-terminal-formal/build-pmars-formal-v1/report.json", "formal_records": 12, "paired_successes": 6, "median_cube_over_runc_minus_1_t_agent": 2.601400212632889, "median_cube_minus_runc_t_agent_ns": 373308823811.0, "note": "Initial cube r4 timed out at 900s and failed verification; the failed run is retained under failed-reruns/build-pmars-cube-r4-timeout1, and cube r4 was rerun successfully."}},
+      {"id": "nginx-request-logging", "stratum": "system_operations", "workload": "服务配置、启动与调试", "preflight": {"status": "passed_after_debian_mirror", "runc_t_agent_s": 51.754492631, "cube_t_agent_s": 433.256280486}, "formal": {"status": "complete", "report": "_output/agc37-terminal-formal/nginx-request-logging-formal-v1/report.json", "formal_records": 12, "paired_successes": 6, "median_cube_over_runc_minus_1_t_agent": 3.3982850622469423, "median_cube_minus_runc_t_agent_ns": 299871596056.5}},
+      {"id": "configure-git-webserver", "stratum": "system_operations", "workload": "Web 服务配置与进程操作", "preflight": {"status": "failed_cube_dpkg_libcap2_stale_file_handle", "runc_t_agent_s": 314.837827956, "cube_t_agent_s": 733.105469964, "min_repro": "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall libcap2", "min_repro_runc_rc": 0, "min_repro_cube_rc": 100}},
+      {"id": "qemu-startup", "stratum": "system_operations", "workload": "系统启动与多进程操作", "preflight": {"status": "agent_path_failed_official_solution_passes_both", "image": "cube-cri-agc37-pi-terminal-qemu-startup:tb-d287-pi0.85.6-repair5", "runc_t_agent_s": 601.690161394, "runc_agent_exit": 0, "runc_agent_verify_exit": 1, "cube_t_agent_s": 900.264108947, "cube_agent_exit": 143, "cube_agent_verify_exit": 1, "manual_solution_runc_verify_exit": 0, "manual_solution_cube_4g_verify_exit": 0, "cube_qemu_memory_sweep_4g": {"memtotal_kb": 4012128, "m128": 0, "m256": 0, "m512": 0, "m768": 0, "m1024": 0, "m1536": 0, "m2048": 0, "m3072": 0}, "invalid_low_resource_probe": {"memtotal_kb": 471376, "m512": 1, "m768": 1, "m1024": 1}, "agent_failure": "runc verify did not create /tmp/data.txt; cube timed out after trying a qemu telnet serial mode that waits for a connection instead of official server,nowait", "build_workaround": "disable bullseye-security, apt Check-Valid-Until=false, Tencent Debian main mirror, preinstall/downgrade perl-base=5.32.1-4+deb11u3"}},
+      {"id": "jupyter-notebook-server", "stratum": "system_operations", "workload": "服务启动、配置与调试", "preflight": {"status": "passed_after_debian_pip_mirror", "runc_t_agent_s": 429.392272553, "cube_t_agent_s": 452.015602837, "cube_retry_note": "cube-mirror-v1 服务与 notebook 通过但缺少测试可识别的 password hash 配置；cube-mirror-v2 通过。"}, "formal": {"status": "complete", "report": "_output/agc37-terminal-formal/jupyter-notebook-server-formal-v1/report.json", "formal_records": 12, "paired_successes": 6, "median_cube_over_runc_minus_1_t_agent": 1.5171915565615672, "median_cube_minus_runc_t_agent_ns": 201677344811.0}},
+      {"id": "processing-pipeline", "stratum": "system_operations", "workload": "脚本权限、行尾与流水线修复", "preflight": {"status": "passed_after_ubuntu_mirror", "image": "cube-cri-agc37-pi-terminal-processing-pipeline:tb-d287-pi0.85.6-repair1", "runc_t_agent_s": 61.476196475, "cube_t_agent_s": 44.338235785, "runc_tool_call_count": 12, "cube_tool_call_count": 15, "official_tests": "9 passed"}, "formal": {"status": "complete", "report": "_output/agc37-terminal-formal/processing-pipeline-formal-v1/report.json", "formal_records": 12, "paired_successes": 6, "median_cube_over_runc_minus_1_t_agent": 0.25540976426611917, "median_cube_minus_runc_t_agent_ns": 10290649978}},
+      {"id": "db-wal-recovery", "stratum": "system_operations", "workload": "SQLite/WAL 恢复与文件分析", "preflight": {"status": "failed_cube_timeout_min_grep_ok_retry2_clean_node", "runc_t_agent_s": 109.165801716, "cube_t_agent_s": 900.190321563, "cube_retry2_t_agent_s": 900.260073832, "cube_retry2_verify_exit": 1, "min_grep_runc_s": 2.588606838, "min_grep_cube_s": 10.103090841, "retry2_note": "node Ready and no DiskPressure; Agent timed out and recovered.json was still absent"}},
+      {"id": "openssl-selfsigned-cert", "stratum": "security", "workload": "证书与 OpenSSL 工具链", "preflight": {"status": "passed", "runc_t_agent_s": 63.725164695, "cube_t_agent_s": 65.267748673}, "formal": {"status": "complete", "report": "_output/agc37-terminal-formal/openssl-selfsigned-cert-formal-v1/report.json", "formal_records": 12, "paired_successes": 6, "median_cube_over_runc_minus_1_t_agent": 0.16631086893433977, "median_cube_minus_runc_t_agent_ns": 9994151344}},
+      {"id": "new-encrypt-command", "stratum": "security", "workload": "加密命令实现与验证", "preflight": {"status": "passed_low_intensity", "runc_t_agent_s": 18.916339956, "cube_t_agent_s": 38.567639837}, "formal": {"status": "partial_agent_path_unstable", "report": "_output/agc37-terminal-formal/new-encrypt-command-formal-v1/report.json", "formal_records": 12, "paired_successes": 3, "unpaired_rounds": [1, 5, 6], "note": "Agent sometimes refused to use rencrypt as secure encryption and asked for confirmation; no /app/encrypted_data outputs were produced in failed rounds."}},
+      {"id": "fix-code-vulnerability", "stratum": "security", "workload": "漏洞修复、代码修改与测试", "preflight": {"status": "passed", "runc_t_agent_s": 47.808913536, "cube_t_agent_s": 80.531834912}, "formal": {"status": "complete", "report": "_output/agc37-terminal-formal/fix-code-vulnerability-formal-v1/report.json", "formal_records": 12, "paired_successes": 6, "median_cube_over_runc_minus_1_t_agent": 0.8496561353387286, "median_cube_minus_runc_t_agent_ns": 39306397114.5}},
+      {"id": "crack-7z-hash", "stratum": "security", "workload": "密码学工具与命令行分析", "preflight": {"status": "passed_after_cube_ready_retry", "runc_t_agent_s": 140.534994651, "cube_t_agent_s": 168.970902646}, "formal": {"status": "complete", "report": "_output/agc37-terminal-formal/crack-7z-hash-formal-v1/report.json", "formal_records": 12, "paired_successes": 6, "median_cube_over_runc_minus_1_t_agent": 1.5620065537290582, "median_cube_minus_runc_t_agent_ns": 277031265605.5}}
     ],
     "preflight_exclusions": [
       {
@@ -38,27 +39,23 @@
       },
       {
         "id": "sqlite-with-gcov",
-        "reason": "runc 预检成功，但 Cube Pi 在 900 秒超时且原始验证失败；不满足双侧成功门槛。"
+        "reason": "runc 预检成功；Cube Pi 在安装构建工具时触发 apt/dpkg 覆盖文件 Stale file handle，随后 sqlite3 未进入 PATH，原始验证失败；不满足双侧成功门槛。"
       },
       {
         "id": "polyglot-c-py",
-        "reason": "runc Pi 成功退出，但原始验证发现额外 cmain 文件，未通过；不运行 Cube 对照。"
-      },
-      {
-        "id": "nginx-request-logging",
-        "reason": "runc 预检成功；Cube Pi 900 秒超时，原始验证失败，未形成成功配对。"
+        "reason": "runc Pi 成功退出，但原始验证发现额外 cmain 文件，未通过；手动执行官方 solution.sh 后 runc 与 Cube 均通过官方验证，说明旧失败为 Agent 收尾未清理构建产物，不是 Cube CRI 能力缺口。"
       },
       {
         "id": "configure-git-webserver",
-        "reason": "runc 预检成功；Cube Pi 退出码 0，但原始验证 HTTP 404，未形成成功配对。"
+        "reason": "runc 预检成功；Cube Pi 退出码 0，但原始验证 HTTP 404，未形成成功配对。补充手动参考方案对照显示 runc 官方验证通过，Cube 在 apt/dpkg 覆盖 libcap2 时出现 Stale file handle；最小复现为 apt-get update 后 reinstall libcap2，runc rc=0，Cube rc=100。"
       },
       {
-        "id": "jupyter-notebook-server",
-        "reason": "runc Pi 900 秒超时且原始验证失败；不运行 Cube 对照。"
+        "id": "qemu-startup",
+        "reason": "repair5 镜像已可复建；官方 solution 手动对照 runc 与 Cube 均通过，但 runc Agent 轮验证失败、Cube Agent 轮 900 秒超时，当前归类为 Agent 路径失败，不能进入正式集。"
       },
       {
-        "id": "build-pmars",
-        "reason": "runc Pi 900 秒超时且原始验证失败；不运行 Cube 对照。"
+        "id": "db-wal-recovery",
+        "reason": "外层 instruction 解析修复后 runc 预检成功；Cube Pi 900 秒超时，未生成 recovered.json，原始验证失败。最小 grep/pipe 对照 runc 和 Cube 均正常退出，暂不支持命令语义死锁归因。"
       }
     ],
     "infrastructure_incidents": [
@@ -68,15 +65,15 @@
       },
       {
         "id": "crack-7z-hash",
-        "reason": "runc 预检成功；Cube 在 Pi 启动前等待 Pod Ready 超时，未产生 Cube t_agent。"
+        "reason": "此前 Cube 在 Pi 启动前等待 Pod Ready 超时；2026-09-12 重试后 cube-retry-v1 预检通过，保留历史事件但不再阻塞。"
       },
       {
-        "id": "debug-long-program",
-        "reason": "任务声明 2 个服务；当前无侵入外层 harness 仅支持单 client 服务，未执行。"
+        "id": "qemu-startup",
+        "reason": "repair5 镜像已可复建并导入；官方 solution 手动对照 runc/Cube 均通过。runc Agent 轮 Pi 退出 0 但验证失败；Cube Agent 轮 900 秒超时。此前 Cube qemu 内存失败来自未设置 resources 的诊断 Pod，带 4Gi limit 后 qemu -m 3072 也可启动。"
       },
       {
         "id": "db-wal-recovery",
-        "reason": "task.yaml 指令格式不符合当前外层解析器支持的 instruction: |-，未执行。"
+        "reason": "2026-09-12 cube-retry-v1 在 Pod 调度/启动阶段因节点瞬时 DiskPressure 被 Evicted，未进入 Pi 阶段；该轮不改变此前 Cube Agent 900 秒超时归因。retry 后已清理导入镜像，节点恢复 Ready 且无 DiskPressure。"
       }
     ]
   }

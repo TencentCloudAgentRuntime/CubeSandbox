@@ -57,27 +57,30 @@ Terminal-Bench 的任务文件和 runner 一律不改；只在其外层调用前
 | --- | --- | --- | --- |
 | Terminal-Bench | `build-tcc-qemu` | C 工具链编译与调试 | 排除：4.5 GiB 镜像触发目标节点磁盘压力 |
 | Terminal-Bench | `modernize-fortran-build` | 代码修改、构建与测试 | 预检通过：runc `39.74s`，Cube `41.58s` |
-| Terminal-Bench | `sqlite-with-gcov` | C/C++ 构建、覆盖率与测试 | 排除：Cube 预检 900 秒超时、验证失败 |
-| Terminal-Bench | `polyglot-c-py` | C/Python 编译与互操作 | 排除：runc 原始验证失败（残留 cmain） |
-| Terminal-Bench | `debug-long-program` | 调试与多服务交互 | 暂不支持：任务声明 2 个服务，当前外层 harness 只支持单 client 服务 |
-| Terminal-Bench | `build-pmars` | 编译、命令行构建与测试 | 排除：runc 预检 900 秒超时、验证失败 |
-| Terminal-Bench | `nginx-request-logging` | 服务配置、启动与调试 | 排除：runc 通过，Cube 900 秒超时且验证失败 |
-| Terminal-Bench | `configure-git-webserver` | Web 服务配置与进程操作 | 排除：runc 通过，Cube Pi 退出 0 但原始验证失败 |
-| Terminal-Bench | `qemu-startup` | 系统启动与多进程操作 | 待预检 |
-| Terminal-Bench | `jupyter-notebook-server` | 服务启动、配置与调试 | 排除：runc 预检 900 秒超时、验证失败 |
-| Terminal-Bench | `db-wal-recovery` | SQLite/WAL 恢复与文件分析 | 暂不支持：`task.yaml` 指令格式不符合当前外层解析器 |
+| Terminal-Bench | `sqlite-with-gcov` | C/C++ 构建、覆盖率与测试 | 排除：Cube apt/dpkg 覆盖文件触发 `Stale file handle`，构建工具未装好，最终 `sqlite3` 不在 PATH |
+| Terminal-Bench | `polyglot-c-py` | C/Python 编译与互操作 | 排除：旧 runc 原始验证因残留 `cmain` 失败；官方解法手动对照 runc/Cube 均通过，归类为 Agent 收尾问题 |
+| Terminal-Bench | `debug-long-program` | 调试与多服务交互 | 预检通过：runc `216.35s`，Cube `256.31s`；外层 harness 已用 sidecar 支持该固定双服务形态 |
+| Terminal-Bench | `build-pmars` | 编译、命令行构建与测试 | 预检通过：Debian HTTP 镜像修复后 runc `311.13s`，Cube retry `794.58s`；此前 Cube 失败为 Agent 路径波动 |
+| Terminal-Bench | `nginx-request-logging` | 服务配置、启动与调试 | 预检通过：Debian 源切腾讯镜像后，runc `51.75s`，Cube `433.26s` |
+| Terminal-Bench | `configure-git-webserver` | Web 服务配置与进程操作 | 排除：runc 通过；Cube Pi 退出 0 但验证 404；最小 `apt install --reinstall libcap2` 复现 Cube dpkg `Stale file handle` |
+| Terminal-Bench | `qemu-startup` | 系统启动与多进程操作 | 排除：repair5 镜像已可复建；官方 solution 手动对照 runc/Cube 均通过；runc Agent 轮 `601.69s` 验证失败，Cube Agent 轮 `900.26s` 超时；此前 qemu 内存失败来自未设置 resources 的诊断 Pod，带 `4Gi` limit 后 Cube 中 qemu `-m 3072` 也可启动 |
+| Terminal-Bench | `jupyter-notebook-server` | 服务启动、配置与调试 | 预检通过：Debian/PyPI 源切腾讯镜像后，runc `429.39s`，Cube `452.02s` |
+| Terminal-Bench | `processing-pipeline` | 脚本权限、行尾与流水线修复 | 预检通过：Ubuntu 源切腾讯镜像后，runc `61.48s`，Cube `44.34s`，官方 9 项验证通过 |
+| Terminal-Bench | `db-wal-recovery` | SQLite/WAL 恢复与文件分析 | 排除：instruction 解析修复后 runc 通过 `109.17s`；Cube 900 秒超时且验证失败；最小 grep 对照未复现命令死锁 |
 | Terminal-Bench | `openssl-selfsigned-cert` | 证书与 OpenSSL 工具链 | 预检通过：runc `63.73s`，Cube `65.27s` |
 | Terminal-Bench | `new-encrypt-command` | 加密命令实现与验证 | 预检通过：runc `18.92s`，Cube `38.57s`；低强度补充样本 |
 | Terminal-Bench | `fix-code-vulnerability` | 漏洞修复、代码修改与测试 | 预检通过：runc `47.81s`，Cube `80.53s` |
-| Terminal-Bench | `crack-7z-hash` | 密码学工具与命令行分析 | runc 通过 `140.53s`；Cube 未到 Pi 阶段，等待 Pod Ready 超时 |
+| Terminal-Bench | `crack-7z-hash` | 密码学工具与命令行分析 | 预检通过：runc `140.53s`，Cube `168.97s`；此前 Cube Ready 超时未复现 |
 
-当前仅 4 个任务形成双侧成功预检，尚未达到正式实验门槛。上表中的秒数只是单次独立 Agent 轨迹，不代表 Cube 纯运行时开销；正式结论必须等每任务 6 个成功配对后再给。
+当前已有 10 个任务形成双侧成功预检，达到总数下限，并满足 build/debug、system_operations、security 分类下限。上表中的秒数只是单次独立 Agent 轨迹，不代表 Cube 纯运行时开销；正式结论必须等每任务 6 个成功配对后再给。
 
 ## 正式实验
 
 - 每个预检通过任务做 6 个配对：3 轮 `runc → Cube`、3 轮 `Cube → runc`。
 - 一轮仅在两侧 Pi 退出码均为 0 且原始验证均通过时进入配对统计；失败、超时和基础设施错误保留并单独报告。
 - 每次保存任务与轮次、运行顺序、镜像 digest、Pod 配置、Pi/模型版本、`t_agent`、验证结果、token、response 数、工具调用和资源采样。
+
+当前阶段 5 进展：`modernize-fortran-build`、`debug-long-program`、`build-pmars`、`nginx-request-logging`、`jupyter-notebook-server`、`processing-pipeline`、`openssl-selfsigned-cert`、`fix-code-vulnerability` 和 `crack-7z-hash` 已各完成 6 个成功配对，达到正式任务数量下限和分类下限；`debug-long-program` formal-v1 另有 2 次 Cube Pi 前启动失败并单独保留，`build-pmars` formal-v1 另有 1 次 Cube 900 秒超时失败并单独保留；`new-encrypt-command` formal-v1 只有 3 个成功配对，失败轮为 Agent 路径不稳定，不进入正式完成集。
 
 ## 分析与交付
 

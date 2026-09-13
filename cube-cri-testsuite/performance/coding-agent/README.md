@@ -11,9 +11,12 @@
 - `build-terminal-image.sh`：构建单个 Terminal-Bench 任务镜像，叠加发布版 Pi 与验证缓存，并导入目标节点。
 - `run-terminal-case.sh`：执行单次 runc 或 Cube case，记录 `t_agent`、验证结果和 Pod/事件工件。
 - `run-terminal-formal.sh`：按固定顺序执行每任务 6 个 runc/Cube 配对，并生成正式汇总。
+- `run-terminal-suite.sh`：一键执行已验收的 9 个 formal 任务，自动构建镜像、运行配对、补跑未配对样本、清理节点镜像并生成 suite 汇总。
 - `scripts/agent-run.sh`、`scripts/run-terminal-agent.sh`：只启动发布版 Pi 并记录外层时间，不实现 Agent 循环。
 - `scripts/verify-terminal.sh`、`scripts/verifier-*.sh`：原样调用任务验证入口，仅把固定依赖下载替换为镜像缓存。
-- `scripts/sanitize-pi.py`、`scripts/sample-resources.py`、`scripts/summarize-*.py`：脱敏事件、采样资源和离线汇总。
+- `scripts/extract-instruction.py`、`scripts/sanitize-pi.py`、`scripts/sample-resources.py`、`scripts/summarize-*.py`：读取任务指令、脱敏事件、采样资源和离线汇总。
+
+`build-terminal-image.sh` 的 apt/PyPI mirror 参数只用于外层临时 build context；启用后必须以 `image-manifest.json` 记录，不能修改 Terminal-Bench 原始任务目录。
 
 ## 隔离口径
 
@@ -29,3 +32,4 @@
 ## 当前状态
 
 - 早期 `fix-permissions` 单任务旧方案已清理；当前只保留 Terminal-Bench 终端密集型任务矩阵。
+- 套件级入口：`task test:coding-agent:formal -- --node 172.17.209.85 --task-root /data/home/journeyyou/agc37-cache/terminal-bench-d28711d/terminal-bench/original-tasks`。

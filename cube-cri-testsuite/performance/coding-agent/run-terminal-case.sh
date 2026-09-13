@@ -51,21 +51,25 @@ attempt="agc37-${mode}-${task}-r${round}-$(date +%s)"
 namespace="$attempt"
 output="${output:-$repo_dir/_output/agc37-terminal/$attempt}"
 mkdir -p "$output"
+has_debug_program=false
+if [[ -f "$task_dir/debug_server.py" ]] && grep -q '^  program:' "$task_dir/docker-compose.yaml"; then
+  has_debug_program=true
+fi
+host_aliases_yaml=""
+program_container_yaml=""
+if [[ "$has_debug_program" == true ]]; then
+  host_aliases_yaml='  hostAliases:
+  - ip: "127.0.0.1"
+    hostnames: ["program"]'
+  program_container_yaml="  - name: program
+    image: ${image}-program
+    imagePullPolicy: Never
+    ports: [{containerPort: 8008}]
+    resources: {requests: {cpu: \"250m\", memory: \"256Mi\"}, limits: {cpu: \"1\", memory: \"1Gi\"}}"
+fi
 
 monotonic_ns() { python3 -c 'import time; print(time.monotonic_ns())'; }
-instruction="$(python3 - "$task_dir/task.yaml" <<'PY'
-import sys
-lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
-try:
-    start = lines.index("instruction: |-") + 1
-except ValueError as error:
-    raise SystemExit("仅支持 instruction: |- 格式") from error
-for line in lines[start:]:
-    if line and not line[0].isspace():
-        break
-    print(line[2:] if line.startswith("  ") else line)
-PY
-)"
+instruction="$(python3 "$script_dir/scripts/extract-instruction.py" "$task_dir/task.yaml")"
 
 cleanup() {
   local status=$?
@@ -101,6 +105,7 @@ spec:
   terminationGracePeriodSeconds: 10
   runtimeClassName: $mode
   nodeSelector: {kubernetes.io/hostname: "$node"}
+$host_aliases_yaml
   volumes:
   - {name: workspace, emptyDir: {}}
   - {name: artifacts, emptyDir: {}}
@@ -143,6 +148,7 @@ spec:
     command: ["/opt/agc37/keep-artifacts.sh"]
     volumeMounts: [{name: artifacts, mountPath: /artifacts}]
     resources: {requests: {cpu: "50m", memory: "128Mi"}, limits: {cpu: "50m", memory: "128Mi"}}
+$program_container_yaml
 EOF
 
 kubectl -n "$namespace" wait --for=condition=Ready pod/agent --timeout=10m >/dev/null
