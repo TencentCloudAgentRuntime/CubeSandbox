@@ -40,6 +40,7 @@ pub const SHARE_BASE: &str = "/data/cubelet/s0.2-share";
 const VIRTIOFS_SHARED_DIR: &str = "/data/cubelet";
 const GUEST_SANDBOX_RESOLV_CONF: &str = "/etc/resolv.conf";
 const MANAGED_ROOTFS_WRITABLE_DIR: &str = "rootfs-writable";
+const SNAPSHOT_ACCOUNTED_ROOTFS_DIR: &str = ".cube-rootfs-writable";
 const KUBELET_EMPTYDIR_PLUGIN: &str = "kubernetes.io~empty-dir";
 const TMPFS_MAGIC: libc::c_long = 0x0102_1994;
 static EXPORT_ATTEMPT: AtomicU64 = AtomicU64::new(1);
@@ -47,6 +48,18 @@ static EXPORT_ATTEMPT: AtomicU64 = AtomicU64::new(1);
 struct MemoryEmptyDir {
     guest_source: PathBuf,
     storage_options: Vec<String>,
+}
+
+#[derive(Debug)]
+struct OverlayLayers {
+    lower: Vec<PathBuf>,
+    upper: Option<PathBuf>,
+    work: Option<PathBuf>,
+}
+
+#[derive(Debug)]
+struct OverlayWritableLayer {
+    upper: PathBuf,
 }
 
 #[derive(Debug)]
@@ -257,12 +270,15 @@ fn prepare_at(
     if let Some(volume_root) = managed_volume_root {
         prepared.cleanup_dirs.push(volume_root.join(&export_id));
     }
-    let guest_lowerdirs = export_rootfs(
+    let use_managed_writable_layer =
+        managed_volume_root.is_some() && should_prepare_managed_writable_layer(spec, true);
+    let (guest_lowerdirs, snapshot_writable_layer) = export_rootfs(
         guest_share_name,
         &export_id,
         &mounts[0],
         &target,
         &mut prepared.mounts,
+        use_managed_writable_layer,
     )?;
     export_host_bind_mounts(
         guest_share_name,
@@ -280,8 +296,15 @@ fn prepare_at(
     // writable, cacheless virtio-fs export for Pod volumes; allocate a private
     // generation below that export and use it for a writable OCI rootfs.
     let writable_layer = managed_volume_root
-        .filter(|_| should_prepare_managed_writable_layer(spec, true))
-        .map(|volume_root| prepare_managed_writable_layer(volume_root, &export_id))
+        .filter(|_| use_managed_writable_layer)
+        .map(|volume_root| {
+            prepare_managed_writable_layer(
+                volume_root,
+                &export_id,
+                snapshot_writable_layer.as_ref(),
+                &mut prepared.mounts,
+            )
+        })
         .transpose()?;
 
     inject_annotations(
@@ -313,6 +336,8 @@ fn should_prepare_managed_writable_layer(spec: &Spec, managed: bool) -> bool {
 fn prepare_managed_writable_layer(
     managed_volume_root: &Path,
     export_id: &str,
+    snapshot_layer: Option<&OverlayWritableLayer>,
+    mounted: &mut Vec<PathBuf>,
 ) -> Result<PathBuf, String> {
     let host = managed_volume_root
         .join(export_id)
@@ -323,6 +348,42 @@ fn prepare_managed_writable_layer(
             host.display()
         )
     })?;
+
+    // Keep containerd's active snapshot as the single writable-layer owner,
+    // but do not reuse its upperdir itself as another overlay upper in the
+    // Guest. Export upper and work beneath one fresh child with one bind mount:
+    // separate bind mounts look like different backing mounts to virtio-fs and
+    // make overlay copy-up fail with EXDEV.
+    if let Some(snapshot_layer) = snapshot_layer {
+        let source = snapshot_accounted_writable_layer(snapshot_layer);
+        fs::create_dir(&source).map_err(|error| {
+            format!(
+                "create snapshot-accounted writable rootfs {} failed: {error}",
+                source.display()
+            )
+        })?;
+        for name in ["upper", "work"] {
+            let path = source.join(name);
+            fs::create_dir(&path).map_err(|error| {
+                format!(
+                    "create snapshot-accounted writable rootfs {name} {} failed: {error}",
+                    path.display()
+                )
+            })?;
+        }
+        mirror_export_target_mode(
+            &fs::metadata(&source).map_err(|error| {
+                format!(
+                    "stat snapshot-accounted writable rootfs {} failed: {error}",
+                    source.display()
+                )
+            })?,
+            &host,
+        )?;
+        bind_mount(&source, &host, false)?;
+        mounted.push(host.clone());
+    }
+
     Ok(Path::new(GUEST_VIRTIOFS_MNT_PATH)
         .join(MANAGED_VOLUME_VIRTIOFS_ID)
         .join(MANAGED_VOLUME_EXPORT_DIR)
@@ -661,9 +722,16 @@ fn export_rootfs(
     mount: &Mount,
     target: &Path,
     mounted: &mut Vec<PathBuf>,
-) -> Result<Vec<String>, String> {
+    use_snapshot_writable_layer: bool,
+) -> Result<(Vec<String>, Option<OverlayWritableLayer>), String> {
     if mount.type_ == "overlay" {
-        let sources = overlay_layer_sources(&mount.options)?;
+        let layers = parse_overlay_layers(&mount.options)?;
+        let snapshot_writable_layer = if use_snapshot_writable_layer {
+            Some(layers.writable_layer()?)
+        } else {
+            None
+        };
+        let sources = layers.export_sources(!use_snapshot_writable_layer);
         let layers = target.join("layers");
         fs::create_dir_all(&layers)
             .map_err(|e| format!("create layer export {} failed: {e}", layers.display()))?;
@@ -679,7 +747,7 @@ fn export_rootfs(
             mounted.push(layer_target);
             guest_lowerdirs.push(format!("{sandbox_id}/rootfs/{task_id}/layers/{layer_name}"));
         }
-        return Ok(guest_lowerdirs);
+        return Ok((guest_lowerdirs, snapshot_writable_layer));
     }
 
     let merged = target.join("merged");
@@ -687,33 +755,92 @@ fn export_rootfs(
         .map_err(|e| format!("create rootfs target {} failed: {e}", merged.display()))?;
     mount_one(mount, &merged)?;
     mounted.push(merged);
-    Ok(vec![format!("{sandbox_id}/rootfs/{task_id}/merged")])
+    Ok((vec![format!("{sandbox_id}/rootfs/{task_id}/merged")], None))
 }
 
-/// Convert containerd's overlay active snapshot into Guest overlay lowerdirs.
-/// The active upper comes first, followed by the image lowerdirs in the exact
-/// order supplied by containerd. This avoids overlay-on-overlay while retaining
-/// containerd as the sole OCI image/snapshot owner for the PoC.
-fn overlay_layer_sources(options: &[String]) -> Result<Vec<PathBuf>, String> {
-    let upper = options
-        .iter()
-        .find_map(|option| option.strip_prefix("upperdir="));
-    let lower = options
-        .iter()
-        .find_map(|option| option.strip_prefix("lowerdir="))
+/// Parse containerd's active overlay snapshot. Managed writable tasks export
+/// only the image lowerdirs through the read-only rootfs share and place the
+/// Guest writable layer below the snapshot upperdir. Other paths retain the
+/// previous upper-then-lower export order.
+fn parse_overlay_layers(options: &[String]) -> Result<OverlayLayers, String> {
+    let lower = unique_overlay_option(options, "lowerdir")?
         .ok_or_else(|| "S0 overlay rootfs has no lowerdir option".to_string())?;
+    let upper = unique_overlay_option(options, "upperdir")?
+        .map(|value| validate_layer_source("upperdir", value))
+        .transpose()?;
+    let work = unique_overlay_option(options, "workdir")?
+        .map(|value| validate_layer_source("workdir", value))
+        .transpose()?;
 
-    let mut sources = Vec::new();
-    if let Some(upper) = upper {
-        sources.push(validate_layer_source("upperdir", upper)?);
+    if upper.is_some() != work.is_some() {
+        return Err("S0 overlay rootfs requires upperdir and workdir together".to_string());
     }
-    for lower in lower.split(':') {
-        sources.push(validate_layer_source("lowerdir", lower)?);
+    if let (Some(upper), Some(work)) = (&upper, &work) {
+        let upper_dev = fs::metadata(upper)
+            .map_err(|error| {
+                format!(
+                    "stat S0 overlay upperdir {} failed: {error}",
+                    upper.display()
+                )
+            })?
+            .dev();
+        let work_dev = fs::metadata(work)
+            .map_err(|error| format!("stat S0 overlay workdir {} failed: {error}", work.display()))?
+            .dev();
+        if upper_dev != work_dev {
+            return Err(format!(
+                "S0 overlay upperdir {} and workdir {} are on different filesystems",
+                upper.display(),
+                work.display()
+            ));
+        }
     }
-    if sources.is_empty() {
+
+    let lower = lower
+        .split(':')
+        .map(|value| validate_layer_source("lowerdir", value))
+        .collect::<Result<Vec<_>, _>>()?;
+    if lower.is_empty() {
         return Err("S0 overlay rootfs has no exportable layers".to_string());
     }
-    Ok(sources)
+    Ok(OverlayLayers { lower, upper, work })
+}
+
+fn unique_overlay_option<'a>(options: &'a [String], name: &str) -> Result<Option<&'a str>, String> {
+    let prefix = format!("{name}=");
+    let mut values = options
+        .iter()
+        .filter_map(|option| option.strip_prefix(&prefix));
+    let value = values.next();
+    if values.next().is_some() {
+        return Err(format!("S0 overlay rootfs has duplicate {name} option"));
+    }
+    Ok(value)
+}
+
+impl OverlayLayers {
+    fn export_sources(&self, include_upper: bool) -> Vec<PathBuf> {
+        self.upper
+            .iter()
+            .filter(|_| include_upper)
+            .chain(self.lower.iter())
+            .cloned()
+            .collect()
+    }
+
+    fn writable_layer(&self) -> Result<OverlayWritableLayer, String> {
+        let upper = self.upper.clone().ok_or_else(|| {
+            "managed writable S0 overlay rootfs has no upperdir option".to_string()
+        })?;
+        self.work.as_ref().ok_or_else(|| {
+            "managed writable S0 overlay rootfs has no workdir option".to_string()
+        })?;
+        Ok(OverlayWritableLayer { upper })
+    }
+}
+
+fn snapshot_accounted_writable_layer(layer: &OverlayWritableLayer) -> PathBuf {
+    layer.upper.join(SNAPSHOT_ACCOUNTED_ROOTFS_DIR)
 }
 
 fn validate_layer_source(kind: &str, value: &str) -> Result<PathBuf, String> {
@@ -885,31 +1012,56 @@ mod tests {
     }
 
     #[test]
-    fn preserves_overlay_active_layer_order() {
-        let temp = std::env::temp_dir();
-        let temp = temp.to_string_lossy();
+    fn parses_overlay_layers_and_preserves_legacy_export_order() {
+        let root = std::env::temp_dir().join(format!(
+            "cubesandbox-overlay-parse-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let lower_a = root.join("lower-a");
+        let lower_b = root.join("lower-b");
+        let upper = root.join("upper");
+        let work = root.join("work");
+        for path in [&lower_a, &lower_b, &upper, &work] {
+            fs::create_dir_all(path).unwrap();
+        }
         let options = vec![
-            format!("lowerdir=/:{temp}"),
-            format!("upperdir={temp}"),
-            "workdir=/ignored".to_string(),
+            format!("lowerdir={}:{}", lower_a.display(), lower_b.display()),
+            format!("upperdir={}", upper.display()),
+            format!("workdir={}", work.display()),
         ];
 
-        let sources = overlay_layer_sources(&options).unwrap();
+        let layers = parse_overlay_layers(&options).unwrap();
 
         assert_eq!(
-            sources,
-            vec![
-                PathBuf::from(temp.as_ref()),
-                PathBuf::from("/"),
-                PathBuf::from(temp.as_ref())
-            ]
+            layers.export_sources(true),
+            vec![upper.clone(), lower_a.clone(), lower_b.clone()]
         );
+        assert_eq!(layers.export_sources(false), vec![lower_a, lower_b]);
+        let writable = layers.writable_layer().unwrap();
+        assert_eq!(writable.upper, upper);
+        assert_eq!(
+            snapshot_accounted_writable_layer(&writable),
+            upper.join(SNAPSHOT_ACCOUNTED_ROOTFS_DIR)
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn rejects_overlay_without_lowerdir() {
-        let error = overlay_layer_sources(&["upperdir=/".to_string()]).unwrap_err();
+        let error = parse_overlay_layers(&["upperdir=/".to_string()]).unwrap_err();
         assert!(error.contains("no lowerdir"));
+    }
+
+    #[test]
+    fn rejects_overlay_with_unpaired_or_duplicate_writable_options() {
+        let unpaired = parse_overlay_layers(&["lowerdir=/".to_string(), "upperdir=/".to_string()])
+            .unwrap_err();
+        assert!(unpaired.contains("upperdir and workdir together"));
+
+        let duplicate =
+            parse_overlay_layers(&["lowerdir=/".to_string(), "lowerdir=/tmp".to_string()])
+                .unwrap_err();
+        assert!(duplicate.contains("duplicate lowerdir"));
     }
 
     #[test]
@@ -1109,7 +1261,9 @@ mod tests {
         let volume_root = root.join(MANAGED_VOLUME_EXPORT_DIR);
         fs::create_dir_all(&volume_root).unwrap();
 
-        let guest = prepare_managed_writable_layer(&volume_root, "task-a-42-7").unwrap();
+        let guest =
+            prepare_managed_writable_layer(&volume_root, "task-a-42-7", None, &mut Vec::new())
+                .unwrap();
 
         assert_eq!(
             guest,
