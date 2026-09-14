@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "description": "Cube CRI SIG Node e2e 默认跳过列表。每个 enabled 条目必须说明原因、来源和退出条件。",
+  "entries": [
+    {
+      "id": "kubernetes-e2e-unstable-or-non-ga-labels",
+      "enabled": true,
+      "pattern": "\\[(Flaky|Alpha|Beta|BetaOffByDefault|Deprecated)\\]",
+      "reason": "这些是 Kubernetes e2e 官方用于标记不稳定、非 GA、默认关闭或已废弃能力的标签；日常 Cube CRI SIG Node 巡检只关注默认启用且稳定的用例。",
+      "source": "Kubernetes e2e labels",
+      "exitCriteria": "只有在专项验证对应 feature gate、废弃行为或不稳定用例时，才通过临时 focus/skip 覆盖默认规则。"
+    },
+    {
+      "id": "agc39-pod-inplace-resize-tke-resource-mutation",
+      "enabled": true,
+      "pattern": "Pod InPlace Resize Container",
+      "reason": "AGC-39/AGC-40 证明当前 TKE 测试集群会向 Pod 资源注入 tke.cloud.tencent.com/eni-ip；RuntimeClass/cube 的 PodOverhead 也会进入资源核算，导致上游 InPlacePodVerticalScaling 用例的 ResourceRequirements、LimitRange 和 ResourceQuota 精确断言被环境改写污染。",
+      "source": "AGC-39, AGC-40",
+      "exitCriteria": "使用不注入 TKE ENI 扩展资源的 e2e namespace，或在专门适配后的 resize 套件中验证 Cube CRI resize 语义。"
+    },
+    {
+      "id": "agc39-dra-test-driver-env",
+      "enabled": true,
+      "pattern": "\\[DRA\\]",
+      "reason": "AGC-39 中 DRA 失败集中在 resourceslices RBAC forbidden、dra-test-driver 副本不可用、插件注册/端口转发失败，以及双节点拓扑与 RuntimeClass/cube nodeSelector 冲突；当前不能作为 Cube CRI 兼容性结论。",
+      "source": "AGC-39",
+      "exitCriteria": "补齐 DRA 测试驱动 RBAC、插件注册、镜像预热和 cube-only 拓扑后，单独串行运行 DRA 子集。"
+    },
+    {
+      "id": "agc39-node-log-query-provider-skeleton",
+      "enabled": true,
+      "pattern": "\\[Feature:NodeLogQuery\\]",
+      "reason": "AGC-39 使用 provider=skeleton，NodeLogQuery 依赖 kubelet 日志访问和 SSH signer；当前环境没有满足这些前置条件，失败不经过 Cube runtime。",
+      "source": "AGC-39",
+      "exitCriteria": "提供可访问 kubelet 日志的 provider/SSH signer，或改用专用 node e2e fixture。"
+    },
+    {
+      "id": "agc39-host-network-unsupported",
+      "enabled": true,
+      "pattern": "hostNetwork|host network|KubeletManagedEtcHosts",
+      "reason": "Cube 首版明确不支持 hostNetwork/host namespace；AGC-39 中 runtimeClass=cube + hostNetwork 被 cube-runtime-host-namespace-guard 按预期拒绝。",
+      "source": "AGC-39",
+      "exitCriteria": "产品决定支持 hostNetwork，并完成 hostNetwork、hostPID/hostIPC、hostexec 的最小用例和上游用例回归。"
+    },
+    {
+      "id": "agc39-runtimeclass-node-affinity-topology",
+      "enabled": true,
+      "pattern": "RuntimeClass should run a Pod requesting a RuntimeClass with (scheduling without taints|a configured handler)",
+      "reason": "AGC-39 强制注入 runtimeClass=cube，而 RuntimeClass/cube 自带 cube-ready nodeSelector；部分上游 RuntimeClass 用例会选择普通节点，和当前双节点测试拓扑冲突。",
+      "source": "AGC-39",
+      "exitCriteria": "使用只包含 cube-ready 节点的 SIG Node e2e 集群，或让 e2e 节点选择只命中 cube-ready 节点。"
+    }
+  ]
+}
