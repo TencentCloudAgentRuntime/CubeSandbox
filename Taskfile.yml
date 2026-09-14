@@ -76,3 +76,9 @@ tasks:
   test:performance:
     desc: 在同一 TS4/PVM 节点对比 Host、runc 与 Cube 的运行时性能。
     cmds: ['bash ./cube-cri-testsuite/performance/run.sh {{.ARGS}}']
+  test:coding-agent:
+    desc: 使用 Pi 对比 Host、runc 与 Cube 的 Coding Agent 任务执行。
+    cmds: ['bash ./cube-cri-testsuite/performance/coding-agent/run-terminal-case.sh {{.ARGS}}']
+  test:coding-agent:formal:
+    desc: 一键执行已验收的 Terminal-Bench Coding Agent formal 套件。
+    cmds: ['bash ./cube-cri-testsuite/performance/coding-agent/run-terminal-suite.sh {{.ARGS}}']
