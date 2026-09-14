@@ -303,6 +303,7 @@ fn prepare_at(
                 &export_id,
                 snapshot_writable_layer.as_ref(),
                 &mut prepared.mounts,
+                &mut prepared.cleanup_dirs,
             )
         })
         .transpose()?;
@@ -338,6 +339,7 @@ fn prepare_managed_writable_layer(
     export_id: &str,
     snapshot_layer: Option<&OverlayWritableLayer>,
     mounted: &mut Vec<PathBuf>,
+    cleanup_dirs: &mut Vec<PathBuf>,
 ) -> Result<PathBuf, String> {
     let host = managed_volume_root
         .join(export_id)
@@ -355,13 +357,28 @@ fn prepare_managed_writable_layer(
     // separate bind mounts look like different backing mounts to virtio-fs and
     // make overlay copy-up fail with EXDEV.
     if let Some(snapshot_layer) = snapshot_layer {
-        let source = snapshot_accounted_writable_layer(snapshot_layer);
+        let source = snapshot_accounted_writable_layer(snapshot_layer, export_id);
+        let parent = source.parent().ok_or_else(|| {
+            format!(
+                "snapshot-accounted writable rootfs {} has no parent",
+                source.display()
+            )
+        })?;
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "create snapshot-accounted writable rootfs parent {} failed: {error}",
+                parent.display()
+            )
+        })?;
         fs::create_dir(&source).map_err(|error| {
             format!(
                 "create snapshot-accounted writable rootfs {} failed: {error}",
                 source.display()
             )
         })?;
+        // Register ownership immediately. If any later preparation step fails,
+        // PreparedRootfs::drop removes only this attempt's generation.
+        cleanup_dirs.push(source.clone());
         for name in ["upper", "work"] {
             let path = source.join(name);
             fs::create_dir(&path).map_err(|error| {
@@ -839,8 +856,11 @@ impl OverlayLayers {
     }
 }
 
-fn snapshot_accounted_writable_layer(layer: &OverlayWritableLayer) -> PathBuf {
-    layer.upper.join(SNAPSHOT_ACCOUNTED_ROOTFS_DIR)
+fn snapshot_accounted_writable_layer(layer: &OverlayWritableLayer, export_id: &str) -> PathBuf {
+    layer
+        .upper
+        .join(SNAPSHOT_ACCOUNTED_ROOTFS_DIR)
+        .join(export_id)
 }
 
 fn validate_layer_source(kind: &str, value: &str) -> Result<PathBuf, String> {
@@ -1040,8 +1060,10 @@ mod tests {
         let writable = layers.writable_layer().unwrap();
         assert_eq!(writable.upper, upper);
         assert_eq!(
-            snapshot_accounted_writable_layer(&writable),
-            upper.join(SNAPSHOT_ACCOUNTED_ROOTFS_DIR)
+            snapshot_accounted_writable_layer(&writable, "task-a-42-7"),
+            upper
+                .join(SNAPSHOT_ACCOUNTED_ROOTFS_DIR)
+                .join("task-a-42-7")
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -1261,9 +1283,14 @@ mod tests {
         let volume_root = root.join(MANAGED_VOLUME_EXPORT_DIR);
         fs::create_dir_all(&volume_root).unwrap();
 
-        let guest =
-            prepare_managed_writable_layer(&volume_root, "task-a-42-7", None, &mut Vec::new())
-                .unwrap();
+        let guest = prepare_managed_writable_layer(
+            &volume_root,
+            "task-a-42-7",
+            None,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             guest,
@@ -1569,6 +1596,98 @@ mod tests {
         assert!(!old_target.exists());
         assert!(new_target.is_dir());
         fs::remove_dir_all(&share_root).unwrap();
+    }
+
+    #[test]
+    fn managed_writable_prepare_registers_only_its_snapshot_generation_for_cleanup() {
+        let root = std::env::temp_dir().join(format!(
+            "cubesandbox-snapshot-writable-recreate-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let layer = OverlayWritableLayer {
+            upper: root.join("snapshot-upper"),
+        };
+        let old_export = export_generation("same-task", 42, 1);
+        let new_export = export_generation("same-task", 42, 2);
+        let old_source = snapshot_accounted_writable_layer(&layer, &old_export);
+        let new_source = snapshot_accounted_writable_layer(&layer, &new_export);
+        assert_ne!(old_source, new_source);
+
+        let target = root.join("shared/rootfs/old-attempt");
+        let volume_root = root.join("shared/volumes");
+        let old_volume = volume_root.join(&old_export);
+        for path in [&new_source, &target] {
+            fs::create_dir_all(path).unwrap();
+        }
+        fs::write(new_source.join("must-remain"), b"new-attempt").unwrap();
+        let mut mounts = Vec::new();
+        let mut cleanup_dirs = vec![target.clone(), old_volume];
+
+        // An unprivileged test process normally fails at bind_mount after the
+        // source was created. A privileged process may complete the bind. Both
+        // paths must have registered exactly this generation for cleanup.
+        let _ = prepare_managed_writable_layer(
+            &volume_root,
+            &old_export,
+            Some(&layer),
+            &mut mounts,
+            &mut cleanup_dirs,
+        );
+        assert!(old_source.join("upper").is_dir());
+        assert!(old_source.join("work").is_dir());
+        assert!(cleanup_dirs.contains(&old_source));
+        assert!(!cleanup_dirs.contains(&new_source));
+
+        PreparedRootfs {
+            target: target.clone(),
+            share_root: root.join("shared"),
+            mounts,
+            cleanup_dirs,
+            remove_share_root: false,
+        }
+        .cleanup()
+        .unwrap();
+
+        assert!(!old_source.exists());
+        assert_eq!(
+            fs::read(new_source.join("must-remain")).unwrap(),
+            b"new-attempt"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_snapshot_writable_generation_is_never_claimed_or_removed() {
+        let root = std::env::temp_dir().join(format!(
+            "cubesandbox-snapshot-writable-owned-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let layer = OverlayWritableLayer {
+            upper: root.join("snapshot-upper"),
+        };
+        let export_id = export_generation("same-task", 42, 1);
+        let source = snapshot_accounted_writable_layer(&layer, &export_id);
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("must-remain"), b"existing-attempt").unwrap();
+        let mut mounts = Vec::new();
+        let mut cleanup_dirs = Vec::new();
+
+        let error = prepare_managed_writable_layer(
+            &root.join("shared/volumes"),
+            &export_id,
+            Some(&layer),
+            &mut mounts,
+            &mut cleanup_dirs,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("create snapshot-accounted writable rootfs"));
+        assert!(!cleanup_dirs.contains(&source));
+        assert_eq!(
+            fs::read(source.join("must-remain")).unwrap(),
+            b"existing-attempt"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
