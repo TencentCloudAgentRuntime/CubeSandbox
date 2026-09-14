@@ -16,10 +16,11 @@ builder() {
 case "${1:-runtime}" in
   builder) make builder-image ;;
   cubelet)
-    (cd Cubelet; CGO_ENABLED=0 go build -trimpath -o "$out/bin/cubelet-cri" ./cmd/cubelet-cri) ;;
+    (cd Cubelet; CGO_ENABLED=0 go build -trimpath -o "$out/bin/cubelet-cri" ./cmd/cubelet-cri)
+    (cd Cubelet; CGO_ENABLED=0 go build -trimpath -o "$out/bin/cube-cri-trace-proxy" ./cmd/cube-cri-trace-proxy) ;;
   shim)
-    (cd CubeShim; cargo build --release --locked -p containerd-shim-cube-rs)
-    install CubeShim/target/release/{containerd-shim-cube-rs,cube-vmm-worker,cube-template-builder} "$out/bin/" ;;
+    (cd CubeShim; cargo build --release --locked -p containerd-shim-cube-rs -p cube-trace-forwarder)
+    install CubeShim/target/release/{containerd-shim-cube-rs,cube-vmm-worker,cube-template-builder,cube-trace-forwarder} "$out/bin/" ;;
   agent)
     builder 'cd agent && make && cd /workspace && OUTPUT_DIR=/workspace/_output/cube-agent ONE_CLICK_CUBE_AGENT_BIN=/workspace/agent/target/x86_64-unknown-linux-musl/release/cube-agent bash deploy/one-click/build-agent-ext4.sh'
     cp _output/cube-agent/cube-agent.ext4 "$out/assets/agent" ;;

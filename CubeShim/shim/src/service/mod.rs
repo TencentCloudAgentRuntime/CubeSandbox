@@ -11,6 +11,7 @@ mod srv;
 mod standard_rootfs;
 mod task_srv;
 mod tools;
+pub(crate) mod trace_context;
 mod update_ext;
 pub use runner::run;
 pub use srv::Service;

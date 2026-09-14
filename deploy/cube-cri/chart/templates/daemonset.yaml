@@ -54,6 +54,16 @@ spec:
               value: {{ toJson .Values.guest.kernelCmdlineAppend | quote }}
             - name: CUBE_GUEST_BOOT_TRACE
               value: {{ ternary "1" "0" .Values.guest.bootTrace | quote }}
+            {{- if .Values.tracing.otlpEndpoint }}
+            - name: CUBE_CRI_TRACING_OTLP_ENDPOINT
+              value: {{ .Values.tracing.otlpEndpoint | quote }}
+            - name: CUBE_CRI_TRACING_OTLP_PROTOCOL
+              value: {{ .Values.tracing.protocol | quote }}
+            - name: CUBE_CRI_TRACING_SERVICE_NAME_PREFIX
+              value: {{ .Values.tracing.serviceNamePrefix | quote }}
+            - name: CUBE_CRI_TRACING_SAMPLING_RATIO
+              value: {{ .Values.tracing.samplingRatio | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.daemonSet.resources | nindent 12 }}
           readinessProbe:

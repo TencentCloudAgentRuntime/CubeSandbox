@@ -20,6 +20,13 @@ guest:
   # /data/log/CubeShim/guest-boot/<sandbox-id>.console.log
   bootTrace: false
 
+tracing:
+  # endpoint 为空时 tracing 完全关闭；填写后启用 containerd 与 Cube CRI tracing。
+  otlpEndpoint: ""
+  protocol: http/protobuf
+  serviceNamePrefix: cube-cri
+  samplingRatio: "1.0"
+
 daemonSet:
   hostStatePath: /var/lib/cube-cri/installer
   updateStrategy:

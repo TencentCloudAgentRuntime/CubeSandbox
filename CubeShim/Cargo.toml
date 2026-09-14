@@ -2,7 +2,8 @@
 members = [
     "shim",
     "protoc",
-    "cube-runtime"
+    "cube-runtime",
+    "trace-forwarder"
 ]
 resolver = "2"
 

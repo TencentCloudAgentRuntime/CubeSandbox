@@ -35,6 +35,7 @@ use crate::container::rootfs::ANNO_CONTAINER_CUSTOM_FILE;
 use crate::log::{stat_defer, stat_defer::StatDefer, Log};
 use crate::metrics;
 use crate::sandbox::config::{Config, ANNO_APP_SNAPSHOT_CREATE};
+use crate::service::trace_context::TraceContext;
 use crate::{infof, warnf};
 
 pub const GUEST_DEV_SHM: &str = "/run/cube-containers/sandbox/shm";
@@ -568,7 +569,7 @@ pub struct Container {
 
 impl Container {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         sandbox_id: String,
         real_id: String,
         spec: Spec,
@@ -579,6 +580,7 @@ impl Container {
         tx_containerd: Sender<(String, Box<dyn MessageDyn>)>,
         app_snapshot: bool,
         resources_v2: Option<Vec<u8>>,
+        trace_context: Option<&TraceContext>,
     ) -> CResult<Self> {
         let mut id = real_id.clone();
         if let Some(annos) = spec.annotations().as_ref() {
@@ -601,7 +603,9 @@ impl Container {
             log,
             sb_conf,
             info,
-            ctx: context::with_timeout(1000 * 1000 * 1000 * 10),
+            ctx: trace_context
+                .map(|trace| trace.apply_ttrpc(context::with_timeout(1000 * 1000 * 1000 * 10)))
+                .unwrap_or_else(|| context::with_timeout(1000 * 1000 * 1000 * 10)),
             state: None,
             execs: Arc::new(Mutex::new(HashMap::new())),
             tx_containerd,
@@ -611,6 +615,13 @@ impl Container {
             operation: ContainerOperationGate::new(),
         };
         Ok(c)
+    }
+
+    pub(crate) fn set_trace_context(&mut self, trace_context: Option<TraceContext>) {
+        self.ctx = trace_context
+            .as_ref()
+            .map(|trace| trace.apply_ttrpc(context::with_timeout(1000 * 1000 * 1000 * 10)))
+            .unwrap_or_else(|| context::with_timeout(1000 * 1000 * 1000 * 10));
     }
 
     pub(crate) async fn acquire_operation(&self) -> tokio::sync::OwnedSemaphorePermit {

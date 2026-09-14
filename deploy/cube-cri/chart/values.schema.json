@@ -39,6 +39,16 @@
         "tolerations": { "type": "array" }
       }
     },
+    "tracing": {
+      "type": "object",
+      "required": ["otlpEndpoint", "protocol", "serviceNamePrefix", "samplingRatio"],
+      "properties": {
+        "otlpEndpoint": { "type": "string", "pattern": "^\\S*$" },
+        "protocol": { "enum": ["http/protobuf", "grpc"] },
+        "serviceNamePrefix": { "type": "string", "pattern": "^\\S+$" },
+        "samplingRatio": { "type": "string", "pattern": "^(0(\\.\\d+)?|1(\\.0+)?)$" }
+      }
+    },
     "runtimeClass": {
       "type": "object",
       "required": ["enabled", "name", "handler", "nodeSelector", "overhead"],

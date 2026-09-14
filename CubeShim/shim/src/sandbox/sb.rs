@@ -45,6 +45,7 @@ use crate::hypervisor::snapshot::{enable_snapshot, SnapshotInfo};
 use crate::log::{stat_defer, Log};
 use crate::metrics;
 use crate::sandbox::config;
+use crate::service::trace_context::TraceContext;
 use crate::{debugf, errf, infof, warnf};
 
 //use tokio_uring::fs::UnixStream;
@@ -144,6 +145,7 @@ pub struct SandBox {
     spec: Spec,
     conf: config::Config,
     pub(super) ctx: Context,
+    trace_context: Option<TraceContext>,
     ch: Option<Arc<Mutex<CH::CubeHypervisor>>>,
     containers: Arc<Mutex<HashMap<String, Container>>>,
     pub(super) log: Log,
@@ -189,6 +191,7 @@ impl SandBox {
             spec: Spec::default(),
             conf: config::Config::default(),
             ctx: context::with_timeout(1000 * 1000 * 1000 * 3),
+            trace_context: None,
             ch: Some(Arc::new(Mutex::new(ch))),
             containers: Arc::new(Mutex::new(HashMap::new())),
             log,
@@ -208,6 +211,14 @@ impl SandBox {
 
     pub fn app_snapshot_create(&self) -> bool {
         self.conf.app_snapshot_create
+    }
+
+    pub(crate) fn set_trace_context(&mut self, trace_context: Option<TraceContext>) {
+        self.ctx = trace_context
+            .as_ref()
+            .map(|trace| trace.apply_ttrpc(context::with_timeout(1000 * 1000 * 1000 * 3)))
+            .unwrap_or_else(|| context::with_timeout(1000 * 1000 * 1000 * 3));
+        self.trace_context = trace_context;
     }
 
     pub fn app_snapshot_restore(&self) -> bool {
@@ -1467,12 +1478,13 @@ impl SandBox {
         Ok(())
     }
 
-    pub async fn create_container(
+    pub(crate) async fn create_container(
         &mut self,
         id: String,
         spec: Spec,
         info: ContainerInfo,
         resources_v2: Option<Vec<u8>>,
+        trace_context: Option<TraceContext>,
     ) -> CResult<()> {
         let mut containers = self.containers.lock().await;
         if containers.contains_key(&id) {
@@ -1501,6 +1513,7 @@ impl SandBox {
             self.tx_containerd.clone(),
             self.app_snapshot_create(),
             resources_v2,
+            trace_context.as_ref().or(self.trace_context.as_ref()),
         ) {
             Ok(container) => container,
             Err(error) => {
@@ -1517,7 +1530,11 @@ impl SandBox {
         Ok(())
     }
 
-    pub async fn start_container(&self, id: &String) -> Result<()> {
+    pub(crate) async fn start_container(
+        &self,
+        id: &String,
+        trace_context: Option<TraceContext>,
+    ) -> Result<()> {
         let mut container = {
             let containers = self.containers.lock().await;
             match containers.get(id) {
@@ -1526,6 +1543,9 @@ impl SandBox {
             }
         };
         let _operation = container.acquire_operation().await;
+        if let Some(trace_context) = trace_context.as_ref().or(self.trace_context.as_ref()) {
+            container.set_trace_context(Some(trace_context.clone()));
+        }
         container
             .start_container()
             .await

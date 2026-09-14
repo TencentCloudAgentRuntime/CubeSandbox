@@ -44,6 +44,7 @@ use crate::service::host_cgroup::{
 };
 use crate::service::sandbox_srv::{SandboxLifecycle, TaskMode};
 use crate::service::standard_rootfs::{self, PreparedRootfs};
+use crate::service::trace_context::TraceContext;
 use crate::service::update_ext;
 use crate::{debugf, errf, infof, warnf};
 const MODULE: &str = "Shim";
@@ -664,10 +665,11 @@ impl TaskService {
 impl Task for TaskService {
     async fn create(
         &self,
-        _ctx: &TtrpcContext,
+        ctx: &TtrpcContext,
         req: api::CreateTaskRequest,
     ) -> TtrpcResult<api::CreateTaskResponse> {
         let mut total = metrics::OperationTimer::new("shim", "TaskCreate");
+        let trace_context = TraceContext::from_ttrpc(ctx);
         infof!(self.log, "create req start");
         let start = Instant::now();
         let mut stat = stat_defer::StatDefer::new(
@@ -901,7 +903,13 @@ impl Task for TaskService {
                 ..Default::default()
             };
             if let Err(e) = sb
-                .create_container(req.id.clone(), spec, info, resources_v2)
+                .create_container(
+                    req.id.clone(),
+                    spec,
+                    info,
+                    resources_v2,
+                    trace_context.clone(),
+                )
                 .await
             {
                 let message = format!("Create container failed:{}", e);
@@ -966,10 +974,11 @@ impl Task for TaskService {
     }
     async fn start(
         &self,
-        _ctx: &TtrpcContext,
+        ctx: &TtrpcContext,
         req: api::StartRequest,
     ) -> TtrpcResult<api::StartResponse> {
         let mut total = metrics::OperationTimer::new("shim", "TaskStart");
+        let trace_context = TraceContext::from_ttrpc(ctx);
         let start_at = Instant::now();
         infof!(
             self.log,
@@ -987,10 +996,12 @@ impl Task for TaskService {
             return Err(Others(format!("sandbox not in normal state")));
         }
         if req.exec_id().is_empty() {
-            sb.start_container(&req.id).await.map_err(|e| {
-                errf!(self.log, "Start container failed:{}", e);
-                e
-            })?;
+            sb.start_container(&req.id, trace_context)
+                .await
+                .map_err(|e| {
+                    errf!(self.log, "Start container failed:{}", e);
+                    e
+                })?;
 
             let event = TaskStart {
                 container_id: req.id.clone(),

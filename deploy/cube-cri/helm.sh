@@ -47,6 +47,12 @@ elif h "--force "; then
 fi
 [[ -z ${CUBE_CRI_IMAGE_PULL_SECRET:-} ]] || args+=(--set-string "imagePullSecrets[0].name=$CUBE_CRI_IMAGE_PULL_SECRET")
 [[ -z ${CUBE_CRI_HELM_VALUES:-} ]] || args+=(-f "$CUBE_CRI_HELM_VALUES")
+if [[ -n ${CUBE_CRI_TRACING_OTLP_ENDPOINT:-} ]]; then
+  args+=(--set-string "tracing.otlpEndpoint=$CUBE_CRI_TRACING_OTLP_ENDPOINT")
+  args+=(--set-string "tracing.protocol=${CUBE_CRI_TRACING_OTLP_PROTOCOL:-http/protobuf}")
+  args+=(--set-string "tracing.serviceNamePrefix=${CUBE_CRI_TRACING_SERVICE_NAME_PREFIX:-cube-cri}")
+  args+=(--set-string "tracing.samplingRatio=${CUBE_CRI_TRACING_SAMPLING_RATIO:-1.0}")
+fi
 
 helm "${args[@]}"
 k -n "$namespace" rollout status "daemonset/$release-cube-cri" --timeout="$timeout"

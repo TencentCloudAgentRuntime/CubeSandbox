@@ -31,6 +31,7 @@ use tonic::{Request, Status};
 use tower::service_fn;
 
 use crate::service::host_cgroup::{lifecycle_from_env, RuntimeOwnerState, RuntimeResourceOwner};
+use crate::service::trace_context::TraceContext;
 
 const API_VERSION: u32 = 1;
 const FD_PROTOCOL_VERSION: u32 = 1;
@@ -676,7 +677,7 @@ impl RuntimeLease {
     }
 
     async fn release_at(&self, cleanup_path: &Path) -> Result<(), String> {
-        let mut client = RuntimeResourceClient::connect(&self.endpoint).await?;
+        let mut client = RuntimeResourceClient::connect(&self.endpoint, None).await?;
         let request = ReleaseSandboxRequest {
             sandbox_id: self.sandbox.sandbox_id.clone(),
             lease_id: self.sandbox.lease_id.clone(),
@@ -701,7 +702,7 @@ async fn inspect_sandbox(
     endpoint: &str,
     sandbox_id: &str,
 ) -> Result<InspectSandboxResponse, String> {
-    let mut client = RuntimeResourceClient::connect(endpoint).await?;
+    let mut client = RuntimeResourceClient::connect(endpoint, None).await?;
     client
         .unary(
             InspectSandboxRequest {
@@ -804,7 +805,7 @@ pub(crate) async fn release_external_owner(owner: &RuntimeResourceOwner) -> Resu
         generation,
         ..Default::default()
     };
-    let mut client = RuntimeResourceClient::connect(endpoint).await?;
+    let mut client = RuntimeResourceClient::connect(endpoint, None).await?;
     let response: ReleaseSandboxResponse = client
         .unary(
             ReleaseSandboxRequest {
@@ -985,10 +986,11 @@ where
 
 struct RuntimeResourceClient {
     inner: tonic::client::Grpc<Channel>,
+    trace_context: Option<TraceContext>,
 }
 
 impl RuntimeResourceClient {
-    async fn connect(path: &str) -> Result<Self, String> {
+    async fn connect(path: &str, trace_context: Option<TraceContext>) -> Result<Self, String> {
         if !Path::new(path).is_absolute() {
             return Err(format!("RuntimeResource endpoint must be absolute: {path}"));
         }
@@ -1005,6 +1007,7 @@ impl RuntimeResourceClient {
             .map_err(|error| format!("connect RuntimeResource {path}: {error}"))?;
         Ok(Self {
             inner: tonic::client::Grpc::new(channel),
+            trace_context,
         })
     }
 
@@ -1018,12 +1021,12 @@ impl RuntimeResourceClient {
             .await
             .map_err(|error| format!("RuntimeResource is not ready: {error}"))?;
         let codec = tonic_prost::ProstCodec::default();
+        let mut request = Request::new(request);
+        if let Some(trace_context) = self.trace_context.as_ref() {
+            trace_context.inject_tonic(&mut request)?;
+        }
         self.inner
-            .unary(
-                Request::new(request),
-                PathAndQuery::from_static(path),
-                codec,
-            )
+            .unary(request, PathAndQuery::from_static(path), codec)
             .await
             .map(tonic::Response::into_inner)
             .map_err(status_string)
@@ -1362,6 +1365,7 @@ pub(crate) async fn prepare(
     config: &CriPodSandboxConfig,
     plan: &RuntimePreparePlan,
     spec: &mut Spec,
+    trace_context: Option<TraceContext>,
 ) -> Result<RuntimeLease, String> {
     let started = Instant::now();
     crate::cube_perf!(
@@ -1369,7 +1373,7 @@ pub(crate) async fn prepare(
         sandbox_id,
         crate::common::utils::Utils::monotonic_time_micros()
     );
-    let result = prepare_inner(sandbox_id, netns_path, config, plan, spec).await;
+    let result = prepare_inner(sandbox_id, netns_path, config, plan, spec, trace_context).await;
     crate::cube_perf!(
         "cube_perf component=shim operation=create phase=runtime-resource-end sandbox_id={} ts_mono_us={} duration_us={} success={}",
         sandbox_id,
@@ -1386,11 +1390,12 @@ async fn prepare_inner(
     config: &CriPodSandboxConfig,
     plan: &RuntimePreparePlan,
     spec: &mut Spec,
+    trace_context: Option<TraceContext>,
 ) -> Result<RuntimeLease, String> {
     let phase_started = Instant::now();
     let endpoint = std::env::var("CUBE_RUNTIME_RESOURCE_ENDPOINT")
         .unwrap_or_else(|_| DEFAULT_ENDPOINT.to_string());
-    let mut client = RuntimeResourceClient::connect(&endpoint).await?;
+    let mut client = RuntimeResourceClient::connect(&endpoint, trace_context).await?;
     let capabilities: GetCapabilitiesResponse = client
         .unary(
             GetCapabilitiesRequest {

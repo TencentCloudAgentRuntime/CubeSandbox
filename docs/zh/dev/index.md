@@ -10,6 +10,7 @@
 - [Kubernetes RuntimeClass PoC 开发计划](./kubernetes-runtime-integration-development)——按 S0～S6 拆分实现目标、验收标准、代码组织、handoff 和未决问题记录方式。
 - [Cube CRI 复用现有 Template 的一秒启动方案](./kubernetes-runtime-template-fastpath-s6.2)——模板全生命周期、Pod 复用条件与生命周期、CRI 快路径改造及验收。
 - [Cube CRI 运行时监控方案](./cube-cri-observability)——定义内部指标、Shim 上报、Prometheus 采集、看板、告警和实施验收。
+- [Cube CRI 全链路 Tracing 方案](./cube-cri-full-link-tracing)——定义 kubelet/CRI、RuntimeResource、Shim、VMM 和 Guest Agent 的 trace context 传播、OTel 接入和瀑布流验收。
 
 ## 约定
 

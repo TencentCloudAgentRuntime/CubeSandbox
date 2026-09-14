@@ -31,6 +31,7 @@ use crate::service::host_cgroup::{
 };
 use crate::service::runtime_resource::{self, RuntimeLease};
 use crate::service::task_srv::TaskService;
+use crate::service::trace_context::TraceContext;
 
 const READY: &str = "SANDBOX_READY";
 const NOT_READY: &str = "SANDBOX_NOTREADY";
@@ -266,12 +267,20 @@ impl SandboxService {
         netns_path: String,
         config: runtime_resource::CriPodSandboxConfig,
         plan: runtime_resource::RuntimePreparePlan,
+        trace_context: Option<TraceContext>,
         publisher: CreatePublisherGuard,
     ) {
         let total_started = Instant::now();
         let phase_started = Instant::now();
-        let prepared =
-            runtime_resource::prepare(&self.id, &netns_path, &config, &plan, &mut spec).await;
+        let prepared = runtime_resource::prepare(
+            &self.id,
+            &netns_path,
+            &config,
+            &plan,
+            &mut spec,
+            trace_context,
+        )
+        .await;
         crate::cube_perf!(
             "cube_perf component=shim operation=create phase=runtime-resource sandbox_id={} ts_mono_us={} duration_us={} success={}",
             self.id,
@@ -1124,10 +1133,11 @@ fn encode_sandbox_spec(spec: &Spec) -> Result<Any, String> {
 impl Sandbox for SandboxService {
     async fn create_sandbox(
         &self,
-        _ctx: &TtrpcContext,
+        ctx: &TtrpcContext,
         req: api::CreateSandboxRequest,
     ) -> TtrpcResult<api::CreateSandboxResponse> {
         let total_started = Instant::now();
+        let trace_context = TraceContext::from_ttrpc(ctx);
         self.validate_id(&req.sandbox_id)?;
         if req.bundle_path.is_empty() || !Path::new(&req.bundle_path).is_absolute() {
             return Err(rpc_error(
@@ -1260,6 +1270,7 @@ impl Sandbox for SandboxService {
                         req.netns_path,
                         config,
                         plan,
+                        trace_context,
                         publisher,
                     ));
                 }
@@ -1318,10 +1329,11 @@ impl Sandbox for SandboxService {
 
     async fn start_sandbox(
         &self,
-        _ctx: &TtrpcContext,
+        ctx: &TtrpcContext,
         req: api::StartSandboxRequest,
     ) -> TtrpcResult<api::StartSandboxResponse> {
         let total_started = Instant::now();
+        let trace_context = TraceContext::from_ttrpc(ctx);
         self.validate_id(&req.sandbox_id)?;
         let should_start = {
             let mut state = self.lifecycle.state.lock().await;
@@ -1340,6 +1352,7 @@ impl Sandbox for SandboxService {
             }
         };
         if should_start {
+            self.sandbox.lock().await.set_trace_context(trace_context);
             tokio::spawn(self.clone().run_start());
         }
         let result = self.wait_for_start().await;

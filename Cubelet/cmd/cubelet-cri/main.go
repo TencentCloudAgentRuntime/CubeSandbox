@@ -21,6 +21,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/crimetrics"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/oteltrace"
 	adapter "github.com/tencentcloud/CubeSandbox/Cubelet/plugins/cube/runtime_resource"
 	runtime "github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
@@ -46,6 +47,22 @@ func run() error {
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+	traceConfig, err := oteltrace.FromEnv("cubelet-cri")
+	if err != nil {
+		return err
+	}
+	shutdownTracing, err := oteltrace.Setup(ctx, traceConfig)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := oteltrace.Shutdown(shutdownTracing); err != nil {
+			log.Printf("OpenTelemetry shutdown: %v", err)
+		}
+	}()
+	if traceConfig.Enabled() {
+		log.Printf("OpenTelemetry tracing enabled: endpoint=%s protocol=%s service=%s sample_ratio=%.3f", traceConfig.Endpoint, traceConfig.Protocol, traceConfig.ServiceName, traceConfig.SampleRatio)
+	}
 	for _, dir := range []string{*root, filepath.Dir(*socket), *reaper} {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return err
@@ -137,7 +154,8 @@ func run() error {
 	if err = os.Chmod(*socket, 0600); err != nil {
 		return err
 	}
-	options := make([]grpc.ServerOption, 0, 1)
+	options := make([]grpc.ServerOption, 0, 2)
+	options = append(options, oteltrace.GRPCServerOption(traceConfig)...)
 	if metrics != nil {
 		options = append(options, grpc.UnaryInterceptor(metrics.UnaryInterceptor))
 	}

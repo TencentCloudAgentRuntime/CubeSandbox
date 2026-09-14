@@ -87,6 +87,23 @@ socket_dir = '/custom/shim'
         self.assertEqual(manager['socket_dir'], '/custom/shim')
         self.assertEqual(module.configure(result, '2'), result)
 
+    def test_tracing_is_explicit_and_enables_agent_trace(self):
+        source = self.source(module.CRI2, 3)
+        default_manager = tomllib.loads(module.configure(source, '2'))['plugins'][module.SHIM_MANAGER]
+        self.assertNotIn('CUBE_CRI_TRACING_OTLP_ENDPOINT=http://127.0.0.1:4318', default_manager['env'])
+        self.assertNotIn('CUBE_GUEST_KERNEL_CMDLINE_APPEND=["agent.trace=1"]', default_manager['env'])
+        self.assertEqual(tomllib.loads(module.configure(source, '2'))['grpc']['address'], '/custom/containerd.sock')
+
+        tracing = module.tracing_config('http://127.0.0.1:4318', 'http/protobuf', 'cube-cri-containerd', '1.0')
+        manager = tomllib.loads(module.configure(source, '2', tracing=tracing))['plugins'][module.SHIM_MANAGER]
+        self.assertIn('CUBE_CRI_TRACING_OTLP_ENDPOINT=http://127.0.0.1:4318', manager['env'])
+        self.assertIn('CUBE_GUEST_KERNEL_CMDLINE_APPEND=["agent.trace=1"]', manager['env'])
+        traced = tomllib.loads(module.configure(source, '2', tracing=tracing, grpc_address=module.proxy_backend_address('/custom/containerd.sock')))
+        self.assertEqual(traced['grpc']['address'], '/custom/containerd-real.sock')
+        self.assertEqual(module.proxy_addresses('/custom/containerd.sock'), ('/custom/containerd.sock', '/custom/containerd-real.sock'))
+        self.assertEqual(module.proxy_addresses('/custom/containerd-real.sock'), ('/custom/containerd.sock', '/custom/containerd-real.sock'))
+        self.assertEqual(module.proxy_addresses('/custom/containerd-real-real.sock'), ('/custom/containerd.sock', '/custom/containerd-real.sock'))
+
     def test_preserves_launch_overrides(self):
         for args in [['-c', '/old/config', '--root', '/custom/root', '--state=/custom/state'], ['--config=/old/config', '-a', '/custom/socket']]:
             result = module.with_config(args, '/new/config')

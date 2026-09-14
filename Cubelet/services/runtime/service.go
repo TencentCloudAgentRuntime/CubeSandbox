@@ -19,8 +19,13 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/kmutex"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/monotime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/crimetrics"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/tracebridge"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	otelcodes "go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -180,6 +185,18 @@ func (s *Service) PrepareSandbox(ctx context.Context, request *runtimev1.Prepare
 		generation = request.GetGeneration()
 		podUID = request.GetPod().GetUid()
 	}
+	if podUID != "" {
+		ctx = tracebridge.ContextForPod(ctx, podUID)
+	}
+	ctx, span := startRuntimeSpan(ctx, "cubelet-cri.runtime_resource.PrepareSandbox",
+		attribute.String("sandbox.id", sandboxID),
+		attribute.String("pod.uid", podUID),
+		attribute.Int64("sandbox.generation", int64(generation)),
+	)
+	defer func() {
+		endRuntimeSpan(span, err)
+		span.End()
+	}()
 	defer func() {
 		if !trace.Enabled() {
 			return
@@ -195,30 +212,44 @@ func (s *Service) PrepareSandbox(ctx context.Context, request *runtimev1.Prepare
 	if err := validatePrepare(request); err != nil {
 		return nil, err
 	}
-	if err := s.lockOperation(ctx, request.GetSandboxId()); err != nil {
+	stageCtx, stageSpan := startRuntimeSpan(ctx, "cubelet-cri.runtime_resource.operation_lock")
+	if err := s.lockOperation(stageCtx, request.GetSandboxId()); err != nil {
+		endRuntimeSpan(stageSpan, err)
+		stageSpan.End()
 		return nil, status.FromContextError(err).Err()
 	}
+	endRuntimeSpan(stageSpan, nil)
+	stageSpan.End()
 	defer s.operations.Unlock(request.GetSandboxId())
 	timings.operationLock = time.Since(stageStart)
 	stageStart = time.Now()
+	_, stageSpan = startRuntimeSpan(ctx, "cubelet-cri.runtime_resource.digest")
 	digest, err := desiredDigest(request)
+	endRuntimeSpan(stageSpan, err)
+	stageSpan.End()
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	timings.digest = time.Since(stageStart)
 	stageStart = time.Now()
+	stageCtx, stageSpan = startRuntimeSpan(ctx, "cubelet-cri.runtime_resource.coordinator_prepare")
 	result, err := s.coordinator.Prepare(state.PrepareRequest{
 		SandboxID: request.GetSandboxId(), Generation: request.GetGeneration(),
 		IdempotencyKey: request.GetIdempotencyKey(), PayloadDigest: digest,
 		PodUID: request.GetPod().GetUid(), Trace: trace,
 	})
+	endRuntimeSpan(stageSpan, err)
+	stageSpan.End()
 	if err != nil {
 		return nil, err
 	}
 	timings.coordinator = time.Since(stageStart)
 
 	stageStart = time.Now()
-	prepared, err := s.adapter.Prepare(ctx, request, result.Lease)
+	stageCtx, stageSpan = startRuntimeSpan(ctx, "cubelet-cri.runtime_resource.adapter_prepare")
+	prepared, err := s.adapter.Prepare(stageCtx, request, result.Lease)
+	endRuntimeSpan(stageSpan, err)
+	stageSpan.End()
 	if err != nil {
 		if rollbackErr := s.cleanupFailedPrepare(request, result.Lease); rollbackErr != nil {
 			return nil, status.Errorf(codes.Internal, "prepare resources: %v; rollback: %v", err, rollbackErr)
@@ -227,15 +258,23 @@ func (s *Service) PrepareSandbox(ctx context.Context, request *runtimev1.Prepare
 	}
 	timings.adapter = time.Since(stageStart)
 	stageStart = time.Now()
+	_, stageSpan = startRuntimeSpan(ctx, "cubelet-cri.runtime_resource.validate")
 	if err := validatePrepared(request, prepared); err != nil {
+		endRuntimeSpan(stageSpan, err)
+		stageSpan.End()
 		if rollbackErr := s.cleanupFailedPrepare(request, result.Lease); rollbackErr != nil {
 			return nil, status.Errorf(codes.Internal, "validate prepared resources: %v; rollback: %v", err, rollbackErr)
 		}
 		return nil, status.Errorf(codes.Internal, "validate prepared resources: %v", err)
 	}
+	endRuntimeSpan(stageSpan, nil)
+	stageSpan.End()
 	timings.validate = time.Since(stageStart)
 	stageStart = time.Now()
+	_, stageSpan = startRuntimeSpan(ctx, "cubelet-cri.runtime_resource.mark_ready")
 	lease, err := s.coordinator.MarkReadyAndPublish(request.GetSandboxId(), request.GetGeneration(), result.Lease.LeaseID, prepared.GetNetwork().GetNetworkHandle(), trace)
+	endRuntimeSpan(stageSpan, err)
+	stageSpan.End()
 	if err != nil {
 		if rollbackErr := s.cleanupFailedPrepare(request, result.Lease); rollbackErr != nil {
 			return nil, status.Errorf(codes.Internal, "mark RuntimeResource ready: %v; rollback: %v", err, rollbackErr)
@@ -424,4 +463,17 @@ func networkHandle(prepared *runtimev1.PreparedSandbox) string {
 		return ""
 	}
 	return prepared.GetNetwork().GetNetworkHandle()
+}
+
+func startRuntimeSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, oteltrace.Span) {
+	return otel.Tracer("github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime").Start(ctx, name, oteltrace.WithAttributes(attrs...))
+}
+
+func endRuntimeSpan(span oteltrace.Span, err error) {
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(otelcodes.Error, err.Error())
+		return
+	}
+	span.SetStatus(otelcodes.Ok, "")
 }

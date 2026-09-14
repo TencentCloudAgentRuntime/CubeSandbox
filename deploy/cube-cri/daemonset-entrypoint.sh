@@ -5,7 +5,11 @@ state=/var/lib/cube-cri/installer
 base_version=$(cat /installer/version)
 guest_kernel_cmdline_append=${CUBE_GUEST_KERNEL_CMDLINE_APPEND:-[]}
 guest_boot_trace=${CUBE_GUEST_BOOT_TRACE:-0}
-version=$(printf '%s\n%s\n%s\n' "$base_version" "$guest_kernel_cmdline_append" "$guest_boot_trace" | sha256sum | cut -d ' ' -f1)
+tracing_endpoint=${CUBE_CRI_TRACING_OTLP_ENDPOINT:-}
+tracing_protocol=${CUBE_CRI_TRACING_OTLP_PROTOCOL:-http/protobuf}
+tracing_service_prefix=${CUBE_CRI_TRACING_SERVICE_NAME_PREFIX:-cube-cri}
+tracing_sampling_ratio=${CUBE_CRI_TRACING_SAMPLING_RATIO:-1.0}
+version=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$base_version" "$guest_kernel_cmdline_append" "$guest_boot_trace" "$tracing_endpoint" "$tracing_protocol" "$tracing_service_prefix" "$tracing_sampling_ratio" | sha256sum | cut -d ' ' -f1)
 mode=${CUBE_CRI_MODE:-runtime}
 node_name=${NODE_NAME:?NODE_NAME is required}
 api_server="https://${KUBERNETES_SERVICE_HOST:?KUBERNETES_SERVICE_HOST is required}:${KUBERNETES_SERVICE_PORT_HTTPS:-443}"
@@ -50,6 +54,14 @@ if ! pvm_ready || host test -f /var/lib/cube-cri/pvm/reboot-request || { [ "$mod
     cp /installer/runtime.tar.gz /installer/daemonset-install.sh /installer/daemonset-pvm.sh "/host-state/$POD_UID/"
     printf '%s' "$guest_kernel_cmdline_append" > "/host-state/$POD_UID/guest-kernel-cmdline-append.json"
     if [ "$guest_boot_trace" = 1 ]; then touch "/host-state/$POD_UID/guest-boot-trace.enabled"; fi
+    if [ -n "$tracing_endpoint" ]; then
+      {
+        printf 'CUBE_CRI_TRACING_OTLP_ENDPOINT=%s\n' "$tracing_endpoint"
+        printf 'CUBE_CRI_TRACING_OTLP_PROTOCOL=%s\n' "$tracing_protocol"
+        printf 'CUBE_CRI_TRACING_SERVICE_NAME_PREFIX=%s\n' "$tracing_service_prefix"
+        printf 'CUBE_CRI_TRACING_SAMPLING_RATIO=%s\n' "$tracing_sampling_ratio"
+      } > "/host-state/$POD_UID/otel.env"
+    fi
     if ! pvm_ready && [ ! -s "/host-state/$POD_UID/pvm-host.rpm" ]; then cp /installer/pvm-host.rpm "/host-state/$POD_UID/"; fi
     host systemd-run --collect --unit "$unit" --property=Type=oneshot --property=TimeoutStartSec=20min \
       /bin/bash -c 'bash "$1/daemonset-install.sh" "$1" "$2" "$3" > "$1/install.log" 2>&1; rc=$?; printf "%s\n" "$rc" > "$1/install.exit"; exit "$rc"' bash "$src" "$version" "$mode"
