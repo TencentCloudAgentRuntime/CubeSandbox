@@ -1,7 +1,5 @@
 # Cube CRI e2e-framework 测试
 
-迁移自 `agc-cubesandbox-beta/testsuite/e2e-framework`。所有 Cube 用例均执行 `cold` 和 `auto` 两次；runc 对照用例只执行一次。
-
 从仓库根目录运行（自动加载 `local.env`，可用 `CUBE_CRI_ENV` 指定配置文件）：
 
 ```bash
