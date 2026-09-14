@@ -142,7 +142,12 @@ type HostDevice struct {
 }
 
 // GetHostDevice validates the configured host interface and captures the
-// addresses CubeVS needs for SNAT and L2 forwarding.
+// addresses CubeVS needs for SNAT and L2 forwarding. The uplink NIC may carry
+// multiple IPv4 addresses (cloud hosts commonly stack secondary/alias
+// addresses), so rather than failing it selects the primary one. The returned
+// IPMask is the selected address's own mask, which becomes the eBPF NodeIPMask
+// (the on-link / bpf_fib_lookup view), so the selected address entry should
+// carry the intended subnet prefix.
 func GetHostDevice(ifName string) (*HostDevice, error) {
 	link, err := netlinkLinkByName(ifName)
 	if err != nil {
@@ -152,8 +157,9 @@ func GetHostDevice(ifName string) (*HostDevice, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(addrs) != 1 {
-		return nil, fmt.Errorf("ipv4 address on %s is not unique", ifName)
+	addr, err := selectPrimaryIPv4Addr(ifName, addrs)
+	if err != nil {
+		return nil, err
 	}
 	gwMac, err := GetGatewayMacAddr(ifName)
 	if err != nil {
@@ -166,11 +172,49 @@ func GetHostDevice(ifName string) (*HostDevice, error) {
 	return &HostDevice{
 		Index:      link.Attrs().Index,
 		Name:       link.Attrs().Name,
-		IP:         addrs[0].IP,
-		IPMask:     addrs[0].Mask,
+		IP:         addr.IP,
+		IPMask:     addr.Mask,
 		Mac:        link.Attrs().HardwareAddr,
 		GatewayMac: gatewayMac,
 	}, nil
+}
+
+// selectPrimaryIPv4Addr picks the primary IPv4 address from a NIC that may
+// carry several (cloud hosts commonly stack secondary/alias addresses). It
+// prefers the first global-scope, non-secondary, non-deprecated address and
+// falls back to the first address so a NIC with no primary still works.
+func selectPrimaryIPv4Addr(ifName string, addrs []netlink.Addr) (netlink.Addr, error) {
+	if len(addrs) == 0 {
+		return netlink.Addr{}, fmt.Errorf("ipv4 address not found on %s", ifName)
+	}
+	for _, a := range addrs {
+		if isPrimaryGlobalIPv4(a) {
+			return a, nil
+		}
+	}
+	return addrs[0], nil
+}
+
+// isPrimaryGlobalIPv4 reports whether a is a global-scope primary address,
+// excluding secondary/deprecated and loopback addresses. Addr.Flags is populated
+// by vishvananda/netlink v1.3.1 from the kernel's IFA_FLAGS attribute
+// (addr_linux.go parseAddr), so IFA_F_SECONDARY / IFA_F_DEPRECATED are reliably
+// set; if that dependency ever regresses, the secondary/deprecated skip would
+// silently no-op while the unit tests (which set Flags by hand) stay green.
+func isPrimaryGlobalIPv4(a netlink.Addr) bool {
+	if a.IPNet == nil {
+		return false
+	}
+	if a.IP.To4() == nil || a.IP.IsLoopback() {
+		return false
+	}
+	if a.Scope != unix.RT_SCOPE_UNIVERSE {
+		return false
+	}
+	if a.Flags&unix.IFA_F_SECONDARY != 0 || a.Flags&unix.IFA_F_DEPRECATED != 0 {
+		return false
+	}
+	return true
 }
 
 // GetGatewayMacAddr resolves the MAC address of the default gateway on ifName

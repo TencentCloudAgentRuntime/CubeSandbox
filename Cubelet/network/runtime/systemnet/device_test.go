@@ -580,3 +580,95 @@ func TestGetGatewayMacAddrIncludesProbeErrorInFinalError(t *testing.T) {
 	assert.Contains(t, err.Error(), "no route to host", "final error should include the probe error message")
 	assert.ErrorIs(t, err, errGatewayMacNotFound)
 }
+
+// v4Addr builds a netlink.Addr for the given IPv4 + prefix, overriding scope
+// and flags so selection can be exercised deterministically.
+func v4Addr(ip string, maskBits, scope, flags int) netlink.Addr {
+	return netlink.Addr{
+		IPNet: &net.IPNet{IP: net.ParseIP(ip).To4(), Mask: net.CIDRMask(maskBits, 32)},
+		Scope: scope,
+		Flags: flags,
+	}
+}
+
+func TestSelectPrimaryIPv4AddrSingle(t *testing.T) {
+	addrs := []netlink.Addr{v4Addr("10.0.0.5", 24, unix.RT_SCOPE_UNIVERSE, 0)}
+	got, err := selectPrimaryIPv4Addr("ens3", addrs)
+	require.NoError(t, err)
+	assert.True(t, got.IP.Equal(net.ParseIP("10.0.0.5")))
+}
+
+func TestSelectPrimaryIPv4AddrPrefersPrimary(t *testing.T) {
+	addrs := []netlink.Addr{
+		v4Addr("10.0.0.5", 24, unix.RT_SCOPE_UNIVERSE, unix.IFA_F_SECONDARY),
+		v4Addr("192.168.1.10", 24, unix.RT_SCOPE_UNIVERSE, 0),
+	}
+	got, err := selectPrimaryIPv4Addr("ens3", addrs)
+	require.NoError(t, err)
+	assert.True(t, got.IP.Equal(net.ParseIP("192.168.1.10")),
+		"the primary (non-secondary) address should be selected")
+}
+
+func TestSelectPrimaryIPv4AddrFallsBackToFirst(t *testing.T) {
+	addrs := []netlink.Addr{
+		v4Addr("10.0.0.5", 24, unix.RT_SCOPE_UNIVERSE, unix.IFA_F_SECONDARY),
+		v4Addr("192.168.1.10", 24, unix.RT_SCOPE_UNIVERSE, unix.IFA_F_SECONDARY),
+	}
+	got, err := selectPrimaryIPv4Addr("ens3", addrs)
+	require.NoError(t, err)
+	assert.True(t, got.IP.Equal(net.ParseIP("10.0.0.5")),
+		"with no primary address, fall back to the first")
+}
+
+func TestSelectPrimaryIPv4AddrNoAddress(t *testing.T) {
+	_, err := selectPrimaryIPv4Addr("ens3", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ipv4 address not found on ens3")
+}
+
+func TestGetHostDeviceMultipleAddrs(t *testing.T) {
+	gwIP := net.ParseIP("10.0.0.1")
+	gwMac, _ := net.ParseMAC("de:ad:be:ef:00:01")
+
+	origLinkByName := netlinkLinkByName
+	origAddrList := netlinkAddrList
+	origRouteList := netlinkRouteList
+	origNeighList := netlinkNeighList
+	t.Cleanup(func() {
+		netlinkLinkByName = origLinkByName
+		netlinkAddrList = origAddrList
+		netlinkRouteList = origRouteList
+		netlinkNeighList = origNeighList
+	})
+
+	fakeLink := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{
+		Index:        5,
+		Name:         "ens3",
+		HardwareAddr: net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff},
+	}}
+	netlinkLinkByName = func(name string) (netlink.Link, error) {
+		return fakeLink, nil
+	}
+	netlinkAddrList = func(link netlink.Link, family int) ([]netlink.Addr, error) {
+		return []netlink.Addr{
+			v4Addr("10.0.0.5", 24, unix.RT_SCOPE_UNIVERSE, unix.IFA_F_SECONDARY),
+			v4Addr("192.168.1.10", 24, unix.RT_SCOPE_UNIVERSE, 0),
+		}, nil
+	}
+	netlinkRouteList = func(link netlink.Link, family int) ([]netlink.Route, error) {
+		return []netlink.Route{{Dst: nil, Gw: gwIP, Priority: 100}}, nil
+	}
+	netlinkNeighList = func(linkIndex, family int) ([]netlink.Neigh, error) {
+		return []netlink.Neigh{{
+			IP: gwIP, HardwareAddr: gwMac, Family: netlink.FAMILY_V4, State: unix.NUD_REACHABLE,
+		}}, nil
+	}
+
+	dev, err := GetHostDevice("ens3")
+	require.NoError(t, err)
+	assert.Equal(t, "ens3", dev.Name)
+	assert.True(t, dev.IP.Equal(net.ParseIP("192.168.1.10")),
+		"multi-address NIC must select the primary address rather than fail with 'not unique'")
+	assert.Equal(t, net.CIDRMask(24, 32), net.IPMask(dev.IPMask),
+		"IPMask must come from the selected address entry")
+}
