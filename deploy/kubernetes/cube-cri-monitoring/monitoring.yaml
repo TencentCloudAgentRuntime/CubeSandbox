@@ -46,6 +46,10 @@ data:
         replacement: ${1}:10250
       - source_labels: [__meta_kubernetes_node_name]
         target_label: node
+      metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: kubelet_(pod_start_duration_seconds|pod_start_sli_duration_seconds|pod_start_total_duration_seconds|pod_worker_duration_seconds|runtime_operations_duration_seconds)_(bucket|sum|count)
+        action: keep
     - job_name: node-exporter
       metrics_path: /metrics
       kubernetes_sd_configs:
@@ -60,6 +64,13 @@ data:
         replacement: ${1}:9100
       - source_labels: [__meta_kubernetes_node_name]
         target_label: node
+      metric_relabel_configs:
+      - source_labels: [__name__, device]
+        regex: node_disk_io_time_seconds_total;nbd.*
+        action: drop
+      - source_labels: [__name__]
+        regex: node_(cpu_seconds_total|memory_(MemAvailable|MemTotal)_bytes|pressure_(cpu|io)_waiting_seconds_total|disk_io_time_seconds_total)
+        action: keep
     - job_name: apiserver
       scheme: https
       metrics_path: /metrics
@@ -74,6 +85,27 @@ data:
       metric_relabel_configs:
       - source_labels: [__name__, verb, resource, subresource]
         regex: apiserver_request_duration_seconds_(bucket|sum|count);POST;pods;
+        action: keep
+    - job_name: kube-scheduler
+      honor_labels: true
+      scrape_interval: 5s
+      metrics_path: /master/metrics
+      params:
+        component: [scheduler]
+      static_configs:
+      - targets: [master-metrics-service.kube-system.svc:19090]
+      metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: scheduler_pod_scheduling_sli_duration_seconds_(bucket|sum|count)
+        action: keep
+    - job_name: tke-eni-ipamd
+      scrape_interval: 5s
+      metrics_path: /metrics
+      static_configs:
+      - targets: [tke-eni-ipamd.kube-system.svc:8080]
+      metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: ipamd_pod_set_ip_latency_seconds_(bucket|sum|count)
         action: keep
 ---
 apiVersion: v1
@@ -192,8 +224,8 @@ spec:
           httpGet: {path: /-/ready, port: web}
           initialDelaySeconds: 5
         resources:
-          requests: {cpu: 100m, memory: 256Mi}
-          limits: {cpu: "1", memory: 1Gi}
+          requests: {cpu: 100m, memory: 1Gi}
+          limits: {cpu: "1", memory: 4Gi}
         volumeMounts:
         - {name: config, mountPath: /etc/prometheus, readOnly: true}
         - {name: data, mountPath: /prometheus}
@@ -536,7 +568,7 @@ data:
           },
           "gridPos": {
             "h": 8,
-            "w": 12,
+            "w": 8,
             "x": 0,
             "y": 10
           },
@@ -617,8 +649,67 @@ data:
           },
           "gridPos": {
             "h": 8,
-            "w": 12,
-            "x": 12,
+            "w": 8,
+            "x": 8,
+            "y": 10
+          },
+          "id": 40,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(scheduler_pod_scheduling_sli_duration_seconds_bucket{job=\"kube-scheduler\"}[1m])))",
+              "legendFormat": "排队到调度完成 p95",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "Scheduler 调度耗时 P95",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "cube-cri-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "lineWidth": 1,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "mode": "none"
+                }
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
             "y": 10
           },
           "id": 39,
@@ -1161,7 +1252,7 @@ data:
           },
           "gridPos": {
             "h": 8,
-            "w": 12,
+            "w": 8,
             "x": 0,
             "y": 46
           },
@@ -1233,6 +1324,65 @@ data:
                 "showPoints": "never",
                 "spanNulls": false,
                 "stacking": {
+                  "mode": "none"
+                }
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 46
+          },
+          "id": 41,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(ipamd_pod_set_ip_latency_seconds_bucket{job=\"tke-eni-ipamd\"}[1m])))",
+              "legendFormat": "SetPodIP p95",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "IPAM SetPodIP 耗时 P95",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "cube-cri-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "lineWidth": 1,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
                   "mode": "normal"
                 }
               },
@@ -1242,8 +1392,8 @@ data:
           },
           "gridPos": {
             "h": 8,
-            "w": 12,
-            "x": 12,
+            "w": 8,
+            "x": 16,
             "y": 46
           },
           "id": 6,
@@ -1430,7 +1580,7 @@ data:
           },
           "gridPos": {
             "h": 8,
-            "w": 12,
+            "w": 8,
             "x": 0,
             "y": 62
           },
@@ -1458,34 +1608,12 @@ data:
               },
               "editorMode": "code",
               "expr": "100 * (1 - avg by (node) (rate(node_cpu_seconds_total{node=~\"$node\",mode=\"idle\"}[1m])))",
-              "legendFormat": "CPU busy",
+              "legendFormat": "{{node}}",
               "range": true,
               "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "cube-cri-prometheus"
-              },
-              "editorMode": "code",
-              "expr": "100 * (1 - node_memory_MemAvailable_bytes{node=~\"$node\"} / node_memory_MemTotal_bytes{node=~\"$node\"})",
-              "legendFormat": "memory used",
-              "range": true,
-              "refId": "B"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "cube-cri-prometheus"
-              },
-              "editorMode": "code",
-              "expr": "100 * rate(node_pressure_cpu_waiting_seconds_total{node=~\"$node\"}[1m])",
-              "legendFormat": "CPU PSI waiting",
-              "range": true,
-              "refId": "C"
             }
           ],
-          "title": "Node CPU、内存与 CPU PSI",
+          "title": "节点 CPU 使用率",
           "type": "timeseries"
         },
         {
@@ -1511,8 +1639,67 @@ data:
           },
           "gridPos": {
             "h": 8,
-            "w": 12,
-            "x": 12,
+            "w": 8,
+            "x": 8,
+            "y": 62
+          },
+          "id": 42,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "100 * (1 - node_memory_MemAvailable_bytes{node=~\"$node\"} / node_memory_MemTotal_bytes{node=~\"$node\"})",
+              "legendFormat": "{{node}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "节点内存使用率",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "cube-cri-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "lineWidth": 1,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "mode": "none"
+                }
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
             "y": 62
           },
           "id": 36,
@@ -1538,8 +1725,8 @@ data:
                 "uid": "cube-cri-prometheus"
               },
               "editorMode": "code",
-              "expr": "100 * max by (node) (rate(node_disk_io_time_seconds_total{node=~\"$node\",device!~\"loop.*|ram.*\"}[1m]))",
-              "legendFormat": "busiest disk IO",
+              "expr": "100 * rate(node_pressure_cpu_waiting_seconds_total{node=~\"$node\"}[1m])",
+              "legendFormat": "{{node}} CPU PSI",
               "range": true,
               "refId": "A"
             },
@@ -1549,13 +1736,24 @@ data:
                 "uid": "cube-cri-prometheus"
               },
               "editorMode": "code",
-              "expr": "100 * rate(node_pressure_io_waiting_seconds_total{node=~\"$node\"}[1m])",
-              "legendFormat": "IO PSI waiting",
+              "expr": "100 * max by (node) (rate(node_disk_io_time_seconds_total{node=~\"$node\",device!~\"loop.*|ram.*|nbd.*\"}[1m]))",
+              "legendFormat": "{{node}} busiest disk IO",
               "range": true,
               "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "100 * rate(node_pressure_io_waiting_seconds_total{node=~\"$node\"}[1m])",
+              "legendFormat": "{{node}} IO PSI",
+              "range": true,
+              "refId": "C"
             }
           ],
-          "title": "Node 磁盘与 IO PSI",
+          "title": "节点压力与磁盘 IO",
           "type": "timeseries"
         },
         {

@@ -54,6 +54,10 @@ data:
         replacement: ${1}:10250
       - source_labels: [__meta_kubernetes_node_name]
         target_label: node
+      metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: kubelet_(pod_start_duration_seconds|pod_start_sli_duration_seconds|pod_start_total_duration_seconds|pod_worker_duration_seconds|runtime_operations_duration_seconds)_(bucket|sum|count)
+        action: keep
     - job_name: node-exporter
       metrics_path: /metrics
       kubernetes_sd_configs:
@@ -68,6 +72,13 @@ data:
         replacement: ${1}:9100
       - source_labels: [__meta_kubernetes_node_name]
         target_label: node
+      metric_relabel_configs:
+      - source_labels: [__name__, device]
+        regex: node_disk_io_time_seconds_total;nbd.*
+        action: drop
+      - source_labels: [__name__]
+        regex: node_(cpu_seconds_total|memory_(MemAvailable|MemTotal)_bytes|pressure_(cpu|io)_waiting_seconds_total|disk_io_time_seconds_total)
+        action: keep
     - job_name: apiserver
       scheme: https
       metrics_path: /metrics
@@ -82,6 +93,27 @@ data:
       metric_relabel_configs:
       - source_labels: [__name__, verb, resource, subresource]
         regex: apiserver_request_duration_seconds_(bucket|sum|count);POST;pods;
+        action: keep
+    - job_name: kube-scheduler
+      honor_labels: true
+      scrape_interval: 5s
+      metrics_path: /master/metrics
+      params:
+        component: [scheduler]
+      static_configs:
+      - targets: [master-metrics-service.kube-system.svc:19090]
+      metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: scheduler_pod_scheduling_sli_duration_seconds_(bucket|sum|count)
+        action: keep
+    - job_name: tke-eni-ipamd
+      scrape_interval: 5s
+      metrics_path: /metrics
+      static_configs:
+      - targets: [tke-eni-ipamd.kube-system.svc:8080]
+      metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: ipamd_pod_set_ip_latency_seconds_(bucket|sum|count)
         action: keep
 ---
 apiVersion: v1
@@ -200,8 +232,8 @@ spec:
           httpGet: {path: /-/ready, port: web}
           initialDelaySeconds: 5
         resources:
-          requests: {cpu: 100m, memory: 256Mi}
-          limits: {cpu: "1", memory: 1Gi}
+          requests: {cpu: 100m, memory: 1Gi}
+          limits: {cpu: "1", memory: 4Gi}
         volumeMounts:
         - {name: config, mountPath: /etc/prometheus, readOnly: true}
         - {name: data, mountPath: /prometheus}

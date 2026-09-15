@@ -20,6 +20,7 @@ T_total = T_last_ready_observed - T_first_create_start
 - `T_last_ready_observed`：观察器首次确认第 20,000 个目标 Pod 为 `Ready=True` 的单调时钟时间。
 - 目标 Pod 必须是本轮成功创建的 20,000 个唯一 Pod；旧 Pod、重建 Pod和非目标命名空间 Pod 不计入。
 - Create 失败、Pod 提前进入 `Failed`、观察中断或超时都使该轮失败，不能用重试后的 Pod 替换原样本。
+- 主结果仅统计实际通过 RuntimeTemplate 启动的 Pod。`cube-template-mode: auto` 只是允许查找模板；任一 Pod 发生冷启动、模板 miss 后回退或启动路径无法确认，本轮不得作为模板启动主结果。
 
 同时报告以下辅助结果，避免把提交、调度和运行时耗时混成一个数字：
 
@@ -42,6 +43,7 @@ T_total = T_last_ready_observed - T_first_create_start
 - 使用 `runtimeClassName: cube`，由 `default-scheduler` 正常调度，不设置 `nodeName`。
 - 保留输入工作负载的 init container、多容器、共享网络、卷、探针、安全上下文和 ServiceAccount 投射语义；资源缩小为启动压测规格。
 - 压测镜像固定 digest 并预热到所有节点，主指标不包含大规模镜像下载。
+- 主轮使用 `cube-template-mode: auto`，但必须通过 Cube 指标或结构化日志逐 Pod 证明实际模板命中率为 100%。模板预热轮与正式计时轮分开执行。
 - Pod Ready 后稳定运行 10 分钟，再执行功能抽检和资源回收。
 
 ### 2.2 补充场景
@@ -90,15 +92,15 @@ T_total = T_last_ready_observed - T_first_create_start
 
 ### 3.3 轻量资源规格
 
-主场景要求每个 Pod **包含 Cube RuntimeClass overhead 后**的调度总额为 `0.5 CPU / 1Gi`。当前 overhead 为 `250m CPU / 768MiB`，因此 PodSpec 中全部业务容器的 request 和 limit 合计只能是 `250m CPU / 256MiB`。建议初始分配如下：
+主场景要求每个 Pod **包含 Cube RuntimeClass overhead 后**的调度总额为 `333m CPU / 768Mi`。压测使用独立的 `cube-load` RuntimeClass，overhead 使用节点原生支持的 `250m CPU / 768Mi`；PodSpec 中普通容器的 CPU request/limit 合计为 `83m`，内存 request/limit 显式设为 `0`，不修改产品默认 `cube` RuntimeClass 和节点 minimum overhead。
 
 | 容器 | CPU request/limit | 内存 request/limit | 临时存储 request |
 |---|---:|---:|---:|
-| `main` | 150m | 128Mi | 1Gi |
-| `sidecar` | 50m | 64Mi | 0 |
-| `net-admin` | 50m | 64Mi | 0 |
-| **业务容器合计** | **250m** | **256Mi** | **1Gi** |
-| **叠加 RuntimeClass overhead** | **500m** | **1Gi** | **1Gi** |
+| `main` | 50m | 0 | 512Mi |
+| `sidecar` | 17m | 0 | 0 |
+| `net-admin` | 16m | 0 | 0 |
+| **业务容器合计** | **83m** | **0** | **512Mi** |
+| **叠加 RuntimeClass overhead** | **333m** | **768Mi** | **512Mi** |
 
 模板中的命令只负责 init 顺序、共享卷校验、HTTP/TCP 探针和常驻进程，不模拟业务逻辑。若 S0 单 Pod 验证发生 OOM、持续 CPU throttling 或探针失败，应先确认镜像和运行时开销；资源规格一旦调整，必须重新计算集群容量。
 
@@ -110,7 +112,7 @@ T_total = T_last_ready_observed - T_first_create_start
 - HTTP/TCP probe 持续成功，10 分钟内容器重启次数为 0。
 - init container 写入 `emptyDir` 的文件可被目标普通容器读取。
 - Projected token、CA、namespace 文件存在，权限和内容类型符合预期。
-- 同 Pod 容器通过 localhost 和声明端口互通，DNS 能解析 `kubernetes.default.svc`。
+- 同 Pod 容器通过 localhost 和声明端口互通，DNS 能解析 `kubernetes.default.svc.cluster.local`。
 - `net-admin` 容器的 `NET_ADMIN` 能力生效，且不获得额外 Host 能力。
 - `kubectl logs` 和 `kubectl exec` 各成功一次。
 
@@ -120,22 +122,22 @@ T_total = T_last_ready_observed - T_first_create_start
 
 ### 4.1 单 Pod 调度资源
 
-轻量工作负载的普通容器 request 合计为 `0.25 CPU / 256Mi`。每个 init container 为 `25m / 32Mi`，小于普通容器合计，因此不增加 Pod 的有效调度 request。Kubernetes 调度器叠加 Cube RuntimeClass overhead 后，单 Pod 调度总额正好是 `0.5 CPU / 1Gi`。
+轻量工作负载的普通容器 CPU request/limit 合计为 `83m`，每个 init container 为 `10m`，不会增加 Pod 的有效 CPU request；所有容器的内存 request/limit 均显式设为 `0`。Kubernetes 调度器叠加 `cube-load` RuntimeClass overhead 后，单 Pod 调度总额为 `333m CPU / 768Mi memory`。
 
 | 来源 | CPU | 内存 | 临时存储 |
 |---|---:|---:|---:|
-| `main` | 0.15 | 128Mi | 1Gi |
-| `sidecar` | 0.05 | 64Mi | 0 |
-| `net-admin` | 0.05 | 64Mi | 0 |
-| 业务容器合计 | 0.25 | 0.25Gi | 1Gi |
-| Cube RuntimeClass overhead | 0.25 | 0.75Gi | 0 |
-| **单 Pod 调度合计** | **0.5** | **1Gi** | **1Gi** |
+| `main` | 0.050 | 0 | 512Mi |
+| `sidecar` | 0.017 | 0 | 0 |
+| `net-admin` | 0.016 | 0 | 0 |
+| 业务容器合计 | 0.083 | 0 | 0.5Gi |
+| `cube-load` RuntimeClass overhead | 0.250 | 0.75Gi | 0 |
+| **单 Pod 调度合计** | **0.333** | **0.75Gi** | **0.5Gi** |
 
 20,000 Pod 的理论 request 总量为：
 
-- CPU：10,000 核。
-- 内存：20,000Gi，约 19.5TiB。
-- 临时存储：20,000Gi，约 19.5TiB。
+- CPU：6,660 核。
+- 内存：15,000Gi，约 14.6TiB。
+- 临时存储：10,000Gi，约 9.8TiB。
 - Sandbox：20,000 个；普通容器 60,000 个；init container 执行 40,000 次。
 
 以上只是调度 request。节点还需要容纳 Host kernel、kubelet、containerd、CNI、Cube RuntimeResource、Shim/VMM、镜像和启动时 page cache，不能按 request 恰好装满。
@@ -145,9 +147,9 @@ T_total = T_last_ready_observed - T_first_create_start
 每节点建议容量按以下公式计算：
 
 ```text
-P_cpu   = floor(allocatable_cpu * 0.90 / 0.5)
-P_mem   = floor(allocatable_memory * 0.90 / 1Gi)
-P_disk  = floor(allocatable_ephemeral * 0.70 / 1Gi)
+P_cpu   = floor(allocatable_cpu * 0.90 / 0.333)
+P_mem   = floor(allocatable_memory * 0.90 / 0.75Gi)
+P_disk  = floor(allocatable_ephemeral * 0.70 / 0.5Gi)
 P_ip    = 可用 Pod IP 数 - 系统 Pod 数
 P_node  = min(P_cpu, P_mem, P_disk, P_ip, maxPods - 系统 Pod 数)
 N_active = ceil(20000 / P_node)
@@ -162,20 +164,22 @@ CPU和内存至少预留 10%，临时存储预留 30%；10% 备用节点不参�
 
 | 节点规格 | 理论主要约束 | 建议 Pod/节点 | 有效节点 | 含 10% 备用 |
 |---|---|---:|---:|---:|
-| 16C/64Gi | CPU；预留后约 27 Pod | 25 | 800 | 880 |
-| 32C/64Gi | CPU；预留后约 54 Pod | 50 | 400 | 440 |
-| 64C/128Gi | `maxPods` 和系统 Pod | 100 | 200 | 220 |
-| 64C/256Gi | `maxPods` 和系统 Pod | 100 | 200 | 220 |
+| 16C/64Gi | CPU；预留后约 43 Pod | 40 | 500 | 550 |
+| 32C/64Gi | 内存；预留后约 76 Pod | 75 | 267 | 294 |
+| 64C/128Gi | 内存和系统 Pod | 135 | 149 | 164 |
+| 64C/256Gi | CPU和系统 Pod | 170 | 118 | 130 |
 
-推荐使用 **64C/128Gi、至少 1TiB 本地 NVMe、25Gbps 以上网络** 的 TS4/PVM 兼容机型，每节点放置 100 个目标 Pod，需要 200 台有效节点和约 20 台备用节点。每个有效节点的目标 Pod 合计调度资源为 50 CPU、100Gi 内存和 100Gi 临时存储，仍需用实际 allocatable、系统 Pod 数和启动峰值复核。
+推荐使用 **64C/128Gi、至少 200Gi allocatable 临时存储、25Gbps 以上网络** 的 TS4/PVM 兼容机型，每节点放置 135 个目标 Pod，需要 149 台有效节点和约 15 台备用节点。每个有效节点的目标 Pod 合计调度资源约为 44.96 CPU、101.25Gi 内存和 67.5Gi 临时存储，仍需用实际 allocatable、系统 Pod 数和启动峰值复核。
 
-每节点 100 个目标 Pod 后还要容纳 Cube installer、CNI、node-exporter 等系统 Pod，因此 kubelet `maxPods=110` 只有很小余量。若系统 DaemonSet 超过 10 个，应把目标密度降到 90，并相应增加到 223 台有效节点、23 台备用节点。轻量规格的结果只说明 2 万 Pod 创建链路能力，不能外推原始 `5.5 CPU / 11Gi / 30Gi` workload 的生产容量。
+单节点可执行 150 Pod 密度上限测试，对应 49.95 CPU、112.5Gi 内存和 75Gi 临时存储。当前 64C/128Gi 节点叠加系统 Pod 后 memory request 约为 98%，该密度不作为正式集群容量规划值。
+
+所有有效 Cube 节点的 kubelet `maxPods` 必须统一设置为 **250**，为目标 Pod 以及 Cube installer、CNI、node-exporter 等系统 Pod 留出对象容量。正式测试前必须逐节点确认 `status.allocatable.pods=250`；任一有效节点不满足时不得开始正式轮次。轻量规格的结果只说明 2 万 Pod 创建链路能力，不能外推原始 `5.5 CPU / 11Gi / 30Gi` workload 的生产容量。
 
 ### 4.4 临时存储与镜像
 
-主场景把每个 Pod 的 `ephemeral-storage` request 从 30Gi 缩小为 1Gi，但保留 `emptyDir`、容器可写层和 kubelet 临时存储调度语义。推荐：
+主场景把每个 Pod 的 `ephemeral-storage` request 从 30Gi 缩小为 512Mi，但保留 `emptyDir`、容器可写层和 kubelet 临时存储调度语义。推荐：
 
-- 64C/128Gi 节点至少提供 1TiB 独立本地 NVMe，并确认 `allocatable.ephemeral-storage` 足以调度 100 个 Pod。
+- 64C/128Gi 节点至少提供 200Gi allocatable 临时存储，并确认扣除 30% 余量后仍足以调度计划密度。
 - containerd imagefs、Cube 状态/模板数据和 Pod 临时存储尽量分盘或设置明确配额。
 - 统计工具镜像解压后的实际占用，保证预热完成后 nodefs/imagefs 仍至少有 30% 空闲。
 - 测试前后记录磁盘字节、inode、Cube 状态目录和 containerd snapshot 数量。
@@ -197,7 +201,7 @@ Kubernetes 官方大集群参考范围为最多 5,000 节点、150,000 Pod 和 3
 
 | 配置 | 建议 | 说明 |
 |---|---|---|
-| kubelet `maxPods` | 保持 110 或平台已验证值 | 推荐方案每节点 100 个目标 Pod，必须确认系统 Pod 不超过剩余容量 |
+| kubelet `maxPods` | **固定为 250** | 所有有效 Cube 节点逐一核验 `status.allocatable.pods=250`，不一致时不得开始正式轮次 |
 | kubelet `podsPerCore` | `0` | 避免与 `maxPods` 叠加造成意外限制 |
 | 镜像拉取 | 主场景保持 `IfNotPresent`，所有节点预热 | 不需要为主场景放大 registry QPS |
 | Namespace | 20 个，每个 1,000 Pod | 分散对象、Watch 和清理压力 |
@@ -212,9 +216,44 @@ Kubernetes 官方大集群参考范围为最多 5,000 节点、150,000 Pod 和 3
 ### 5.3 网络地址
 
 - 若使用 VPC/ENI Pod 网络，至少准备 22,000 个可用 Pod IP，并额外预留节点、系统 Pod和删除重建空间；确认单节点 ENI/IP 上限不小于计划密度。
-- 若使用每节点 PodCIDR，按 CNI 的节点掩码计算集群 CIDR。例如约 220 个节点若每节点分配 `/24`，至少需要可容纳 220 个 `/24` 的地址空间；不要只按 20,000 个实际 Pod 估算。
+- 若使用每节点 PodCIDR，按 CNI 的节点掩码计算集群 CIDR。例如约 164 个节点若每节点分配 `/24`，至少需要可容纳 164 个 `/24` 的地址空间；不要只按 20,000 个实际 Pod 估算。
 - 校验 Service CIDR、节点网段、Pod CIDR 和 Cube 内部 `192.168.0.0/18` 地址段不发生冲突。
-- ipamd 限速配置: 待确认, 尽量避免cni ip分配出现排队或限频问题.
+
+当前集群使用共享网卡 Route ENI，`tke-eni-ipamd:v3.8.2` 的默认 `ip-min-warm-target` 和 `ip-max-warm-target` 均为 5。正式测试必须对**存量目标节点**逐一修改 `NodeENIConfig`，不能只修改全局默认值：
+
+```bash
+node=10.0.244.13
+kubectl annotate nodeeniconfig "$node" \
+  tke.cloud.tencent.com/route-eni-ip-min-warm-target=150 \
+  tke.cloud.tencent.com/route-eni-ip-max-warm-target=160 \
+  --overwrite
+```
+
+最小值按单节点最大突发 Pod 数设置，最大值额外保留少量回收缓冲。修改前确认 `maxRouteENI * maxIPPerENI`、云 API 配额及子网可用 IP 均覆盖目标值。所有测试节点可在核对节点清单后批量执行，但不得包含发生器和非目标节点。
+
+预热完成不能只检查 annotation。目标节点无业务 Pod 时，必须同时满足：
+
+```bash
+kubectl get nodeeniconfig "$node" -o jsonpath='{.spec.desiredRouteENIIP}{"\n"}'
+kubectl get vpcip \
+  -l "tke.cloud.tencent.com/node-name=$node" -o json |
+  jq '[.items[] | select(.spec.type == "Pod" and .status.phase == "Assigned")] | length'
+```
+
+- `desiredRouteENIIP` 不低于预热最小值，空闲 Pod IP 实际计数也不低于该值。
+- Node 出现 `SucceedSetRouteENIWarmTarget` Event，IPAMD/Agent 无分配失败或持续重试。
+- 所有节点达到门禁后再静置 2 分钟并保存快照，然后开始正式计时。
+
+全部压测轮次结束后恢复环境默认水位：
+
+```bash
+kubectl annotate nodeeniconfig "$node" \
+  tke.cloud.tencent.com/route-eni-ip-min-warm-target=5 \
+  tke.cloud.tencent.com/route-eni-ip-max-warm-target=5 \
+  --overwrite
+```
+
+全局默认值通过 TKE `eniipamd` 组件配置维护。当前 v3.8.2 修改全局默认值不自动同步存量节点；升级到支持自动同步的版本后，也应先在小规模节点验证再启用。
 
 ### 5.4 PVC存储
 
@@ -224,12 +263,13 @@ Kubernetes 官方大集群参考范围为最多 5,000 节点、150,000 Pod 和 3
 
 当前仓库默认值包括：
 
-- RuntimeClass overhead：`250m CPU / 768MiB memory`。
+- 压测专用 `cube-load` RuntimeClass overhead：`250m CPU / 768Mi memory`。
+- 全部目标节点的 `/etc/cubesandbox/runtimeclass-overhead.json` 保持原生配置：`minimum_cpu_millicores=250`、`minimum_memory_bytes=805306368`。
 - Cube workflow `create.concurrent=100`、`destroy.concurrent=100`。
 - cgroup pool 3,000，TAP 预创建 500。
 - Cube 资源指标采集并发 8，采集周期 5 秒。
 
-每节点启动 100 个目标 Pod，正好覆盖默认 create/destroy 并发上限；cgroup 和 TAP 资源池理论上足够，不应为了集群总量盲目增大。正式测试要记录**节点实际生效配置**及文件 SHA-256，而不是只记录仓库默认值。
+单节点密度测试启动 150 个目标 Pod，将覆盖默认 create/destroy 并发上限并观察节点侧排队；cgroup 和 TAP 资源池理论上足够，不应为了集群总量盲目增大。正式测试要记录**节点实际生效配置**及文件 SHA-256，而不是只记录仓库默认值。
 
 节点预检还应覆盖：
 
@@ -248,10 +288,11 @@ Kubernetes 官方大集群参考范围为最多 5,000 节点、150,000 Pod 和 3
 1. 将模板使用的轻量工具镜像同步到压测集群可访问的仓库并固定 digest。
 2. 通过 DaemonSet 或节点镜像预热机制将镜像拉取、解压到全部有效节点。
 3. 每节点核对镜像 digest，预热失败的节点移出有效节点池。
-4. 若生产路径使用 RuntimeTemplate，为该 Pod 推导出的 VM 规格提前准备兼容模板，并完成每节点可用性检查。
-5. 运行时记录模板命中、冷启动和回退数量；Cold 与 Template 样本分开报告。
+4. 为该 Pod 推导出的 VM 规格提前准备兼容 RuntimeTemplate，并完成每节点可用性检查。
+5. 预热轮完成后清理其 Pod，确认模板已覆盖全部有效 Cube 节点，再开始独立的正式计时轮。
+6. 运行时按 Pod UID 或 Sandbox ID 记录模板命中、冷启动、回退和未知数量，四类合计必须等于目标 Pod 数。
 
-主场景建议采用生产默认 `auto` 路径，但必须在计划冻结时写明期望模板命中率。若要求测量纯冷启动，则改用 `cold` 并作为独立正式场景，不能在同一轮混合解释。
+主场景采用 `auto` 请求策略和实际 RuntimeTemplate 启动路径。只有模板命中率为 100%，且冷启动、回退和未知均为 0 时，数据才进入主结果。纯冷启动使用 `cold` 作为独立对照场景，不能与模板启动样本混合解释。
 
 ### 5.7 负载生成器
 
@@ -290,7 +331,7 @@ Kubernetes 官方大集群参考范围为最多 5,000 节点、150,000 Pod 和 3
 | 阶段 | 节点范围 | Pod 数 | 目的 |
 |---|---:|---:|---|
 | S0 | 1 节点 | 1 | 完整功能和清理检查 |
-| S1 | 10 节点 | 1,000 | 单节点 100 Pod 并发及业务探针检查 |
+| S1 | 15 节点 | 2,000 | 预计每节点 133～134 Pod，并发及业务探针检查 |
 | S2 | 50 节点 | 5,000 | 控制面、CNI、DNS、监控预演 |
 | S3 | 100 节点 | 10,000 | 半规模容量和提交速率验证 |
 | S4 | 全部有效节点 | 20,000 | 正式测试 |
@@ -310,6 +351,7 @@ S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成�
 
 ### 7.4 清理与归零
 
+- 先删除 Namespace 内的目标 Pod，再删除 Namespace；目标集群的 Gatekeeper 禁止直接删除仍含 Pod 的 Namespace。
 - 先以 1,000 Pod/s 删除，测量正常回收耗时；最大突发删除另做补充场景。
 - 等待 Kubernetes Pod 对象、CRI container/sandbox、Cube VM、Shim/worker 全部消失。
 - 检查 TAP、netns、mount、cgroup、共享目录、containerd snapshot、Cube lease 和 reaper。
@@ -337,7 +379,7 @@ S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成�
 
 ### 8.2 监控容量
 
-仓库自带监控适合小规模验证，默认单 Prometheus、1Gi 内存和 10Gi 存储，不足以作为约 220 节点的正式采集系统。正式环境建议：
+仓库自带监控适合小规模验证，默认单 Prometheus、4Gi 内存和 10Gi 存储，不足以作为约 110 节点的正式采集系统。正式环境建议：
 
 - 4 个 Prometheus shard 按节点分片，或节点 Agent remote-write 到独立时序系统。
 - Cube 启动指标 1 秒采集，kubelet和 node-exporter 5 秒采集；先测量监控自身开销。
@@ -365,9 +407,11 @@ S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成�
 - API Server 429/5xx、CRI 错误和 Cube 内部错误上限。
 - 每节点吞吐偏斜和最慢节点上限。
 
-三轮 S4 均满足正确性门禁才算通过。最终结论报告三轮各自结果和中位数，不挑选最快轮次；版本、配置、镜像缓存或模板命中口径不同的轮次不得合并。
+三轮 S4 均满足正确性门禁才算通过。最终结论报告三轮各自结果和中位数，不挑选最快轮次；版本、配置、镜像缓存或 RuntimeTemplate 制品不同的轮次不得合并。任何模板命中率低于 100% 或启动路径存在未知项的轮次均为无效主轮。
 
 ## 10. 产物
+
+每轮必须使用 `cube-cri-testsuite/performance/templates/cube-cri-20000-pod-run-record.md` 填写现场记录。表格字段不得删减；补充数据可增加行，不适用项必须说明原因。
 
 每轮输出到独立目录，至少包含：
 
@@ -388,20 +432,23 @@ S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成�
 
 `report.md` 必须回答：
 
-1. 20,000 个 Pod 是否全部 Ready，实际用了多久。
-2. 时间分别消耗在提交、调度、Sandbox、容器启动和 probe 的哪一段。
-3. 是否存在节点、控制面、存储、网络或外部依赖瓶颈。
-4. 20,000 Pod 稳定运行和删除后是否有资源泄漏。
-5. 本轮结果适用于哪组制品、节点规格、镜像缓存和模板策略。
+1. 20,000 个 Pod 是否全部确认通过 RuntimeTemplate 启动，模板命中证据是什么。
+2. 20,000 个 Pod 是否全部 Ready，实际用了多久。
+3. 时间分别消耗在提交、调度、Sandbox、容器启动和 probe 的哪一段。
+4. 是否存在节点、控制面、存储、网络或外部依赖瓶颈。
+5. 20,000 Pod 稳定运行和删除后是否有资源泄漏。
+6. 本轮结果适用于哪组制品、节点规格、镜像缓存和 RuntimeTemplate 制品。
 
 ## 11. 开始前检查表
 
-- [ ] 20,000 Pod 的目标提交速率、镜像缓存和 Template 策略已冻结。
+- [ ] 20,000 Pod 的目标提交速率、镜像缓存和 RuntimeTemplate 制品已冻结。
 - [ ] 节点数按实际 allocatable 重算，10% 备用节点已就绪但不参与调度。
+- [ ] 全部有效 Cube 节点已逐一确认 `status.allocatable.pods=250`。
 - [ ] vCPU、内存、临时存储、Pod IP、镜像和云产品配额均已确认。
 - [ ] 全部 Cube 节点使用相同 TS4/PVM、containerd、CNI 和不可变 runtime 制品。
 - [ ] 脱敏 workload 已通过 `task test:cri` 和单 Pod完整功能验证。
-- [ ] 工具镜像 digest 已在所有有效节点缓存，匹配模板已准备并验证。
+- [ ] 工具镜像 digest 已在所有有效节点缓存，匹配模板已覆盖全部有效节点并验证。
+- [ ] 模板命中指标或结构化日志可按 Pod UID/Sandbox ID 与本轮目标 Pod 对账。
 - [ ] 20 个 Namespace 的 ServiceAccount 和根 CA ConfigMap 已准备。
 - [ ] API Server、scheduler、etcd、kubelet、containerd、Cube和节点监控完整可用。
 - [ ] S0 至 S3 已通过，S4 的超时、停止条件和性能门槛已经评审。

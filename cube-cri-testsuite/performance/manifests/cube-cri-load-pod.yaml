@@ -9,7 +9,7 @@ metadata:
   annotations:
     agc.cloud.tencent.com/cube-template-mode: auto
 spec:
-  runtimeClassName: cube
+  runtimeClassName: cube-load
   serviceAccountName: cube-cri-load
   automountServiceAccountToken: true
   restartPolicy: Always
@@ -38,11 +38,11 @@ spec:
         - printf 'initialized\n' > /shared/init-written
       resources:
         requests:
-          cpu: 25m
-          memory: 32Mi
+          cpu: 10m
+          memory: "0"
         limits:
-          cpu: 25m
-          memory: 32Mi
+          cpu: 10m
+          memory: "0"
       volumeMounts:
         - name: shared-data
           mountPath: /shared
@@ -55,11 +55,11 @@ spec:
         - test -s /shared/init-written && test -s /projected/namespace && printf 'ready\n' > /shared/init-complete
       resources:
         requests:
-          cpu: 25m
-          memory: 32Mi
+          cpu: 10m
+          memory: "0"
         limits:
-          cpu: 25m
-          memory: 32Mi
+          cpu: 10m
+          memory: "0"
       volumeMounts:
         - name: shared-data
           mountPath: /shared
@@ -98,13 +98,13 @@ spec:
         failureThreshold: 3
       resources:
         requests:
-          cpu: 150m
-          memory: 128Mi
-          ephemeral-storage: 1Gi
+          cpu: 50m
+          memory: "0"
+          ephemeral-storage: 512Mi
         limits:
-          cpu: 150m
-          memory: 128Mi
-          ephemeral-storage: 1Gi
+          cpu: 50m
+          memory: "0"
+          ephemeral-storage: 512Mi
       volumeMounts:
         - name: shared-data
           mountPath: /shared
@@ -134,11 +134,11 @@ spec:
         failureThreshold: 3
       resources:
         requests:
-          cpu: 50m
-          memory: 64Mi
+          cpu: 17m
+          memory: "0"
         limits:
-          cpu: 50m
-          memory: 64Mi
+          cpu: 17m
+          memory: "0"
       volumeMounts:
         - name: shared-data
           mountPath: /shared
@@ -155,11 +155,11 @@ spec:
             - NET_ADMIN
       resources:
         requests:
-          cpu: 50m
-          memory: 64Mi
+          cpu: 16m
+          memory: "0"
         limits:
-          cpu: 50m
-          memory: 64Mi
+          cpu: 16m
+          memory: "0"
       volumeMounts:
         - name: projected-data
           mountPath: /projected
@@ -168,7 +168,7 @@ spec:
   volumes:
     - name: shared-data
       emptyDir:
-        sizeLimit: 1Gi
+        sizeLimit: 512Mi
     - name: projected-data
       projected:
         sources:
