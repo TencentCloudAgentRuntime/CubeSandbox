@@ -18,12 +18,15 @@ task test:e2e-framework -- --probe-only --cube-node 10.0.244.112
 task test:e2e-framework -- --feature runtime --cube-node 10.0.244.112
 task test:e2e-framework -- --feature probe --assess 'http|tcp' --cube-node 10.0.244.112
 task test:e2e-framework -- --feature core --assess 'multicontainer.*-(cold|template)' --cube-node 10.0.244.112
+task test:e2e-framework -- --feature core --assess 'rootfs-ephemeral-storage-eviction.*-(cold|template)' --cube-node 10.0.244.112
 task test:e2e-framework -- --help
 ```
 
+`semantic-rootfs-ephemeral-storage-eviction` 覆盖 AGC-41：容器向 rootfs 写入 64Mi、超过 5Mi `ephemeral-storage` limit 后，Pod 必须在默认 2 分钟内以 `Failed/Evicted` 结束，且所有容器状态均为 `Terminated`。可通过 `EPHEMERAL_EVICTION_TIMEOUT` 或 `--ephemeral-eviction-timeout` 调整等待时间。
+
 默认在 `default` 命名空间运行并清理测试资源；`--namespace` 指定已存在的命名空间，`--keep` 保留资源用于排查。每次执行禁用 Go 测试缓存，整体超时默认 30 分钟。
 
-镜像可用 `UTILITY_IMAGE` 和 `CUBE_IMAGE` 覆盖；工具镜像须包含 `/bin/sh`、`httpd`、`sleep` 等 BusyBox 命令。当前 cube 运行时拒绝 `hostNetwork`，因此 cube Pod 改用标准 Pod 网络，runc 宿主机检查沿用原设置。缺少 StorageClass 或第二台物理节点会跳过对应用例，跳过不代表通过。
+镜像可用 `UTILITY_IMAGE` 和 `CUBE_IMAGE` 覆盖；工具镜像须包含 `/bin/sh`、`dd`、`httpd`、`sleep` 等 BusyBox 命令。当前 cube 运行时拒绝 `hostNetwork`，因此 cube Pod 改用标准 Pod 网络，runc 宿主机检查沿用原设置。缺少 StorageClass 或第二台物理节点会跳过对应用例，跳过不代表通过。
 
 ## 并发启动延迟
 

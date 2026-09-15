@@ -42,6 +42,8 @@ Options:
                            Wait limit for a real template-restore path.
   --sandbox-path-verify-timeout DUR
                            Wait limit for each sandbox-path metric assertion.
+  --ephemeral-eviction-timeout DUR
+                           Wait limit for rootfs ephemeral-storage eviction.
   --awv-csi-storage-class NAME
                            StorageClass used by awv-csi PVC tests.
   --awv-csi-driver NAME    Expected CSI driver for awv-csi PVs.
@@ -69,6 +71,7 @@ while [[ $# -gt 0 ]]; do
     --prometheus-selector) extra_args+=("-prometheus-selector=$2"); shift 2 ;;
     --template-prepare-timeout) extra_args+=("-template-prepare-timeout=$2"); shift 2 ;;
     --sandbox-path-verify-timeout) extra_args+=("-sandbox-path-verify-timeout=$2"); shift 2 ;;
+    --ephemeral-eviction-timeout) extra_args+=("-ephemeral-eviction-timeout=$2"); shift 2 ;;
     --awv-csi-storage-class) extra_args+=("-awv-csi-storage-class=$2"); shift 2 ;;
     --awv-csi-driver) extra_args+=("-awv-csi-driver=$2"); shift 2 ;;
     --awv-csi-pvc-size) extra_args+=("-awv-csi-pvc-size=$2"); shift 2 ;;

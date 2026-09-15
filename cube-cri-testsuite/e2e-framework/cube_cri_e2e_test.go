@@ -63,6 +63,7 @@ var (
 	latencyConcurrency = flag.Int("latency-concurrency", envInt("LATENCY_CONCURRENCY", 100), "concurrent cube pause pods for latency test")
 	latencyTimeout     = flag.Duration("latency-timeout", envDuration("LATENCY_TIMEOUT", 120*time.Second), "latency case timeout")
 	semanticTimeout    = flag.Duration("semantic-timeout", envDuration("SEMANTIC_TIMEOUT", 60*time.Second), "semantic case startup timeout")
+	evictionTimeout    = flag.Duration("ephemeral-eviction-timeout", envDuration("EPHEMERAL_EVICTION_TIMEOUT", 2*time.Minute), "maximum wait for an ephemeral-storage limit eviction")
 	probeTimeout       = flag.Duration("probe-timeout", envDuration("PROBE_TIMEOUT", 90*time.Second), "probe case timeout")
 	cleanupTimeout     = flag.Duration("cleanup-timeout", envDuration("CLEANUP_TIMEOUT", 60*time.Second), "pod cleanup timeout")
 
@@ -345,6 +346,7 @@ func TestCoreSemantics(t *testing.T) {
 		})},
 	}))
 	addCubePathAssessments(builder, "semantic-emptydir-memory-tmpfs-size", assessMemoryEmptyDir)
+	addCubePathAssessments(builder, "semantic-rootfs-ephemeral-storage-eviction", assessRootfsEphemeralStorageEviction)
 	addCubePathAssessments(builder, "semantic-multicontainer", assessReadyPod("semantic-multicontainer", corev1.PodSpec{
 		RestartPolicy: corev1.RestartPolicyNever,
 		Containers: []corev1.Container{
@@ -529,6 +531,52 @@ func assessMemoryEmptyDir(ctx context.Context, t *testing.T, cfg *envconf.Config
 		t.Fatalf("memory emptyDir must be tmpfs with sizeLimit=10Mi (10240Ki), got %q; %s; events=%s", stdout, podSummary(got), podEvents(ctx, client, pod.Namespace, pod.Name))
 	}
 	t.Logf("semantic-emptydir-memory-tmpfs-size: %s", podSummary(got))
+	return ctx
+}
+
+func assessRootfsEphemeralStorageEviction(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+	client := clientset(t, cfg)
+	pod := cubePod(t, ctx, cfg, client, "semantic-rootfs-ephemeral-eviction", corev1.PodSpec{
+		RestartPolicy:                 corev1.RestartPolicyNever,
+		TerminationGracePeriodSeconds: int64Ptr(1),
+		Containers: []corev1.Container{baseContainer("writer", []string{
+			"/bin/sh", "-c", "set -eu; dd if=/dev/zero of=/tmp/agc41-fill bs=1M count=64 conv=fsync; echo agc41-write-complete; sleep 3600",
+		}, func(c *corev1.Container) {
+			c.Resources.Requests[corev1.ResourceEphemeralStorage] = resource.MustParse("1Mi")
+			c.Resources.Limits[corev1.ResourceEphemeralStorage] = resource.MustParse("5Mi")
+		})},
+	})
+	createPod(ctx, t, client, pod)
+	defer cleanupPod(ctx, t, client, pod)
+
+	var got *corev1.Pod
+	err := wait.PollUntilContextTimeout(ctx, time.Second, *evictionTimeout, true, func(ctx context.Context) (bool, error) {
+		current, err := client.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		got = current
+		switch current.Status.Phase {
+		case corev1.PodSucceeded:
+			return false, fmt.Errorf("writer pod unexpectedly succeeded")
+		case corev1.PodFailed:
+			if current.Status.Reason != "Evicted" {
+				return false, fmt.Errorf("writer pod failed with reason %q instead of Evicted", current.Status.Reason)
+			}
+			return allContainerStatusesTerminated(current), nil
+		default:
+			return false, nil
+		}
+	})
+	if err != nil {
+		t.Fatalf("rootfs ephemeral-storage pod was not terminally evicted within %s: %v; reason=%q message=%q; %s; logs=%q; events=%s",
+			*evictionTimeout, err, podReason(got), podMessage(got), podSummary(got), containerLogs(ctx, client, pod.Namespace, pod.Name, "writer"), podEvents(ctx, client, pod.Namespace, pod.Name))
+	}
+	if !isEphemeralStorageLimitEvictionMessage(got.Status.Message) {
+		t.Fatalf("evicted pod message does not identify the 5Mi ephemeral-storage limit: message=%q; %s; logs=%q; events=%s",
+			got.Status.Message, podSummary(got), containerLogs(ctx, client, pod.Namespace, pod.Name, "writer"), podEvents(ctx, client, pod.Namespace, pod.Name))
+	}
+	t.Logf("semantic-rootfs-ephemeral-storage-eviction: reason=%q message=%q; %s", got.Status.Reason, got.Status.Message, podSummary(got))
 	return ctx
 }
 
@@ -1344,6 +1392,40 @@ func allContainersReady(pod *corev1.Pod) bool {
 	return true
 }
 
+func allContainerStatusesTerminated(pod *corev1.Pod) bool {
+	if pod == nil || len(pod.Status.ContainerStatuses) != len(pod.Spec.Containers) {
+		return false
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.State.Terminated == nil {
+			return false
+		}
+	}
+	return true
+}
+
+func isEphemeralStorageLimitEvictionMessage(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "ephemeral") &&
+		strings.Contains(message, "exceed") &&
+		strings.Contains(message, "limit") &&
+		strings.Contains(message, "5mi")
+}
+
+func podReason(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	return pod.Status.Reason
+}
+
+func podMessage(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	return pod.Status.Message
+}
+
 func podReady(pod *corev1.Pod) corev1.ConditionStatus {
 	if pod == nil {
 		return corev1.ConditionUnknown
@@ -1422,6 +1504,14 @@ func podEvents(ctx context.Context, client *kubernetes.Clientset, ns, name strin
 		parts = append(parts, event.Reason+": "+msg)
 	}
 	return strings.Join(parts, " | ")
+}
+
+func containerLogs(ctx context.Context, client *kubernetes.Clientset, ns, pod, container string) string {
+	raw, err := client.CoreV1().Pods(ns).GetLogs(pod, &corev1.PodLogOptions{Container: container}).DoRaw(ctx)
+	if err != nil {
+		return err.Error()
+	}
+	return string(raw)
 }
 
 func execInPod(ctx context.Context, cfg *envconf.Config, ns, pod, container string, command []string) (string, string, error) {

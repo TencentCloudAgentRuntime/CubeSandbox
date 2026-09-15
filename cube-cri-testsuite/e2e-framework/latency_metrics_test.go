@@ -54,6 +54,37 @@ func TestApplySandboxPath(t *testing.T) {
 	}
 }
 
+func TestEphemeralStorageLimitEvictionMessage(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		want    bool
+	}{
+		{
+			name:    "pod-container-total-limit",
+			message: "Pod ephemeral local storage usage exceeds the total limit of containers 5Mi.",
+			want:    true,
+		},
+		{
+			name:    "container-limit",
+			message: "Container writer exceeded its local ephemeral storage limit 5Mi.",
+			want:    true,
+		},
+		{
+			name:    "node-pressure",
+			message: "The node was low on resource: ephemeral-storage.",
+			want:    false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isEphemeralStorageLimitEvictionMessage(tt.message); got != tt.want {
+				t.Fatalf("isEphemeralStorageLimitEvictionMessage(%q)=%t, want %t", tt.message, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLatencyObservationsAndPartialSummary(t *testing.T) {
 	start := time.Now()
 	r := latencyPodResult{Created: true, CreateStart: start, CreateReturn: start.Add(4 * time.Millisecond), Observed: map[string]time.Time{}, Server: map[string]time.Time{}}
