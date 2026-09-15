@@ -49,6 +49,14 @@
       "reason": "AGC-39 强制注入 runtimeClass=cube，而 RuntimeClass/cube 自带 cube-ready nodeSelector；部分上游 RuntimeClass 用例会选择普通节点，和当前双节点测试拓扑冲突。",
       "source": "AGC-39",
       "exitCriteria": "使用只包含 cube-ready 节点的 SIG Node e2e 集群，或让 e2e 节点选择只命中 cube-ready 节点。"
+    },
+    {
+      "id": "agc47-rro-default-handler-mismatch",
+      "enabled": true,
+      "pattern": "when the runtime supports recursive read-only mounts.*should accept recursive read-only mounts",
+      "reason": "Kubernetes v1.36.2 node e2e 按默认 handler 的 recursiveReadOnlyMounts=true 选择支持分支，但当前巡检会把测试 Pod 注入 runtimeClassName=cube，而 cube handler 准确上报 false，导致用例按 runc 能力选中后被 kubelet 根据 cube handler 能力按预期拒绝。",
+      "source": "AGC-47",
+      "exitCriteria": "改用 Cube 作为默认 runtime 的专用 node e2e 节点，或让测试按 cube handler 判断能力；Cube 完成跨容器 mount topology 和 RRO 端到端支持后也应移除此规则。"
     }
   ]
 }
