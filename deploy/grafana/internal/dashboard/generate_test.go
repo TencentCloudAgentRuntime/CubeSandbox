@@ -61,13 +61,31 @@ func TestGenerate(t *testing.T) {
 		t.Fatal("missing template-derived and cold-start sandbox event panel")
 	}
 	for _, panel := range dashboard.Panels {
-		if panel.Title != "Kubelet Pod 启动耗时 P95" && panel.Title != "Kubelet 同步与 CRI P95" && panel.Title != "API Server Pod POST P95" {
+		if panel.Title != "Kubelet Pod 启动耗时 P95" && panel.Title != "Kubelet 与 CRI（RunPodSandbox 含 CNI）P95" && panel.Title != "API Server Pod POST P95" && panel.Title != "Scheduler 调度耗时 P95" && panel.Title != "IPAM SetPodIP 耗时 P95" {
 			continue
 		}
 		for _, target := range panel.Targets {
 			if !strings.Contains(target.Expr, "[1m]") {
 				t.Fatalf("panel %q must use the fixed 1m rate window: %s", panel.Title, target.Expr)
 			}
+		}
+	}
+	wantMetrics := map[string]string{
+		"Scheduler 调度耗时 P95":   "scheduler_pod_scheduling_sli_duration_seconds_bucket",
+		"IPAM SetPodIP 耗时 P95": "ipamd_pod_set_ip_latency_seconds_bucket",
+		"节点 CPU 使用率":           "node_cpu_seconds_total",
+		"节点内存使用率":              "node_memory_MemAvailable_bytes",
+	}
+	for title, metric := range wantMetrics {
+		found := false
+		for _, panel := range dashboard.Panels {
+			if panel.Title == title && len(panel.Targets) == 1 && strings.Contains(panel.Targets[0].Expr, metric) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing or invalid panel %q", title)
 		}
 	}
 }

@@ -46,8 +46,9 @@ func panels() []any {
 		}),
 
 		row(32, "Kubernetes 控制链路", 9),
-		timeseries(34, "Kubelet 与 CRI（RunPodSandbox 含 CNI）P95", 10, 0, "s", false, kubeletRuntimeP95()),
-		timeseries(39, "API Server Pod POST P95", 10, 12, "s", false, apiserverPodPostP95()),
+		timeseriesWidth(34, "Kubelet 与 CRI（RunPodSandbox 含 CNI）P95", 10, 0, 8, "s", false, kubeletRuntimeP95()),
+		timeseriesWidth(40, "Scheduler 调度耗时 P95", 10, 8, 8, "s", false, schedulerPodSchedulingP95()),
+		timeseriesWidth(39, "API Server Pod POST P95", 10, 16, 8, "s", false, apiserverPodPostP95()),
 
 		row(8, "Shim 与 VMM worker", 18),
 		timeseries(9, "Worker 阶段 P95", 19, 0, "s", false, []query{
@@ -64,15 +65,17 @@ func panels() []any {
 		timeseriesWidth(13, "任务生命周期结果速率", 37, 16, 8, "ops", true, []query{{"sum by (component, operation, result) (rate(cube_cri_operations_total{node=~\"$node\",component=~\"agent|shim\",operation=~\"CreateSandbox|CreateContainer|TaskCreate|TaskStart|StartContainer\"}[$__rate_interval]))", "{{component}} {{operation}} {{result}}"}}),
 
 		row(4, "节点资源、网络与并发", 45),
-		timeseries(5, "资源准备耗时", 46, 0, "s", false, quantiles("resource", "Prepare|NetworkPrepare")),
-		timeseries(6, "资源准备结果速率", 46, 12, "ops", true, []query{{"sum by (operation, result) (rate(cube_cri_operations_total{node=~\"$node\",component=\"resource\",operation=~\"Prepare|NetworkPrepare\"}[$__rate_interval]))", "{{operation}} {{result}}"}}),
+		timeseriesWidth(5, "资源准备耗时", 46, 0, 8, "s", false, quantiles("resource", "Prepare|NetworkPrepare")),
+		timeseriesWidth(41, "IPAM SetPodIP 耗时 P95", 46, 8, 8, "s", false, ipamdPodSetIPP95()),
+		timeseriesWidth(6, "资源准备结果速率", 46, 16, 8, "ops", true, []query{{"sum by (operation, result) (rate(cube_cri_operations_total{node=~\"$node\",component=\"resource\",operation=~\"Prepare|NetworkPrepare\"}[$__rate_interval]))", "{{operation}} {{result}}"}}),
 		timeseries(7, "Sandbox 锁等待 P95", 54, 0, "s", false, []query{{"histogram_quantile(0.95, sum by (le, lock) (rate(cube_cri_lock_wait_duration_seconds_bucket{node=~\"$node\"}[$__rate_interval])))", "{{lock}}"}}),
 		timeseries(29, "运行时活跃请求", 54, 12, "short", false, []query{
 			{"sum by (component, operation) (cube_cri_operations_inflight{node=~\"$node\",component=~\"resource|shim\"})", "{{component}} {{operation}}"},
 			{"sum by (method) (cube_cri_rpc_inflight{node=~\"$node\"})", "RPC {{method}}"},
 		}),
-		timeseries(35, "Node CPU、内存与 CPU PSI", 62, 0, "percent", false, nodeCPUPressure()),
-		timeseries(36, "Node 磁盘与 IO PSI", 62, 12, "percent", false, nodeIOPressure()),
+		timeseriesWidth(35, "节点 CPU 使用率", 62, 0, 8, "percent", false, nodeCPUUsage()),
+		timeseriesWidth(42, "节点内存使用率", 62, 8, 8, "percent", false, nodeMemoryUsage()),
+		timeseriesWidth(36, "节点压力与磁盘 IO", 62, 16, 8, "percent", false, nodePressureAndIO()),
 
 		row(14, "释放、恢复与状态", 71),
 		timeseries(15, "资源释放耗时", 72, 0, "s", false, quantiles("resource", "Release|NetworkRelease|SharedRootCleanup")),
@@ -131,18 +134,27 @@ func apiserverPodPostP95() []query {
 	return []query{{"histogram_quantile(0.95, sum by (le) (rate(apiserver_request_duration_seconds_bucket{job=\"apiserver\",verb=\"POST\",resource=\"pods\",subresource=\"\"}[1m])))", "POST pods p95"}}
 }
 
-func nodeCPUPressure() []query {
-	return []query{
-		{"100 * (1 - avg by (node) (rate(node_cpu_seconds_total{node=~\"$node\",mode=\"idle\"}[1m])))", "CPU busy"},
-		{"100 * (1 - node_memory_MemAvailable_bytes{node=~\"$node\"} / node_memory_MemTotal_bytes{node=~\"$node\"})", "memory used"},
-		{"100 * rate(node_pressure_cpu_waiting_seconds_total{node=~\"$node\"}[1m])", "CPU PSI waiting"},
-	}
+func schedulerPodSchedulingP95() []query {
+	return []query{{"histogram_quantile(0.95, sum by (le) (rate(scheduler_pod_scheduling_sli_duration_seconds_bucket{job=\"kube-scheduler\"}[1m])))", "排队到调度完成 p95"}}
 }
 
-func nodeIOPressure() []query {
+func ipamdPodSetIPP95() []query {
+	return []query{{"histogram_quantile(0.95, sum by (le) (rate(ipamd_pod_set_ip_latency_seconds_bucket{job=\"tke-eni-ipamd\"}[1m])))", "SetPodIP p95"}}
+}
+
+func nodeCPUUsage() []query {
+	return []query{{"100 * (1 - avg by (node) (rate(node_cpu_seconds_total{node=~\"$node\",mode=\"idle\"}[1m])))", "{{node}}"}}
+}
+
+func nodeMemoryUsage() []query {
+	return []query{{"100 * (1 - node_memory_MemAvailable_bytes{node=~\"$node\"} / node_memory_MemTotal_bytes{node=~\"$node\"})", "{{node}}"}}
+}
+
+func nodePressureAndIO() []query {
 	return []query{
-		{"100 * max by (node) (rate(node_disk_io_time_seconds_total{node=~\"$node\",device!~\"loop.*|ram.*\"}[1m]))", "busiest disk IO"},
-		{"100 * rate(node_pressure_io_waiting_seconds_total{node=~\"$node\"}[1m])", "IO PSI waiting"},
+		{"100 * rate(node_pressure_cpu_waiting_seconds_total{node=~\"$node\"}[1m])", "{{node}} CPU PSI"},
+		{"100 * max by (node) (rate(node_disk_io_time_seconds_total{node=~\"$node\",device!~\"loop.*|ram.*|nbd.*\"}[1m]))", "{{node}} busiest disk IO"},
+		{"100 * rate(node_pressure_io_waiting_seconds_total{node=~\"$node\"}[1m])", "{{node}} IO PSI"},
 	}
 }
 
