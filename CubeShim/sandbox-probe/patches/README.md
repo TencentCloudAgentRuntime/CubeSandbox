@@ -47,14 +47,18 @@ Guest Pod cgroup 原生指标，不能继续从当前容器集合合成。
 `io.containerd.cube.rs` 生效：读取 CRI 写入 core sandbox 的
 `updated-resources` extension，并通过 Sandbox shim 的 Task `Update` 转发 Pod CPU、
 memory limit。CubeShim 使用绝对目标执行 VM hotplug；非 Cube runtime 保持原行为。
-权威 Pod memory limit 直接作为 VM 父边界，缩容时不等待各子容器 limit 之和先降到目标；
-因此其 OOM 语义是 Pod 级总量约束，不等同于逐容器 memory limit。
+权威 Pod memory limit 在缩容时先记为 pending；待所有活跃 Guest 容器已生效的有限
+memory limit 总和不超过目标后，才通过 balloon 回收。这是容量屏障，不要求
+每个容器都在本轮收到一次 `Task.Update`。若任一活跃容器无有限 limit，或 Pod-level
+limit 低于子容器 limit 总和，第一阶段保持 pending，不提前回收内存；这些合法的
+Pod-level-only 缩容场景尚不支持，后续需要明确 Guest Pod 父 cgroup 的收敛协议。
 
 该补丁提供权威 Pod aggregate，适用于 containerd 2.3.4。未带补丁的 containerd
 仍可通过标准容器 Task `Update` 触发 CubeShim 聚合当前 active 容器 limit，因此
 1.7/2.0～2.2 无需替换节点 containerd 即可覆盖普通 app container 原地 limit 更新和
-重建更新。该兜底不具备完整 Kubernetes Pod aggregate 语义：classic init container max、
-Pod-level resources 以及 memory request-only 均需要本补丁提供的权威 Pod 聚合值。
+重建更新。该兜底不具备完整 Kubernetes Pod aggregate 语义：classic init container max
+需要本补丁提供的权威聚合值；Pod-level-only 缩容即使使用本补丁也仍受上述屏障限制；
+memory request-only 不驱动 VM 扩容。
 
 应用与验证：
 
