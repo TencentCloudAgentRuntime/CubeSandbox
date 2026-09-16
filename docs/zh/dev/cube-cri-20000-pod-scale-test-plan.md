@@ -42,15 +42,16 @@ T_total = T_last_ready_observed - T_first_create_start
 - 走完整 Kubernetes 链路：API Server、调度器、kubelet、containerd CRI、CNI、CubeShim、RuntimeResource、Guest Agent。
 - 使用 `runtimeClassName: cube`，由 `default-scheduler` 正常调度，不设置 `nodeName`。
 - 保留输入工作负载的 init container、多容器、共享网络、卷、探针、安全上下文和 ServiceAccount 投射语义；资源缩小为启动压测规格。
-- 压测镜像固定 digest 并预热到所有节点，主指标不包含大规模镜像下载。
-- 主轮使用 `cube-template-mode: auto`，但必须通过 Cube 指标或结构化日志逐 Pod 证明实际模板命中率为 100%。模板预热轮与正式计时轮分开执行。
+- 正式压测镜像固定 digest，并在全部有效节点保持冷态；主指标包含 EROX 经 TCR 发现派生制品、建立远端快照和按需读取启动所需数据的耗时。
+- EROX 安装预检和 RuntimeTemplate 预热使用独立预检镜像，不得提前引用正式压测镜像。预检镜像与正式压测镜像必须使用不同 repository 和内容 digest，避免复用 image record、content 或 snapshot。
+- 主轮使用 `cube-template-mode: auto`，但必须通过 Cube 指标或结构化日志逐 Pod 证明实际模板命中率为 100%。模板预热轮与正式计时轮分开执行，二者仅复用相同 VM 规格和 RuntimeTemplate，不复用正式压测镜像状态。
 - Pod Ready 后稳定运行 10 分钟，再执行功能抽检和资源回收。
 
 ### 2.2 补充场景
 
 以下场景单独执行和报告，不与主结果合并：
 
-- 冷镜像拉取：验证镜像仓库、网络和解压能力，建议先做 1,000 Pod，再决定是否放大到 20,000。
+- EROX 暖镜像对照：提前建立正式压测镜像的 image record 和 snapshot，用于量化冷拉取相对暖态的额外耗时，不与主结果合并。
 - Cube 显式冷启动：设置 `agc.cloud.tencent.com/cube-template-mode: cold`，用于与生产默认路径对照。
 - 最大突发：取消固定 QPS，仅保留请求并发上限，用于寻找控制面拐点。
 - 删除、重建、节点或运行时故障：用于验证回收和恢复，不进入启动主指标。
@@ -180,9 +181,9 @@ CPU和内存至少预留 10%，临时存储预留 30%；10% 备用节点不参�
 主场景把每个 Pod 的 `ephemeral-storage` request 从 30Gi 缩小为 512Mi，但保留 `emptyDir`、容器可写层和 kubelet 临时存储调度语义。推荐：
 
 - 64C/128Gi 节点至少提供 200Gi allocatable 临时存储，并确认扣除 30% 余量后仍足以调度计划密度。
-- containerd imagefs、Cube 状态/模板数据和 Pod 临时存储尽量分盘或设置明确配额。
-- 统计工具镜像解压后的实际占用，保证预热完成后 nodefs/imagefs 仍至少有 30% 空闲。
-- 测试前后记录磁盘字节、inode、Cube 状态目录和 containerd snapshot 数量。
+- containerd imagefs、EROX 状态/缓存、Cube 状态/模板数据和 Pod 临时存储尽量分盘或设置明确配额。
+- 统计 EROX 元数据、按需读取和容器可写层的实际占用，保证正式轮开始前 nodefs/imagefs 仍至少有 30% 空闲。
+- 测试前后记录磁盘字节、inode、EROX mount/NBD/snapshot、Cube 状态目录和 containerd snapshot 数量。
 
 若仍保留原始 30Gi request，则 1TiB 节点按 30% 磁盘余量只能放约 23 个目标 Pod，至少需要 870 台有效节点和 87 台备用节点；因此 CPU/内存缩小后必须同步确认临时存储口径。
 
@@ -203,7 +204,7 @@ Kubernetes 官方大集群参考范围为最多 5,000 节点、150,000 Pod 和 3
 |---|---|---|
 | kubelet `maxPods` | **固定为 250** | 所有有效 Cube 节点逐一核验 `status.allocatable.pods=250`，不一致时不得开始正式轮次 |
 | kubelet `podsPerCore` | `0` | 避免与 `maxPods` 叠加造成意外限制 |
-| 镜像拉取 | 主场景保持 `IfNotPresent`，所有节点预热 | 不需要为主场景放大 registry QPS |
+| 镜像拉取 | 主场景保持 `IfNotPresent`，正式压测镜像在所有节点保持冷态 | 按 2 万 Pod 冷拉取评估 TCR、Token 和 Range 请求容量 |
 | Namespace | 20 个，每个 1,000 Pod | 分散对象、Watch 和清理压力 |
 | ResourceQuota | 预留完整 20,000 Pod 和总 request | 检查 CPU、内存、临时存储和 Pod 等维度 |
 | LimitRange | 禁止改变模板 resource | 防止 admission 注入导致容量口径漂移 |
@@ -281,20 +282,59 @@ kubectl annotate nodeeniconfig "$node" \
 
 这些内核值先通过预演观测是否成为瓶颈；只修改有证据触发上限的参数，并在报告中记录前后值。
 
-### 5.6 镜像与模板准备
+### 5.6 EROX Snapshotter 与镜像加速
+
+仅在评审确认的有效 Cube 节点启用 EROX，不得包含负载生成器、备用节点和非 TS4/PVM 节点。安装实现统一由仓库任务维护，测试计划不展开 Helm 和节点改造细节：
+
+```bash
+EROX_KUBECONFIG=/path/to/kubeconfig \
+EROX_NODES=cube-node-1,cube-node-2 \
+task deploy:erox
+```
+
+任务成功是环境准入条件；执行记录必须保存任务版本、目标节点和 Chart 版本。任务负责节点资格检查、安装、首次启用和健康门禁，具体参数与兼容处理见 `deploy/cube-cri/erox.sh`。
+
+#### 5.6.1 镜像契约
+
+预检与正式压测使用不同 repository 和内容 digest：
+
+```bash
+export EROX_PREFLIGHT_IMAGE=tcr-cube.tencentcloudcr.com/journeyyou/nginx:latest
+export CUBE_LOAD_IMAGE=tcr-cube.tencentcloudcr.com/journeyyou/busybox@sha256:5b0745afdfec8efe7225bbe20cd87dc9139381e676400707ea979ec5406de3a8
+```
+
+- `EROX_PREFLIGHT_IMAGE` 只用于 EROX 验收和 RuntimeTemplate 预热；`CUBE_LOAD_IMAGE` 是固定 source child manifest digest 的正式负载镜像。
+- 两个镜像都必须存在 `tcr-erofs-v1` canonical 派生制品。准备阶段从运维机只读校验并记录源 manifest `S`、派生 manifest `D` 和 EROFS blob `B`。
+- Pod 保留源 image 引用，不得改写为 canonical tag 或 EROFS blob。仓库负载模板已固定默认正式镜像，替换镜像时必须同步更新全部容器并记录模板哈希。
+
+#### 5.6.2 预检与冷态门禁
+
+在每个有效节点运行使用 `EROX_PREFLIGHT_IMAGE`、Cube RuntimeClass 和 `imagePullPolicy: Always` 的预检 Pod，并确认：
+
+- container runtime 为 `io.containerd.cube.rs`，snapshotter 为 `erox`，snapshot 指向预期 EROFS blob `B`。
+- `/dev/nbd*` 同时挂载到 EROX snapshot 与 Cube rootfs layer，容器可读镜像并可写 writable layer。
+- 源 tar layer 和完整 EROFS blob 未进入 containerd content store，日志无 native fallback、鉴权、Range、slot 或 unmanaged 资源错误。
+
+RuntimeTemplate 预热也使用预检镜像，但 VM 规格必须与正式负载一致。随后删除预检 Pod 和 image record，等待 mount、NBD slot、snapshot 和 cache 回到基线。
+
+正式轮 T0 前保存逐节点冷态扫描；`CUBE_LOAD_IMAGE` 及其 `S/D/B` 不得出现在 CRI image list、containerd content store、EROX snapshot、mount 或 cache 中。禁止提前拉取、导入、运行正式镜像，或用其生成 RuntimeTemplate。任一节点不满足时不得开始计时。
+
+冷态以节点为单位：首个 Pod 建立远端 snapshot，后续 Pod 复用 image record 和 snapshot。报告必须单列每节点首次 PullImage、首次容器启动和首次 Ready 延迟。不同预演或正式轮只有在使用不同镜像 digest，或完成可证明的逐节点清理后，才可作为独立冷态样本。
+
+### 5.7 镜像与模板准备
 
 主场景执行前：
 
-1. 将模板使用的轻量工具镜像同步到压测集群可访问的仓库并固定 digest。
-2. 通过 DaemonSet 或节点镜像预热机制将镜像拉取、解压到全部有效节点。
-3. 每节点核对镜像 digest，预热失败的节点移出有效节点池。
-4. 为该 Pod 推导出的 VM 规格提前准备兼容 RuntimeTemplate，并完成每节点可用性检查。
-5. 预热轮完成后清理其 Pod，确认模板已覆盖全部有效 Cube 节点，再开始独立的正式计时轮。
+1. 将正式轻量工具镜像同步到 `tcr-cube.tencentcloudcr.com` 并固定 digest，完成 TCR EROFS 转换和 Registry 侧契约检查。
+2. 使用独立 `EROX_PREFLIGHT_IMAGE` 完成全部有效节点的 EROX 验收；不得在节点上拉取正式压测镜像。
+3. 用预检镜像和正式 Pod 相同的 VM 规格准备 RuntimeTemplate，并完成每节点可用性检查。
+4. 预热轮完成后清理预检 Pod、image record 和 EROX 资源，确认模板已覆盖全部有效 Cube 节点。
+5. 执行正式压测镜像冷态扫描并保存结果，再开始独立的正式计时轮。
 6. 运行时按 Pod UID 或 Sandbox ID 记录模板命中、冷启动、回退和未知数量，四类合计必须等于目标 Pod 数。
 
 主场景采用 `auto` 请求策略和实际 RuntimeTemplate 启动路径。只有模板命中率为 100%，且冷启动、回退和未知均为 0 时，数据才进入主结果。纯冷启动使用 `cold` 作为独立对照场景，不能与模板启动样本混合解释。
 
-### 5.7 负载生成器
+### 5.8 负载生成器
 
 - 在集群内准备一台专用节点. 负载生成器 Pod 被调度到此节点上. 不可把压测 Pod 调度到此节点上.
 
@@ -302,7 +342,7 @@ kubectl annotate nodeeniconfig "$node" \
 
 集群规模编排优先使用 Kubernetes ClusterLoader2，复用其固定 QPS、Pod startup measurement 和 Prometheus 采集能力；增加 Cube 专用逐 Pod 结果收集器，沿用现有 latency 用例的时间口径。
 
-负载生成器调度到专用节点上，共 4 个实例，每个负责 5,000 Pod。协调器在所有 Watch 建立后发布统一开始信号。每个生成器使用独立 Namespace 集合和 API 客户端，并保存逐请求结果。
+负载生成器调度到专用节点上，共 4 个实例，每个负责 5,000 Pod。协调器在所有 Watch 建立后发布统一开始信号。每个生成器使用独立 Namespace 集合和 API 客户端，并保存逐请求结果。不要在本地提交工作负载，本地与集群连接的网络链路请求延迟过高，会限制提交速率。
 
 正式轮次采用开放负载：
 
@@ -321,7 +361,7 @@ kubectl annotate nodeeniconfig "$node" \
 1. 记录 Git commit、installer digest、runtime 包、Host/Guest kernel、Guest image、Agent、containerd、kubelet和 CNI 版本。
 2. 记录节点清单、`allocatable`、Pod IP和临时存储容量，确认有效节点数满足规划。
 3. 关闭发布、扩缩容和其他压测；确保节点无 Pressure、NotReady、异常重启或待清理资源。
-4. 验证镜像与模板预热、ServiceAccount 投射、CoreDNS 和监控链路。
+4. 验证 EROX 独立预检、RuntimeTemplate 预热、正式压测镜像冷态、ServiceAccount 投射、CoreDNS 和监控链路。
 5. 保存 API Server、调度器、etcd、kubelet、containerd 和 Cube 的空载基线。
 
 ### 7.2 分级预演
@@ -331,9 +371,9 @@ kubectl annotate nodeeniconfig "$node" \
 | 阶段 | 节点范围 | Pod 数 | 目的 |
 |---|---:|---:|---|
 | S0 | 1 节点 | 1 | 完整功能和清理检查 |
-| S1 | 15 节点 | 2,000 | 预计每节点 133～134 Pod，并发及业务探针检查 |
-| S2 | 50 节点 | 5,000 | 控制面、CNI、DNS、监控预演 |
-| S3 | 100 节点 | 10,000 | 半规模容量和提交速率验证 |
+| S1 | 10 节点 | 1,500 | 预计每节点 150 Pod，并发及业务探针检查 |
+| S2 | 50 节点 | 7,500 | 控制面、CNI、DNS、监控预演 |
+| S3 | 100 节点 | 15,000 | 半规模容量和提交速率验证 |
 | S4 | 全部有效节点 | 20,000 | 正式测试 |
 
 S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成清理、资源归零和至少 15 分钟冷却；若需要控制 Host page cache，则在三轮中保持相同策略并明确记录是否重启节点。
@@ -341,7 +381,7 @@ S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成�
 ### 7.3 正式轮次
 
 1. 创建批次 ID，清理同名残留，建立 20 个 Namespace Watch。
-2. 确认监控窗口和日志时间范围，记录 T0 前 5 分钟基线。
+2. 确认监控窗口和日志时间范围，记录 T0 前 5 分钟基线；完成全部有效节点的正式压测镜像冷态扫描。
 3. 协调器发布开始信号，4 个生成器按 1,000 Pod/s 聚合速率提交。
 4. 持续统计 Created、Scheduled、Initialized、ContainersStarted、Ready 和失败数。
 5. 第 20,000 个 Pod Ready 后停止主计时，保存所有逐 Pod 和批次结果。
@@ -354,7 +394,8 @@ S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成�
 - 先删除 Namespace 内的目标 Pod，再删除 Namespace；目标集群的 Gatekeeper 禁止直接删除仍含 Pod 的 Namespace。
 - 先以 1,000 Pod/s 删除，测量正常回收耗时；最大突发删除另做补充场景。
 - 等待 Kubernetes Pod 对象、CRI container/sandbox、Cube VM、Shim/worker 全部消失。
-- 检查 TAP、netns、mount、cgroup、共享目录、containerd snapshot、Cube lease 和 reaper。
+- 检查 TAP、netns、mount、cgroup、共享目录、containerd snapshot、EROX snapshot/NBD/cache、Cube lease 和 reaper。
+- EROX mount、NBD slot、snapshot 和 unmanaged 资源回到本轮开始前基线；需要保持下一轮冷态时，删除本轮正式镜像的 image/content/snapshot/cache 并逐节点复查。
 - `cube_cri_reaper_pending_jobs` 回到 0，lease 数量回到测试前基线。
 - 节点内存、PID、FD、磁盘字节和 inode 在 15 分钟内收敛到可解释范围。
 - 未归零时保留节点和证据，不进入下一轮，也不得以人工删除掩盖运行时清理问题。
@@ -371,6 +412,7 @@ S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成�
 | etcd | request、WAL/fsync、commit、DB 大小、leader 变更 |
 | kubelet | pod worker、pod start、RunPodSandbox/Create/Start、PLEG、runtime error |
 | containerd | CRI 请求、shim/task、snapshot、GC、进程 CPU/内存/FD |
+| EROX | 派生发现命中/失败、native fallback、Token/Range 请求、远端读取字节、NBD slot、mount/snapshot、Adapter 与 Snapshotter 错误 |
 | Cube | operation duration/inflight/error、RPC、锁等待、模板命中、lease、reaper |
 | 节点 | CPU、run queue、PSI、内存、PID/FD、磁盘延迟/inode、网络丢包/conntrack |
 | Pod | 各条件时间戳、容器 startedAt/restartCount、probe 和失败原因 |
@@ -382,7 +424,7 @@ S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成�
 仓库自带监控适合小规模验证，默认单 Prometheus、4Gi 内存和 10Gi 存储，不足以作为约 110 节点的正式采集系统。正式环境建议：
 
 - 4 个 Prometheus shard 按节点分片，或节点 Agent remote-write 到独立时序系统。
-- Cube 启动指标 1 秒采集，kubelet和 node-exporter 5 秒采集；先测量监控自身开销。
+- Cube 和 EROX 启动指标 1 秒采集，kubelet和 node-exporter 5 秒采集；先测量监控自身开销。
 - 不在指标 label 中加入 Pod UID、sandbox ID 或 container ID。
 - 逐 Pod 20,000 条延迟由压测工具保存为 JSONL/Parquet，不依赖高基数 Prometheus。
 - 关闭全量 Guest boot trace 和 debug 日志；错误节点按需采集，避免日志 I/O 改变结果。
@@ -396,6 +438,8 @@ S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成�
 - 无 Pod `Failed`、无不可恢复 Create 错误、无重复 IP/MAC、无 Sandbox 身份冲突。
 - Ready 后稳定 10 分钟，抽检功能全部通过，非注入场景容器重启数为 0。
 - 无节点 NotReady、MemoryPressure、DiskPressure、PIDPressure、OOM 或内核异常。
+- 正式压测镜像在 T0 前全部节点为冷态；运行后抽检确认目标容器 snapshotter 为 `erox`、派生契约命中且无 native fallback。
+- 无 NBD slot 耗尽、持续 Range/鉴权错误、源 tar layer 全量下载或 EROX unmanaged 资源。
 - 删除后运行时和 Kubernetes 资源按第 7.4 节归零。
 
 ### 9.2 性能结果
@@ -405,9 +449,10 @@ S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成�
 - `T_submit`、`T_all_scheduled`、`T_all_started`、`T_all_ready` 上限。
 - Create→Ready、Scheduled→Ready 和 ContainersStarted→Ready 的 P95/P99 上限。
 - API Server 429/5xx、CRI 错误和 Cube 内部错误上限。
+- 每节点首次 EROX PullImage、派生发现、snapshot 建立和首个 Pod Ready 的 P50/P95/P99/max。
 - 每节点吞吐偏斜和最慢节点上限。
 
-三轮 S4 均满足正确性门禁才算通过。最终结论报告三轮各自结果和中位数，不挑选最快轮次；版本、配置、镜像缓存或 RuntimeTemplate 制品不同的轮次不得合并。任何模板命中率低于 100% 或启动路径存在未知项的轮次均为无效主轮。
+三轮 S4 均满足正确性门禁才算通过。最终结论报告三轮各自结果和中位数，不挑选最快轮次；版本、配置、镜像冷态或 RuntimeTemplate 制品不同的轮次不得合并。任何模板命中率低于 100% 或启动路径存在未知项的轮次均为无效主轮。
 
 ## 10. 产物
 
@@ -424,6 +469,12 @@ S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成�
   pods.jsonl
   batch-summary.json
   feature-sampling.json
+  erox/
+    registry-contract.json
+    node-preflight.jsonl
+    cold-state-before.jsonl
+    node-first-pull.jsonl
+    cleanup-state.jsonl
   prometheus-snapshot/
   error-logs/
   cleanup-summary.json
@@ -437,17 +488,21 @@ S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成�
 3. 时间分别消耗在提交、调度、Sandbox、容器启动和 probe 的哪一段。
 4. 是否存在节点、控制面、存储、网络或外部依赖瓶颈。
 5. 20,000 Pod 稳定运行和删除后是否有资源泄漏。
-6. 本轮结果适用于哪组制品、节点规格、镜像缓存和 RuntimeTemplate 制品。
+6. T0 前如何证明正式压测镜像在全部有效节点为冷态，运行时如何证明命中 EROX 而非 native fallback。
+7. 每节点首次冷 PullImage 和首个 Ready 耗时是多少，后续 Pod 复用 image/snapshot 后的耗时是多少。
+8. 本轮结果适用于哪组制品、节点规格、镜像冷态和 RuntimeTemplate 制品。
 
 ## 11. 开始前检查表
 
-- [ ] 20,000 Pod 的目标提交速率、镜像缓存和 RuntimeTemplate 制品已冻结。
+- [ ] 20,000 Pod 的目标提交速率、正式镜像 digest、冷态口径和 RuntimeTemplate 制品已冻结。
 - [ ] 节点数按实际 allocatable 重算，10% 备用节点已就绪但不参与调度。
 - [ ] 全部有效 Cube 节点已逐一确认 `status.allocatable.pods=250`。
 - [ ] vCPU、内存、临时存储、Pod IP、镜像和云产品配额均已确认。
 - [ ] 全部 Cube 节点使用相同 TS4/PVM、containerd、CNI 和不可变 runtime 制品。
-- [ ] 脱敏 workload 已通过 `task test:cri` 和单 Pod完整功能验证。
-- [ ] 工具镜像 digest 已在所有有效节点缓存，匹配模板已覆盖全部有效节点并验证。
+- [ ] 脱敏 workload 已使用预检或专用验证镜像通过 `task test:cri` 和单 Pod 完整功能验证，未在有效节点拉取正式压测镜像。
+- [ ] `erox-node` 在全部有效节点 Ready，服务、snapshotter、ImageService、NBD 和 imagefs 健康检查通过。
+- [ ] 独立 EROX 预检镜像已完成逐节点验证和清理，RuntimeTemplate 已覆盖全部有效节点。
+- [ ] 正式压测镜像的 `S/D/B` 已冻结并通过 Registry 契约检查，且逐节点冷态扫描通过。
 - [ ] 模板命中指标或结构化日志可按 Pod UID/Sandbox ID 与本轮目标 Pod 对账。
 - [ ] 20 个 Namespace 的 ServiceAccount 和根 CA ConfigMap 已准备。
 - [ ] API Server、scheduler、etcd、kubelet、containerd、Cube和节点监控完整可用。
@@ -457,6 +512,8 @@ S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成�
 ## 12. 参考
 
 - [Cube CRI 运行时监控方案](./cube-cri-observability.md)
+- EROX TCR 部署与回滚：`erox-snapshotter/deploy/charts/erox-node/TCR.md`
+- EROX Registry 镜像契约：`erox-snapshotter/docs/registry-image-contract.md`
 - Cube CRI 并发启动延迟口径：`cube-cri-testsuite/e2e-framework/README.md`
 - [Kubernetes 大集群注意事项](https://kubernetes.io/docs/setup/best-practices/cluster-large/)
 - [ClusterLoader2](https://github.com/kubernetes/perf-tests/tree/master/clusterloader2)

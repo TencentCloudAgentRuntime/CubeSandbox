@@ -3,6 +3,7 @@ vars:
   BUILD: bash ./deploy/cube-cri/build.sh
   IMAGE_TASK: bash ./deploy/cube-cri/image.sh
   HELM_TASK: bash ./deploy/cube-cri/helm.sh
+  EROX_TASK: bash ./deploy/cube-cri/erox.sh
   ARGS: '{{.CLI_ARGS | default ""}}'
 tasks:
   default:
@@ -50,6 +51,9 @@ tasks:
     aliases: [deploy]
     desc: 通过 Helm DaemonSet 在带 Cube 标签的节点安装 Cube 运行时。
     cmds: ['{{.HELM_TASK}}']
+  deploy:erox:
+    desc: 在显式指定的 Cube 节点安装并验证 EROX Snapshotter。
+    cmds: ['{{.EROX_TASK}}']
   deploy:all:
     desc: 通过 Helm DaemonSet 部署已有 digest 安装镜像。
     cmds:
