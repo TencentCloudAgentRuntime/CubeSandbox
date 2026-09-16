@@ -305,7 +305,7 @@ export CUBE_LOAD_IMAGE=tcr-cube.tencentcloudcr.com/journeyyou/busybox@sha256:5b0
 
 - `EROX_PREFLIGHT_IMAGE` 只用于 EROX 验收和 RuntimeTemplate 预热；`CUBE_LOAD_IMAGE` 是固定 source child manifest digest 的正式负载镜像。
 - 两个镜像都必须存在 `tcr-erofs-v1` canonical 派生制品。准备阶段从运维机只读校验并记录源 manifest `S`、派生 manifest `D` 和 EROFS blob `B`。
-- Pod 保留源 image 引用，不得改写为 canonical tag 或 EROFS blob。仓库负载模板已固定默认正式镜像，替换镜像时必须同步更新全部容器并记录模板哈希。
+- Pod 保留源 image 引用，不得改写为 canonical tag 或 EROFS blob。仓库负载模板已固定默认正式镜像；执行时通过 `cube-cri-testsuite/performance/scale-load/run.sh --snapshotter-profile erox|overlayfs` 生成实际 Pod 模板，脚本会同步更新全部 `initContainers`/`containers` 的 image，并按 profile 设置或移除 `agc.cloud.tencent.com/cube-template-mode`。
 
 #### 5.6.2 预检与冷态门禁
 

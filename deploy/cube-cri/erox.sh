@@ -27,12 +27,14 @@ k() { kubectl --kubeconfig "$kubeconfig" --request-timeout=30s "$@"; }
 
 read -r -a candidates <<< "${nodes_raw//,/ }"
 nodes=()
-declare -A seen=()
 for node in "${candidates[@]}"; do
   [[ -n $node ]] || continue
   [[ $node =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || { echo "非法节点名: $node" >&2; exit 2; }
-  [[ -n ${seen[$node]:-} ]] && continue
-  seen[$node]=1
+  if ((${#nodes[@]} > 0)); then
+    for existing in "${nodes[@]}"; do
+      [[ $existing != "$node" ]] || continue 2
+    done
+  fi
   nodes+=("$node")
 done
 ((${#nodes[@]} > 0)) || { echo "EROX_NODES 未包含有效节点" >&2; exit 2; }
@@ -94,9 +96,19 @@ k -n "$namespace" get "daemonset/$daemonset" -o json | jq -e '
 for node in "${nodes[@]}"; do
   KUBECONFIG="$kubeconfig" kubectl node-shell "$node" -- bash -lc '
     set -Eeuo pipefail
-    actual=/var/lib/erox-node-snapshotter/snapshots
+    actual=/var/lib/erox-node-snapshotter/native/snapshots
+    imagefs=/var/lib/erox-node-snapshotter/snapshots
     fallback=/var/lib/containerd/io.containerd.snapshotter.v1.erox
     test -d "$actual"
+    if [[ -L $imagefs ]]; then
+      [[ $(readlink "$imagefs") == "$actual" ]]
+    elif [[ -e $imagefs ]]; then
+      echo "$imagefs 已存在且不是预期兼容链接" >&2
+      exit 1
+    else
+      [[ $(stat -c %d /var/lib/erox-node-snapshotter) == $(stat -c %d "$actual") ]]
+      ln -s "$actual" "$imagefs"
+    fi
     if [[ -L $fallback ]]; then
       [[ $(readlink "$fallback") == "$actual" ]]
     elif [[ -e $fallback ]]; then
@@ -119,9 +131,11 @@ for node in "${nodes[@]}"; do
   '
 done
 
-for node in "${migrated_nodes[@]}"; do
-  k uncordon "$node"
-done
+if ((${#migrated_nodes[@]} > 0)); then
+  for node in "${migrated_nodes[@]}"; do
+    k uncordon "$node"
+  done
+fi
 
 printf 'EROX ready: release=%s/%s version=%s nodes=%s\n' \
   "$namespace" "$release" "$version" "${nodes[*]}"
