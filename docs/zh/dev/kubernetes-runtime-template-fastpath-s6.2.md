@@ -52,7 +52,7 @@ Cube `CreatePodSandbox` 从 `SandBox::create_sandbox` 开始计时，不包含�
 
 `cubelet-cri` 当前是独立 RuntimeResource 服务，未初始化完整 legacy 模板栈。优先通过窄接口注入资产解析、存储和后台制模执行器；必要时仅抽取已有实现中的通用部分，保留 `services/runtime` 不依赖 legacy Cubebox/containerd 服务的契约。模板生产与分发在请求外完成，不能将 `AppSnapshot` 同步接入 CRI 请求。
 
-当前实现的节点契约为：`--template-root` 下仅识别 `<TemplateKey>/ready.json`；文件必须原子发布，并包含 `snapshot_base`、可选 `snapshot_memory_vol_url` 和相同的 `template_key`，且 `<snapshot_base>/<cpu>C<memory>M/metadata.json` 与 `snapshot/` 已存在。miss 会以单飞方式执行 `--template-builder`，并追加 `--template-key`、`--output`、`--cpu`、`--memory-mib`。默认 producer 是随 CRI 包安装的 `cube-template-builder`：复用 CubeShim 的 `Snapshot`，以当前 kernel/guest/agent 启动专用无业务 VM，等待 Agent 就绪后封存并原子发布 manifest；不截取触发请求的业务 Pod。自定义 producer 同样必须遵守该发布契约。
+当前实现的节点契约为：`--template-root` 下仅识别 `<TemplateKey>/ready.json`；文件必须原子发布，并包含 `snapshot_base`、可选 `snapshot_memory_vol_url` 和相同的 `template_key`，且 `<snapshot_base>/<cpu>C<memory>M/metadata.json` 与 `snapshot/` 已存在。miss 会以单飞方式执行 `--template-builder`，并追加 `--template-key`、`--output`、`--cpu`、`--memory-mib`、`--max-cpu`、`--max-memory-mib`。最大拓扑参与 `TemplateKey` 和快照元数据校验，旧的固定容量模板不会被热插拔 Pod 复用。默认 producer 是随 CRI 包安装的 `cube-template-builder`：复用 CubeShim 的 `Snapshot`，以当前 kernel/guest/agent 启动专用无业务 VM，等待 Agent 就绪后封存并原子发布 manifest；不截取触发请求的业务 Pod。自定义 producer 同样必须遵守该发布契约。
 
 ## 4. 模板生命周期：何时制作、发布和回收
 

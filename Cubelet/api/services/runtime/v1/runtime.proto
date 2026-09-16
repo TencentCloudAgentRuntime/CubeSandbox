@@ -53,6 +53,8 @@ message PodIdentity {
 message ResourceRequest {
   uint32 vcpu_count = 1;
   uint64 memory_bytes = 2;
+  uint32 max_vcpu_count = 3;
+  uint64 max_memory_bytes = 4;
 }
 
 message NetworkIntent {

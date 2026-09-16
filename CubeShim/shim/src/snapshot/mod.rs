@@ -261,7 +261,9 @@ impl Snapshot {
         vm_config
             .set_kernel(self.kernel.clone())
             .set_vcpus(self.res.cpu)
-            .set_memory(self.res.memory, true);
+            .set_max_vcpus(self.res.max_cpu)
+            .set_memory(self.res.memory, true)
+            .set_max_memory(self.res.max_memory);
         let mut template_tap = None;
 
         if self.tap {
@@ -443,6 +445,7 @@ impl Snapshot {
 
     fn store_metadata(&self) -> CResult<()> {
         let mut snap_info = SnapshotInfo::new(self.res.cpu, self.res.memory);
+        snap_info.set_vm_max(self.res.max_cpu, self.res.max_memory);
         if let Ok(version) = Utils::get_image_version_for_path(&self.os_image_path) {
             snap_info.image_version = version;
         }

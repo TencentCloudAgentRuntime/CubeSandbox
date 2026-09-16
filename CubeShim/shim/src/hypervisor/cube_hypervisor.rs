@@ -11,7 +11,7 @@ use cube_hypervisor::config::RestoreConfig;
 use cube_hypervisor::vm_config::{DeviceConfig, FsConfig};
 use cube_hypervisor::{
     self, config, vmm_config, ApiRequest, ApiResponsePayload, SnapshotConfig, SnapshotType,
-    VmRemoveDeviceData,
+    VmRemoveDeviceData, VmResizeData,
 };
 use std::sync::mpsc::{channel, Receiver};
 use std::time::Duration;
@@ -268,6 +268,18 @@ impl CubeHypervisor {
             .map_err(|e| self.status_err(format!("Resume vm failed:{}", e)))?
             .map_err(|e| self.status_err(format!("Resume vm failed:{}", e)))?;
 
+        Ok(())
+    }
+
+    pub async fn resize_vm(&self, resize: VmResizeData) -> CResult<()> {
+        if let Some(worker) = &self.worker {
+            worker.request(WorkerCommand::ResizeVm(resize), &[])?;
+            return Ok(());
+        }
+        let ch = self.ch.as_ref().unwrap().lock().await;
+        ch.send_request(ApiRequest::VmResize(Arc::new(resize)))
+            .map_err(|error| self.status_err(format!("Resize vm request failed:{error}")))?
+            .map_err(|error| self.status_err(format!("Resize vm failed:{error}")))?;
         Ok(())
     }
 

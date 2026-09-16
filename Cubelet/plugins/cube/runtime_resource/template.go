@@ -27,7 +27,7 @@ import (
 
 const templateReadyFile = "ready.json"
 const templateBuildTimeout = 15 * time.Minute
-const templateFormat = "v11-networkless-hotplug-net-cgroupv2"
+const templateFormat = "v12-networkless-resource-hotplug"
 const templateModeAuto = "auto"
 const templateModeCold = "cold"
 
@@ -45,7 +45,7 @@ type templateResolver struct {
 	builder  []string
 	mu       sync.Mutex
 	building map[string]struct{}
-	run      func(context.Context, string, string, uint32, uint64) error
+	run      func(context.Context, string, string, uint32, uint64, uint32, uint64) error
 }
 
 func newTemplateResolver(root, builder string) (*templateResolver, error) {
@@ -66,9 +66,11 @@ func newTemplateResolver(root, builder string) (*templateResolver, error) {
 
 func templateKey(resources *runtimev1.ResourceRequest, assets Assets) string {
 	cpu, memory := templateResources(resources)
+	maxCPU, maxMemory := templateMaximums(resources)
 	identity := strings.Join([]string{
 		templateFormat,
 		fmt.Sprintf("%dC%dM", cpu, memory),
+		fmt.Sprintf("max-%dC%dM", maxCPU, maxMemory),
 		assetFingerprint(assets.KernelPath),
 		assetFingerprint(assets.AgentPath),
 		assetFingerprint(assets.GuestImagePath),
@@ -76,6 +78,22 @@ func templateKey(resources *runtimev1.ResourceRequest, assets Assets) string {
 	}, "\x00")
 	digest := sha256.Sum256([]byte(identity))
 	return fmt.Sprintf("%dC%dM-%s", cpu, memory, hex.EncodeToString(digest[:8]))
+}
+
+func templateMaximums(resources *runtimev1.ResourceRequest) (uint32, uint64) {
+	if resources == nil {
+		return 0, 0
+	}
+	cpu, memory := templateResources(resources)
+	maxCPU := resources.GetMaxVcpuCount()
+	if maxCPU == 0 {
+		maxCPU = cpu
+	}
+	maxMemory := (resources.GetMaxMemoryBytes() + 1024*1024 - 1) / (1024 * 1024)
+	if maxMemory == 0 {
+		maxMemory = memory
+	}
+	return maxCPU, maxMemory
 }
 
 func assetFingerprint(path string) string {
@@ -110,6 +128,7 @@ func (r *templateResolver) resolve(resources *runtimev1.ResourceRequest, assets 
 	}
 	key := templateKey(resources, assets)
 	cpu, memory := templateResources(resources)
+	maxCPU, maxMemory := templateMaximums(resources)
 	if cpu == 0 || memory == 0 {
 		return nil
 	}
@@ -118,7 +137,7 @@ func (r *templateResolver) resolve(resources *runtimev1.ResourceRequest, assets 
 	if err == nil {
 		return manifest
 	}
-	r.enqueue(key, cpu, memory)
+	r.enqueue(key, cpu, memory, maxCPU, maxMemory)
 	return nil
 }
 
@@ -155,7 +174,7 @@ func loadTemplateManifest(path, key string, cpu uint32, memory uint64) (*templat
 	return &manifest, nil
 }
 
-func (r *templateResolver) enqueue(key string, cpu uint32, memory uint64) {
+func (r *templateResolver) enqueue(key string, cpu uint32, memory uint64, maxCPU uint32, maxMemory uint64) {
 	if len(r.builder) == 0 {
 		return
 	}
@@ -174,18 +193,18 @@ func (r *templateResolver) enqueue(key string, cpu uint32, memory uint64) {
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), templateBuildTimeout)
 		defer cancel()
-		if err := r.run(ctx, key, filepath.Join(r.root, key), cpu, memory); err != nil {
+		if err := r.run(ctx, key, filepath.Join(r.root, key), cpu, memory, maxCPU, maxMemory); err != nil {
 			log.Printf("template build profile=%s failed: %v", key, err)
 		}
 	}()
 }
 
-func (r *templateResolver) runBuilder(ctx context.Context, key, output string, cpu uint32, memory uint64) error {
+func (r *templateResolver) runBuilder(ctx context.Context, key, output string, cpu uint32, memory uint64, maxCPU uint32, maxMemory uint64) error {
 	if len(r.builder) == 0 {
 		return nil
 	}
 	args := append([]string{}, r.builder[1:]...)
-	args = append(args, "--template-key", key, "--output", output, "--cpu", fmt.Sprint(cpu), "--memory-mib", fmt.Sprint(memory))
+	args = append(args, "--template-key", key, "--output", output, "--cpu", fmt.Sprint(cpu), "--memory-mib", fmt.Sprint(memory), "--max-cpu", fmt.Sprint(maxCPU), "--max-memory-mib", fmt.Sprint(maxMemory))
 	cmd := exec.CommandContext(ctx, r.builder[0], args...)
 	outputBytes, err := cmd.CombinedOutput()
 	if err != nil {

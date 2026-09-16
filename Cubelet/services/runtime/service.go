@@ -29,11 +29,12 @@ import (
 const (
 	cleanupTimeout = 30 * time.Second
 
-	APIVersion          uint32 = 1
-	ServiceMode                = "node-resources-only"
-	CapabilityAssets           = "io.cubesandbox.runtime.assets"
-	CapabilityNetwork          = "io.cubesandbox.runtime.network.tcfilter"
-	CapabilityFDHandoff        = "io.cubesandbox.runtime.fd-handoff"
+	APIVersion              uint32 = 1
+	ServiceMode                    = "node-resources-only"
+	CapabilityAssets               = "io.cubesandbox.runtime.assets"
+	CapabilityNetwork              = "io.cubesandbox.runtime.network.tcfilter"
+	CapabilityFDHandoff            = "io.cubesandbox.runtime.fd-handoff"
+	CapabilityVMResourceMax        = "io.cubesandbox.runtime.vm-resource-max"
 )
 
 // Adapter owns only node-local assets and a CNI-netns attachment. It must not
@@ -158,6 +159,7 @@ func (s *Service) GetCapabilities(_ context.Context, request *runtimev1.GetCapab
 			{Name: CapabilityAssets, Version: 1},
 			{Name: CapabilityNetwork, Version: 1},
 			{Name: CapabilityFDHandoff, Version: handoff.ProtocolVersion},
+			{Name: CapabilityVMResourceMax, Version: 1},
 		},
 		ServiceMode:       ServiceMode,
 		FdHandoffEndpoint: s.fdEndpoint,

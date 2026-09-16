@@ -155,13 +155,14 @@ impl Config {
             }
         }
 
-        let vm_res = {
+        let mut vm_res = {
             if let Some(opt_vm_res) = anno.get(ANNO_VM_RES) {
                 Utils::anno_to_obj::<VmResource>(opt_vm_res)?
             } else {
                 return Err("Not found annotation:cube.vmmres".to_string());
             }
         };
+        vm_res.normalize_and_validate()?;
 
         let prod = PRODUCT_CUBEBOX.to_string();
         let mut kernel = KERNEL_SCF.to_string();
@@ -325,6 +326,42 @@ pub struct VmResource {
     pub preserve_memory: u64,
     #[serde(default)]
     pub snap_memory: u64,
+    /// Maximum vCPU topology prepared at VM creation. Zero preserves the
+    /// legacy fixed-size behavior and is normalized to `cpu`.
+    #[serde(default)]
+    pub max_cpu: u32,
+    /// Maximum guest memory in MiB. Zero preserves the legacy fixed-size
+    /// behavior and is normalized to `memory`.
+    #[serde(default)]
+    pub max_memory: u64,
+}
+
+impl VmResource {
+    pub(crate) fn normalize_and_validate(&mut self) -> CResult<()> {
+        if self.cpu == 0 || self.memory == 0 {
+            return Err("Cube VM CPU and memory must be non-zero".to_string());
+        }
+        if self.max_cpu == 0 {
+            self.max_cpu = self.cpu;
+        }
+        if self.max_memory == 0 {
+            self.max_memory = self.memory;
+        }
+        if self.max_cpu < self.cpu || self.max_memory < self.memory {
+            return Err(format!(
+                "Cube VM hotplug maximum must not be below boot capacity: boot={}vCPU/{}MiB max={}vCPU/{}MiB",
+                self.cpu, self.memory, self.max_cpu, self.max_memory
+            ));
+        }
+        if self.max_cpu > u8::MAX as u32 {
+            return Err(format!(
+                "Cube VM max_cpu {} exceeds VMM limit {}",
+                self.max_cpu,
+                u8::MAX
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -381,6 +418,8 @@ mod tests {
         assert_eq!(config.vm_res.memory, 2048);
         assert_eq!(config.vm_res.preserve_memory, 2048);
         assert_eq!(config.vm_res.snap_memory, 2048);
+        assert_eq!(config.vm_res.max_cpu, 1);
+        assert_eq!(config.vm_res.max_memory, 2048);
 
         // product,kernel,snapshot base dir (always CUBEBOX)
         assert_eq!(config.product, PRODUCT_CUBEBOX);
@@ -450,6 +489,24 @@ mod tests {
             config.extra_kernel_params,
             vec!["foo=bar".to_string(), "second=2".to_string()]
         );
+    }
+
+    #[test]
+    fn vm_hotplug_maximum_is_validated() {
+        let annotations = HashMap::from([(
+            ANNO_VM_RES.to_string(),
+            r#"{"cpu":2,"memory":512,"max_cpu":8,"max_memory":8192}"#.to_string(),
+        )]);
+        let config = Config::new(&Some(annotations)).unwrap();
+        assert_eq!(config.vm_res.max_cpu, 8);
+        assert_eq!(config.vm_res.max_memory, 8192);
+
+        let invalid = HashMap::from([(
+            ANNO_VM_RES.to_string(),
+            r#"{"cpu":4,"memory":1024,"max_cpu":2,"max_memory":512}"#.to_string(),
+        )]);
+        let error = Config::new(&Some(invalid)).err().expect("invalid maximum");
+        assert!(error.contains("must not be below boot capacity"));
     }
 
     #[test]

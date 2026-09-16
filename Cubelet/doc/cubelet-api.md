@@ -1107,6 +1107,8 @@ by exactly one serialized request/response. The maximum frame is 64 KiB.
 | ----- | ---- | ----- | ----------- |
 | vcpu_count | [uint32](#uint32) |  |  |
 | memory_bytes | [uint64](#uint64) |  |  |
+| max_vcpu_count | [uint32](#uint32) |  | VM 创建时预留的最大 vCPU 拓扑。 |
+| max_memory_bytes | [uint64](#uint64) |  | VM 创建时预留的最大内存。 |
 
 
 
@@ -1289,4 +1291,3 @@ images, snapshots, CNI ordering, and Kubernetes sandbox/task state.
 | <a name="bool" /> bool |  | bool | boolean | boolean | bool | bool | boolean | TrueClass/FalseClass |
 | <a name="string" /> string | A string must always contain UTF-8 encoded or 7-bit ASCII text. | string | String | str/unicode | string | string | string | String (UTF-8) |
 | <a name="bytes" /> bytes | May contain any arbitrary sequence of bytes. | string | ByteString | str | []byte | ByteString | string | String (ASCII-8BIT) |
-

@@ -61,7 +61,9 @@ impl HypConfig {
 pub struct VmConfig {
     pub ivshmem: Option<IvshmemConfig>,
     pub vcpus: u32,
+    pub max_vcpus: u32,
     pub memory_size: u64,
+    pub max_memory_size: u64,
     pub dirty_log: bool,
     pub cmdlines: Vec<String>,
     pub kernel: String,
@@ -152,7 +154,9 @@ impl VmConfig {
         VmConfig {
             ivshmem: None,
             vcpus: 0,
+            max_vcpus: 0,
             memory_size: 0,
+            max_memory_size: 0,
             dirty_log: false,
             cmdlines: params,
             kernel: String::default(),
@@ -189,17 +193,24 @@ impl VmConfig {
     pub fn to_vm_config(&self) -> VC {
         let mut vc = VC::default();
 
-        vc.cpus.max_vcpus = self.vcpus as u8;
-        vc.cpus.boot_vcpus = self.vcpus as u8;
+        let boot_vcpus = u8::try_from(self.vcpus).expect("validated boot vCPU count");
+        let max_vcpus =
+            u8::try_from(self.max_vcpus.max(self.vcpus)).expect("validated maximum vCPU count");
+        vc.cpus.max_vcpus = max_vcpus;
+        vc.cpus.boot_vcpus = boot_vcpus;
         let topology = CpuTopology {
             threads_per_core: 1,
-            cores_per_die: self.vcpus as u8,
+            cores_per_die: max_vcpus,
             dies_per_package: 1,
             packages: 1,
         };
         vc.cpus.topology = Some(topology);
 
         vc.memory.size = self.memory_size * MI_B;
+        let max_memory_size = self.max_memory_size.max(self.memory_size);
+        if max_memory_size > self.memory_size {
+            vc.memory.hotplug_size = Some((max_memory_size - self.memory_size) * MI_B);
+        }
         vc.memory.dirty_log = self.dirty_log;
 
         let cmds = self.cmdlines.join(" ").to_string();
@@ -296,12 +307,24 @@ impl VmConfig {
 
     pub fn set_vcpus(&mut self, vcpu: u32) -> &mut Self {
         self.vcpus = vcpu;
+        self.max_vcpus = self.max_vcpus.max(vcpu);
+        self
+    }
+
+    pub fn set_max_vcpus(&mut self, max_vcpus: u32) -> &mut Self {
+        self.max_vcpus = max_vcpus;
         self
     }
 
     pub fn set_memory(&mut self, size: u64, dirty_log: bool) -> &mut Self {
         self.memory_size = size;
+        self.max_memory_size = self.max_memory_size.max(size);
         self.dirty_log = dirty_log;
+        self
+    }
+
+    pub fn set_max_memory(&mut self, max_size: u64) -> &mut Self {
+        self.max_memory_size = max_size;
         self
     }
 
@@ -613,6 +636,23 @@ mod tests {
         assert_eq!(hypervisor_config.serial.file, Some(serial_path));
         assert_eq!(hypervisor_config.console.mode, ConsoleOutputMode::File);
         assert_eq!(hypervisor_config.console.file, Some(console_path));
+    }
+
+    #[test]
+    fn hotplug_limits_survive_vm_config_conversion() {
+        let mut config = VmConfig::default();
+        config
+            .set_vcpus(2)
+            .set_max_vcpus(8)
+            .set_memory(512, false)
+            .set_max_memory(8192);
+
+        let vm = config.to_vm_config();
+        assert_eq!(vm.cpus.boot_vcpus, 2);
+        assert_eq!(vm.cpus.max_vcpus, 8);
+        assert_eq!(vm.cpus.topology.unwrap().cores_per_die, 8);
+        assert_eq!(vm.memory.size, 512 * 1024 * 1024);
+        assert_eq!(vm.memory.hotplug_size, Some(7680 * 1024 * 1024));
     }
 
     #[test]

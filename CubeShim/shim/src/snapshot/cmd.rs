@@ -148,6 +148,7 @@ impl TryFrom<SnapshotArgs> for Snapshot {
         snapshot.id = Uuid::new_v4().to_string();
         println!("InstanceId: {}", snapshot.id);
         snapshot.res = Utils::anno_to_obj::<VmResource>(&args.resource)?;
+        snapshot.res.normalize_and_validate()?;
         snapshot.disk = Utils::anno_to_obj::<Vec<Disk>>(&args.disk)?;
         snapshot.pmem = Utils::anno_to_obj::<Vec<Pmem>>(&args.pmem)?;
         snapshot.path = args.path;

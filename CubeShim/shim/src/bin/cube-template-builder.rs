@@ -26,6 +26,10 @@ struct Args {
     #[arg(long)]
     memory_mib: u64,
     #[arg(long)]
+    max_cpu: u32,
+    #[arg(long)]
+    max_memory_mib: u64,
+    #[arg(long)]
     kernel: String,
     #[arg(long = "os-image")]
     os_image: String,
@@ -42,8 +46,15 @@ struct ReadyManifest<'a> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    if args.template_key.trim().is_empty() || args.cpu == 0 || args.memory_mib == 0 {
-        return Err(anyhow!("template key, cpu and memory-mib must be non-zero"));
+    if args.template_key.trim().is_empty()
+        || args.cpu == 0
+        || args.memory_mib == 0
+        || args.max_cpu < args.cpu
+        || args.max_memory_mib < args.memory_mib
+    {
+        return Err(anyhow!(
+            "template key/resources must be non-zero and maximums must cover boot resources"
+        ));
     }
     for (name, path) in [
         ("kernel", args.kernel.as_str()),
@@ -72,6 +83,8 @@ async fn main() -> Result<()> {
         resource: serde_json::json!({
             "cpu": args.cpu,
             "memory": args.memory_mib,
+            "max_cpu": args.max_cpu,
+            "max_memory": args.max_memory_mib,
             "preserve_memory": args.memory_mib,
             "snap_memory": args.memory_mib,
         })

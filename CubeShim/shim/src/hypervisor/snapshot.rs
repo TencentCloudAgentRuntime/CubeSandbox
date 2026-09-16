@@ -46,6 +46,11 @@ pub struct VmRes {
     pub cpu: u32,
     pub cpu_max: u32,
     pub memory: u64,
+    /// Maximum guest memory in MiB. Zero only occurs in legacy metadata and
+    /// means the fixed boot memory, so old templates cannot masquerade as a
+    /// hotplug-capable template.
+    #[serde(default)]
+    pub memory_max: u64,
     pub disks: Vec<Disk>,
     pub pmems: Vec<Pmem>,
 }
@@ -90,12 +95,18 @@ impl SnapshotInfo {
                 cpu,
                 cpu_max: cpu,
                 memory,
+                memory_max: memory,
                 disks: Vec::<Disk>::new(),
                 pmems: Vec::<Pmem>::new(),
             },
             ch_version: SNAPSHOT_VERSION.to_string(),
             ..Default::default()
         }
+    }
+
+    pub fn set_vm_max(&mut self, cpu_max: u32, memory_max: u64) {
+        self.vm_res.cpu_max = cpu_max;
+        self.vm_res.memory_max = memory_max;
     }
 
     pub fn set_kernel_version(&mut self, kernel: &str) -> CResult<()> {
@@ -272,6 +283,27 @@ mod tests {
         let err = a.eq(&b).unwrap_err();
         assert!(err.contains("image version not eq"), "unexpected: {err}");
     }
+
+    #[test]
+    fn eq_rejects_hotplug_maximum_mismatch() {
+        let mut fixed = base_info();
+        let mut hotplug = base_info();
+        hotplug.set_vm_max(8, 8192);
+
+        let error = fixed.eq(&hotplug).unwrap_err();
+        assert!(error.contains("cpu not eq"), "unexpected: {error}");
+
+        fixed.vm_res.cpu_max = 8;
+        let error = fixed.eq(&hotplug).unwrap_err();
+        assert!(error.contains("memory max not eq"), "unexpected: {error}");
+    }
+
+    #[test]
+    fn legacy_zero_memory_max_means_fixed_boot_memory() {
+        let mut legacy = base_info();
+        legacy.vm_res.memory_max = 0;
+        legacy.eq(&base_info()).unwrap();
+    }
 }
 
 impl Disk {
@@ -301,6 +333,23 @@ impl VmRes {
 
         if self.memory != o.memory {
             return Err(format!("mem size not eq: {} {}", self.memory, o.memory));
+        }
+
+        let self_memory_max = if self.memory_max == 0 {
+            self.memory
+        } else {
+            self.memory_max
+        };
+        let other_memory_max = if o.memory_max == 0 {
+            o.memory
+        } else {
+            o.memory_max
+        };
+        if self_memory_max != other_memory_max {
+            return Err(format!(
+                "memory max not eq: {} {}",
+                self_memory_max, other_memory_max
+            ));
         }
 
         if self.disks.len() != o.disks.len() {

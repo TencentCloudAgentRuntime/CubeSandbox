@@ -432,11 +432,13 @@ func (x *PodIdentity) GetAttempt() uint32 {
 }
 
 type ResourceRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	VcpuCount     uint32                 `protobuf:"varint,1,opt,name=vcpu_count,json=vcpuCount,proto3" json:"vcpu_count,omitempty"`
-	MemoryBytes   uint64                 `protobuf:"varint,2,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	VcpuCount      uint32                 `protobuf:"varint,1,opt,name=vcpu_count,json=vcpuCount,proto3" json:"vcpu_count,omitempty"`
+	MemoryBytes    uint64                 `protobuf:"varint,2,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
+	MaxVcpuCount   uint32                 `protobuf:"varint,3,opt,name=max_vcpu_count,json=maxVcpuCount,proto3" json:"max_vcpu_count,omitempty"`
+	MaxMemoryBytes uint64                 `protobuf:"varint,4,opt,name=max_memory_bytes,json=maxMemoryBytes,proto3" json:"max_memory_bytes,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ResourceRequest) Reset() {
@@ -479,6 +481,20 @@ func (x *ResourceRequest) GetVcpuCount() uint32 {
 func (x *ResourceRequest) GetMemoryBytes() uint64 {
 	if x != nil {
 		return x.MemoryBytes
+	}
+	return 0
+}
+
+func (x *ResourceRequest) GetMaxVcpuCount() uint32 {
+	if x != nil {
+		return x.MaxVcpuCount
+	}
+	return 0
+}
+
+func (x *ResourceRequest) GetMaxMemoryBytes() uint64 {
+	if x != nil {
+		return x.MaxMemoryBytes
 	}
 	return 0
 }
@@ -1737,11 +1753,13 @@ const file_api_services_runtime_v1_runtime_proto_rawDesc = "" +
 	"\x03uid\x18\x01 \x01(\tR\x03uid\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x12\n" +
 	"\x04name\x18\x03 \x01(\tR\x04name\x12\x18\n" +
-	"\aattempt\x18\x04 \x01(\rR\aattempt\"S\n" +
+	"\aattempt\x18\x04 \x01(\rR\aattempt\"\xa3\x01\n" +
 	"\x0fResourceRequest\x12\x1d\n" +
 	"\n" +
 	"vcpu_count\x18\x01 \x01(\rR\tvcpuCount\x12!\n" +
-	"\fmemory_bytes\x18\x02 \x01(\x04R\vmemoryBytes\"~\n" +
+	"\fmemory_bytes\x18\x02 \x01(\x04R\vmemoryBytes\x12$\n" +
+	"\x0emax_vcpu_count\x18\x03 \x01(\rR\fmaxVcpuCount\x12(\n" +
+	"\x10max_memory_bytes\x18\x04 \x01(\x04R\x0emaxMemoryBytes\"~\n" +
 	"\rNetworkIntent\x12\x1d\n" +
 	"\n" +
 	"netns_path\x18\x01 \x01(\tR\tnetnsPath\x12%\n" +

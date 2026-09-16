@@ -41,6 +41,30 @@ core sandbox 的 `updated-resources` extension 恢复 custom sandboxer 的当前
 当前 memory usage 和瞬时 CPU 等主要统计；需要单调 Pod 生命周期累计值时必须改为
 Guest Pod cgroup 原生指标，不能继续从当前容器集合合成。
 
+## Cube PodSandbox resize 转发
+
+`containerd-v2.3.4-cube-sandbox-resize.patch` 仅对
+`io.containerd.cube.rs` 生效：读取 CRI 写入 core sandbox 的
+`updated-resources` extension，并通过 Sandbox shim 的 Task `Update` 转发 Pod CPU、
+memory limit。CubeShim 使用绝对目标执行 VM hotplug；非 Cube runtime 保持原行为。
+权威 Pod memory limit 直接作为 VM 父边界，缩容时不等待各子容器 limit 之和先降到目标；
+因此其 OOM 语义是 Pod 级总量约束，不等同于逐容器 memory limit。
+
+该补丁提供权威 Pod aggregate，适用于 containerd 2.3.4。未带补丁的 containerd
+仍可通过标准容器 Task `Update` 触发 CubeShim 聚合当前 active 容器 limit，因此
+1.7/2.0～2.2 无需替换节点 containerd 即可覆盖普通 app container 原地 limit 更新和
+重建更新。该兜底不具备完整 Kubernetes Pod aggregate 语义：classic init container max、
+Pod-level resources 以及 memory request-only 均需要本补丁提供的权威 Pod 聚合值。
+
+应用与验证：
+
+```bash
+git checkout v2.3.4
+git apply --check /path/to/containerd-v2.3.4-cube-sandbox-resize.patch
+git apply /path/to/containerd-v2.3.4-cube-sandbox-resize.patch
+go test ./plugins/sandbox
+```
+
 ## S5.5d.1 trace 与外部 Sandbox 并行创建补丁
 
 `containerd-v2.3.4-s34-trace.patch` 只用于 S3.4 诊断，不应进入运行时验收制品。

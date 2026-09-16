@@ -71,7 +71,7 @@ func TestTemplateResolverQueuesOneBuildPerMiss(t *testing.T) {
 	}
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	resolver.run = func(_ context.Context, _ string, _ string, _ uint32, _ uint64) error {
+	resolver.run = func(_ context.Context, _ string, _ string, _ uint32, _ uint64, _ uint32, _ uint64) error {
 		started <- struct{}{}
 		<-release
 		return nil
@@ -100,7 +100,7 @@ func TestTemplateResolverColdModeSkipsReuseAndBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	called := make(chan struct{}, 1)
-	resolver.run = func(_ context.Context, _ string, _ string, _ uint32, _ uint64) error {
+	resolver.run = func(_ context.Context, _ string, _ string, _ uint32, _ uint64, _ uint32, _ uint64) error {
 		called <- struct{}{}
 		return nil
 	}
@@ -150,5 +150,16 @@ func TestTemplateKeyTracksGuestKernelParameters(t *testing.T) {
 	t.Setenv("CUBE_GUEST_KERNEL_CMDLINE_APPEND", `["agent.trace=1"]`)
 	if after := templateKey(testTemplateRequest(), testTemplateAssets()); after == before {
 		t.Fatal("guest kernel parameters must invalidate a snapshot template")
+	}
+}
+
+func TestTemplateKeyTracksHotplugMaximums(t *testing.T) {
+	assets := testTemplateAssets()
+	fixed := testTemplateRequest()
+	hotplug := testTemplateRequest()
+	hotplug.MaxVcpuCount = 8
+	hotplug.MaxMemoryBytes = 8 * 1024 * 1024 * 1024
+	if templateKey(fixed, assets) == templateKey(hotplug, assets) {
+		t.Fatal("template key must change with hotplug maximums")
 	}
 }

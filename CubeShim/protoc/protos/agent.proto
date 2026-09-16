@@ -62,6 +62,7 @@ service AgentService {
 	rpc CreateSandbox(CreateSandboxRequest) returns (google.protobuf.Empty);
 	rpc DestroySandbox(DestroySandboxRequest) returns (google.protobuf.Empty);
 	rpc OnlineCPUMem(OnlineCPUMemRequest) returns (google.protobuf.Empty);
+	rpc ReconcileVmResources(ReconcileVmResourcesRequest) returns (ReconcileVmResourcesResponse);
 	rpc ReseedRandomDev(ReseedRandomDevRequest) returns (google.protobuf.Empty);
 	rpc GetGuestDetails(GuestDetailsRequest) returns (GuestDetailsResponse);
 	rpc MemHotplugByProbe(MemHotplugByProbeRequest) returns (google.protobuf.Empty);
@@ -418,6 +419,18 @@ message OnlineCPUMemRequest {
 
 	// CpuOnly specifies whether only online CPU or not.
 	bool cpu_only = 3;
+}
+
+message ReconcileVmResourcesRequest {
+	uint32 desired_online_cpus = 1;
+	uint64 desired_memory_bytes = 2;
+	uint64 generation = 3;
+}
+
+message ReconcileVmResourcesResponse {
+	uint32 actual_online_cpus = 1;
+	uint64 actual_online_memory_bytes = 2;
+	uint64 generation = 3;
 }
 
 message ReseedRandomDevRequest {

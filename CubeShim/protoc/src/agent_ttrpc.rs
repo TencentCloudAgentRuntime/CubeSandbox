@@ -169,6 +169,11 @@ impl AgentServiceClient {
         ::ttrpc::async_client_request!(self, ctx, req, "grpc.AgentService", "OnlineCPUMem", cres);
     }
 
+    pub async fn reconcile_vm_resources(&self, ctx: ttrpc::context::Context, req: &super::agent::ReconcileVmResourcesRequest) -> ::ttrpc::Result<super::agent::ReconcileVmResourcesResponse> {
+        let mut cres = super::agent::ReconcileVmResourcesResponse::new();
+        ::ttrpc::async_client_request!(self, ctx, req, "grpc.AgentService", "ReconcileVmResources", cres);
+    }
+
     pub async fn reseed_random_dev(&self, ctx: ttrpc::context::Context, req: &super::agent::ReseedRandomDevRequest) -> ::ttrpc::Result<super::empty::Empty> {
         let mut cres = super::empty::Empty::new();
         ::ttrpc::async_client_request!(self, ctx, req, "grpc.AgentService", "ReseedRandomDev", cres);
@@ -512,6 +517,17 @@ impl ::ttrpc::r#async::MethodHandler for OnlineCpuMemMethod {
     }
 }
 
+struct ReconcileVmResourcesMethod {
+    service: Arc<std::boxed::Box<dyn AgentService + Send + Sync>>,
+}
+
+#[async_trait]
+impl ::ttrpc::r#async::MethodHandler for ReconcileVmResourcesMethod {
+    async fn handler(&self, ctx: ::ttrpc::r#async::TtrpcContext, req: ::ttrpc::Request) -> ::ttrpc::Result<(u32, Vec<u8>)> {
+        ::ttrpc::async_request_handler!(self, ctx, req, agent, ReconcileVmResourcesRequest, reconcile_vm_resources);
+    }
+}
+
 struct ReseedRandomDevMethod {
     service: Arc<std::boxed::Box<dyn AgentService + Send + Sync>>,
 }
@@ -694,6 +710,9 @@ pub trait AgentService: Sync {
     async fn online_cpu_mem(&self, _ctx: &::ttrpc::r#async::TtrpcContext, _req: super::agent::OnlineCPUMemRequest) -> ::ttrpc::Result<super::empty::Empty> {
         Err(::ttrpc::Error::RpcStatus(::ttrpc::get_status(::ttrpc::Code::NOT_FOUND, "/grpc.AgentService/OnlineCPUMem is not supported".to_string())))
     }
+    async fn reconcile_vm_resources(&self, _ctx: &::ttrpc::r#async::TtrpcContext, _req: super::agent::ReconcileVmResourcesRequest) -> ::ttrpc::Result<super::agent::ReconcileVmResourcesResponse> {
+        Err(::ttrpc::Error::RpcStatus(::ttrpc::get_status(::ttrpc::Code::NOT_FOUND, "/grpc.AgentService/ReconcileVmResources is not supported".to_string())))
+    }
     async fn reseed_random_dev(&self, _ctx: &::ttrpc::r#async::TtrpcContext, _req: super::agent::ReseedRandomDevRequest) -> ::ttrpc::Result<super::empty::Empty> {
         Err(::ttrpc::Error::RpcStatus(::ttrpc::get_status(::ttrpc::Code::NOT_FOUND, "/grpc.AgentService/ReseedRandomDev is not supported".to_string())))
     }
@@ -806,6 +825,9 @@ pub fn create_agent_service(service: Arc<std::boxed::Box<dyn AgentService + Send
 
     methods.insert("/grpc.AgentService/OnlineCPUMem".to_string(),
                     std::boxed::Box::new(OnlineCpuMemMethod{service: service.clone()}) as std::boxed::Box<dyn ::ttrpc::r#async::MethodHandler + Send + Sync>);
+
+    methods.insert("/grpc.AgentService/ReconcileVmResources".to_string(),
+                    std::boxed::Box::new(ReconcileVmResourcesMethod{service: service.clone()}) as std::boxed::Box<dyn ::ttrpc::r#async::MethodHandler + Send + Sync>);
 
     methods.insert("/grpc.AgentService/ReseedRandomDev".to_string(),
                     std::boxed::Box::new(ReseedRandomDevMethod{service: service.clone()}) as std::boxed::Box<dyn ::ttrpc::r#async::MethodHandler + Send + Sync>);

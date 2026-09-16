@@ -11926,6 +11926,458 @@ impl ::protobuf::reflect::ProtobufValue for OnlineCPUMemRequest {
 #[derive(PartialEq,Clone,Default)]
 #[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
 #[cfg_attr(feature = "with-serde", serde(default))]
+pub struct ReconcileVmResourcesRequest {
+    // message fields
+    pub desired_online_cpus: u32,
+    pub desired_memory_bytes: u64,
+    pub generation: u64,
+    // special fields
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub unknown_fields: ::protobuf::UnknownFields,
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a ReconcileVmResourcesRequest {
+    fn default() -> &'a ReconcileVmResourcesRequest {
+        <ReconcileVmResourcesRequest as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl ReconcileVmResourcesRequest {
+    pub fn new() -> ReconcileVmResourcesRequest {
+        ::std::default::Default::default()
+    }
+
+    // uint32 desired_online_cpus = 1;
+
+
+    pub fn get_desired_online_cpus(&self) -> u32 {
+        self.desired_online_cpus
+    }
+    pub fn clear_desired_online_cpus(&mut self) {
+        self.desired_online_cpus = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_desired_online_cpus(&mut self, v: u32) {
+        self.desired_online_cpus = v;
+    }
+
+    // uint64 desired_memory_bytes = 2;
+
+
+    pub fn get_desired_memory_bytes(&self) -> u64 {
+        self.desired_memory_bytes
+    }
+    pub fn clear_desired_memory_bytes(&mut self) {
+        self.desired_memory_bytes = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_desired_memory_bytes(&mut self, v: u64) {
+        self.desired_memory_bytes = v;
+    }
+
+    // uint64 generation = 3;
+
+
+    pub fn get_generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn clear_generation(&mut self) {
+        self.generation = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_generation(&mut self, v: u64) {
+        self.generation = v;
+    }
+}
+
+impl ::protobuf::Message for ReconcileVmResourcesRequest {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.desired_online_cpus = tmp;
+                },
+                2 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.desired_memory_bytes = tmp;
+                },
+                3 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.generation = tmp;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.desired_online_cpus != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.desired_online_cpus, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.desired_memory_bytes != 0 {
+            my_size += ::protobuf::rt::value_size(2, self.desired_memory_bytes, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.generation != 0 {
+            my_size += ::protobuf::rt::value_size(3, self.generation, ::protobuf::wire_format::WireTypeVarint);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        if self.desired_online_cpus != 0 {
+            os.write_uint32(1, self.desired_online_cpus)?;
+        }
+        if self.desired_memory_bytes != 0 {
+            os.write_uint64(2, self.desired_memory_bytes)?;
+        }
+        if self.generation != 0 {
+            os.write_uint64(3, self.generation)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: ::std::boxed::Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> ReconcileVmResourcesRequest {
+        ReconcileVmResourcesRequest::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
+        descriptor.get(|| {
+            let mut fields = ::std::vec::Vec::new();
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                "desired_online_cpus",
+                |m: &ReconcileVmResourcesRequest| { &m.desired_online_cpus },
+                |m: &mut ReconcileVmResourcesRequest| { &mut m.desired_online_cpus },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                "desired_memory_bytes",
+                |m: &ReconcileVmResourcesRequest| { &m.desired_memory_bytes },
+                |m: &mut ReconcileVmResourcesRequest| { &mut m.desired_memory_bytes },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                "generation",
+                |m: &ReconcileVmResourcesRequest| { &m.generation },
+                |m: &mut ReconcileVmResourcesRequest| { &mut m.generation },
+            ));
+            ::protobuf::reflect::MessageDescriptor::new_pb_name::<ReconcileVmResourcesRequest>(
+                "ReconcileVmResourcesRequest",
+                fields,
+                file_descriptor_proto()
+            )
+        })
+    }
+
+    fn default_instance() -> &'static ReconcileVmResourcesRequest {
+        static instance: ::protobuf::rt::LazyV2<ReconcileVmResourcesRequest> = ::protobuf::rt::LazyV2::INIT;
+        instance.get(ReconcileVmResourcesRequest::new)
+    }
+}
+
+impl ::protobuf::Clear for ReconcileVmResourcesRequest {
+    fn clear(&mut self) {
+        self.desired_online_cpus = 0;
+        self.desired_memory_bytes = 0;
+        self.generation = 0;
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::std::fmt::Debug for ReconcileVmResourcesRequest {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::protobuf::text_format::fmt(self, f)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for ReconcileVmResourcesRequest {
+    fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
+        ::protobuf::reflect::ReflectValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+#[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "with-serde", serde(default))]
+pub struct ReconcileVmResourcesResponse {
+    // message fields
+    pub actual_online_cpus: u32,
+    pub actual_online_memory_bytes: u64,
+    pub generation: u64,
+    // special fields
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub unknown_fields: ::protobuf::UnknownFields,
+    #[cfg_attr(feature = "with-serde", serde(skip))]
+    pub cached_size: ::protobuf::CachedSize,
+}
+
+impl<'a> ::std::default::Default for &'a ReconcileVmResourcesResponse {
+    fn default() -> &'a ReconcileVmResourcesResponse {
+        <ReconcileVmResourcesResponse as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl ReconcileVmResourcesResponse {
+    pub fn new() -> ReconcileVmResourcesResponse {
+        ::std::default::Default::default()
+    }
+
+    // uint32 actual_online_cpus = 1;
+
+
+    pub fn get_actual_online_cpus(&self) -> u32 {
+        self.actual_online_cpus
+    }
+    pub fn clear_actual_online_cpus(&mut self) {
+        self.actual_online_cpus = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_actual_online_cpus(&mut self, v: u32) {
+        self.actual_online_cpus = v;
+    }
+
+    // uint64 actual_online_memory_bytes = 2;
+
+
+    pub fn get_actual_online_memory_bytes(&self) -> u64 {
+        self.actual_online_memory_bytes
+    }
+    pub fn clear_actual_online_memory_bytes(&mut self) {
+        self.actual_online_memory_bytes = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_actual_online_memory_bytes(&mut self, v: u64) {
+        self.actual_online_memory_bytes = v;
+    }
+
+    // uint64 generation = 3;
+
+
+    pub fn get_generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn clear_generation(&mut self) {
+        self.generation = 0;
+    }
+
+    // Param is passed by value, moved
+    pub fn set_generation(&mut self, v: u64) {
+        self.generation = v;
+    }
+}
+
+impl ::protobuf::Message for ReconcileVmResourcesResponse {
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        while !is.eof()? {
+            let (field_number, wire_type) = is.read_tag_unpack()?;
+            match field_number {
+                1 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint32()?;
+                    self.actual_online_cpus = tmp;
+                },
+                2 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.actual_online_memory_bytes = tmp;
+                },
+                3 => {
+                    if wire_type != ::protobuf::wire_format::WireTypeVarint {
+                        return ::std::result::Result::Err(::protobuf::rt::unexpected_wire_type(wire_type));
+                    }
+                    let tmp = is.read_uint64()?;
+                    self.generation = tmp;
+                },
+                _ => {
+                    ::protobuf::rt::read_unknown_or_skip_group(field_number, wire_type, is, self.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u32 {
+        let mut my_size = 0;
+        if self.actual_online_cpus != 0 {
+            my_size += ::protobuf::rt::value_size(1, self.actual_online_cpus, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.actual_online_memory_bytes != 0 {
+            my_size += ::protobuf::rt::value_size(2, self.actual_online_memory_bytes, ::protobuf::wire_format::WireTypeVarint);
+        }
+        if self.generation != 0 {
+            my_size += ::protobuf::rt::value_size(3, self.generation, ::protobuf::wire_format::WireTypeVarint);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.get_unknown_fields());
+        self.cached_size.set(my_size);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::ProtobufResult<()> {
+        if self.actual_online_cpus != 0 {
+            os.write_uint32(1, self.actual_online_cpus)?;
+        }
+        if self.actual_online_memory_bytes != 0 {
+            os.write_uint64(2, self.actual_online_memory_bytes)?;
+        }
+        if self.generation != 0 {
+            os.write_uint64(3, self.generation)?;
+        }
+        os.write_unknown_fields(self.get_unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn get_cached_size(&self) -> u32 {
+        self.cached_size.get()
+    }
+
+    fn get_unknown_fields(&self) -> &::protobuf::UnknownFields {
+        &self.unknown_fields
+    }
+
+    fn mut_unknown_fields(&mut self) -> &mut ::protobuf::UnknownFields {
+        &mut self.unknown_fields
+    }
+
+    fn as_any(&self) -> &dyn (::std::any::Any) {
+        self as &dyn (::std::any::Any)
+    }
+    fn as_any_mut(&mut self) -> &mut dyn (::std::any::Any) {
+        self as &mut dyn (::std::any::Any)
+    }
+    fn into_any(self: ::std::boxed::Box<Self>) -> ::std::boxed::Box<dyn (::std::any::Any)> {
+        self
+    }
+
+    fn descriptor(&self) -> &'static ::protobuf::reflect::MessageDescriptor {
+        Self::descriptor_static()
+    }
+
+    fn new() -> ReconcileVmResourcesResponse {
+        ReconcileVmResourcesResponse::new()
+    }
+
+    fn descriptor_static() -> &'static ::protobuf::reflect::MessageDescriptor {
+        static descriptor: ::protobuf::rt::LazyV2<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::LazyV2::INIT;
+        descriptor.get(|| {
+            let mut fields = ::std::vec::Vec::new();
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint32>(
+                "actual_online_cpus",
+                |m: &ReconcileVmResourcesResponse| { &m.actual_online_cpus },
+                |m: &mut ReconcileVmResourcesResponse| { &mut m.actual_online_cpus },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                "actual_online_memory_bytes",
+                |m: &ReconcileVmResourcesResponse| { &m.actual_online_memory_bytes },
+                |m: &mut ReconcileVmResourcesResponse| { &mut m.actual_online_memory_bytes },
+            ));
+            fields.push(::protobuf::reflect::accessor::make_simple_field_accessor::<_, ::protobuf::types::ProtobufTypeUint64>(
+                "generation",
+                |m: &ReconcileVmResourcesResponse| { &m.generation },
+                |m: &mut ReconcileVmResourcesResponse| { &mut m.generation },
+            ));
+            ::protobuf::reflect::MessageDescriptor::new_pb_name::<ReconcileVmResourcesResponse>(
+                "ReconcileVmResourcesResponse",
+                fields,
+                file_descriptor_proto()
+            )
+        })
+    }
+
+    fn default_instance() -> &'static ReconcileVmResourcesResponse {
+        static instance: ::protobuf::rt::LazyV2<ReconcileVmResourcesResponse> = ::protobuf::rt::LazyV2::INIT;
+        instance.get(ReconcileVmResourcesResponse::new)
+    }
+}
+
+impl ::protobuf::Clear for ReconcileVmResourcesResponse {
+    fn clear(&mut self) {
+        self.actual_online_cpus = 0;
+        self.actual_online_memory_bytes = 0;
+        self.generation = 0;
+        self.unknown_fields.clear();
+    }
+}
+
+impl ::std::fmt::Debug for ReconcileVmResourcesResponse {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::protobuf::text_format::fmt(self, f)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for ReconcileVmResourcesResponse {
+    fn as_ref(&self) -> ::protobuf::reflect::ReflectValueRef {
+        ::protobuf::reflect::ReflectValueRef::Message(self)
+    }
+}
+
+#[derive(PartialEq,Clone,Default)]
+#[cfg_attr(feature = "with-serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "with-serde", serde(default))]
 pub struct ReseedRandomDevRequest {
     // message fields
     pub data: ::std::vec::Vec<u8>,
@@ -16375,48 +16827,55 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x01\x20\x01(\x0cR\x04dataB\0:\0\"e\n\x13OnlineCPUMemRequest\x12\x14\n\
     \x04wait\x18\x01\x20\x01(\x08R\x04waitB\0\x12\x19\n\x07nb_cpus\x18\x02\
     \x20\x01(\rR\x06nbCpusB\0\x12\x1b\n\x08cpu_only\x18\x03\x20\x01(\x08R\
-    \x07cpuOnlyB\0:\0\"0\n\x16ReseedRandomDevRequest\x12\x14\n\x04data\x18\
-    \x02\x20\x01(\x0cR\x04dataB\0:\0\"\xd4\x01\n\x0cAgentDetails\x12\x1a\n\
-    \x07version\x18\x01\x20\x01(\tR\x07versionB\0\x12!\n\x0binit_daemon\x18\
-    \x02\x20\x01(\x08R\ninitDaemonB\0\x12)\n\x0fdevice_handlers\x18\x03\x20\
-    \x03(\tR\x0edeviceHandlersB\0\x12+\n\x10storage_handlers\x18\x04\x20\x03\
-    (\tR\x0fstorageHandlersB\0\x12+\n\x10supports_seccomp\x18\x05\x20\x01(\
-    \x08R\x0fsupportsSeccompB\0:\0\"m\n\x13GuestDetailsRequest\x12&\n\x0emem\
-    _block_size\x18\x01\x20\x01(\x08R\x0cmemBlockSizeB\0\x12,\n\x11mem_hotpl\
-    ug_probe\x18\x02\x20\x01(\x08R\x0fmemHotplugProbeB\0:\0\"\xc3\x01\n\x14G\
-    uestDetailsResponse\x121\n\x14mem_block_size_bytes\x18\x01\x20\x01(\x04R\
-    \x11memBlockSizeBytesB\0\x129\n\ragent_details\x18\x02\x20\x01(\x0b2\x12\
-    .grpc.AgentDetailsR\x0cagentDetailsB\0\x12;\n\x19support_mem_hotplug_pro\
-    be\x18\x03\x20\x01(\x08R\x16supportMemHotplugProbeB\0:\0\"P\n\x18MemHotp\
-    lugByProbeRequest\x122\n\x13memHotplugProbeAddr\x18\x01\x20\x03(\x04R\
-    \x13memHotplugProbeAddrB\0:\0\"E\n\x17SetGuestDateTimeRequest\x12\x12\n\
-    \x03Sec\x18\x01\x20\x01(\x03R\x03SecB\0\x12\x14\n\x04Usec\x18\x02\x20\
-    \x01(\x03R\x04UsecB\0:\0\"v\n\x07FSGroup\x12\x1b\n\x08group_id\x18\x02\
-    \x20\x01(\rR\x07groupIdB\0\x12L\n\x13group_change_policy\x18\x03\x20\x01\
-    (\x0e2\x1a.types.FSGroupChangePolicyR\x11groupChangePolicyB\0:\0\"\xb3\
-    \x02\n\x07Storage\x12\x18\n\x06driver\x18\x01\x20\x01(\tR\x06driverB\0\
-    \x12'\n\x0edriver_options\x18\x02\x20\x03(\tR\rdriverOptionsB\0\x12\x18\
-    \n\x06source\x18\x03\x20\x01(\tR\x06sourceB\0\x12\x18\n\x06fstype\x18\
-    \x04\x20\x01(\tR\x06fstypeB\0\x12\x1a\n\x07options\x18\x05\x20\x03(\tR\
-    \x07optionsB\0\x12!\n\x0bmount_point\x18\x06\x20\x01(\tR\nmountPointB\0\
-    \x12*\n\x08fs_group\x18\x07\x20\x01(\x0b2\r.grpc.FSGroupR\x07fsGroupB\0\
-    \x12!\n\x0bneed_format\x18\x08\x20\x01(\x08R\nneedFormatB\0\x12!\n\x0bne\
-    ed_resize\x18\t\x20\x01(\x08R\nneedResizeB\0:\0\"\x92\x01\n\x06Device\
-    \x12\x10\n\x02id\x18\x01\x20\x01(\tR\x02idB\0\x12\x14\n\x04type\x18\x02\
-    \x20\x01(\tR\x04typeB\0\x12\x19\n\x07vm_path\x18\x03\x20\x01(\tR\x06vmPa\
-    thB\0\x12'\n\x0econtainer_path\x18\x04\x20\x01(\tR\rcontainerPathB\0\x12\
-    \x1a\n\x07options\x18\x05\x20\x03(\tR\x07optionsB\0:\0\"`\n\nStringUser\
-    \x12\x12\n\x03uid\x18\x01\x20\x01(\tR\x03uidB\0\x12\x12\n\x03gid\x18\x02\
-    \x20\x01(\tR\x03gidB\0\x12(\n\x0eadditionalGids\x18\x03\x20\x03(\tR\x0ea\
-    dditionalGidsB\0:\0\"\xdc\x01\n\x0fCopyFileRequest\x12\x14\n\x04path\x18\
-    \x01\x20\x01(\tR\x04pathB\0\x12\x1d\n\tfile_size\x18\x02\x20\x01(\x03R\
-    \x08fileSizeB\0\x12\x1d\n\tfile_mode\x18\x03\x20\x01(\rR\x08fileModeB\0\
-    \x12\x1b\n\x08dir_mode\x18\x04\x20\x01(\rR\x07dirModeB\0\x12\x12\n\x03ui\
-    d\x18\x05\x20\x01(\x05R\x03uidB\0\x12\x12\n\x03gid\x18\x06\x20\x01(\x05R\
-    \x03gidB\0\x12\x18\n\x06offset\x18\x07\x20\x01(\x03R\x06offsetB\0\x12\
-    \x14\n\x04data\x18\x08\x20\x01(\x0cR\x04dataB\0:\0\"\x16\n\x12GetOOMEven\
-    tRequest:\0\"1\n\x08OOMEvent\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\tR\
-    \x0bcontainerIdB\0:\0\".\n\x0eAddSwapRequest\x12\x1a\n\x07PCIPath\x18\
+    \x07cpuOnlyB\0:\0\"\xa7\x01\n\x1bReconcileVmResourcesRequest\x120\n\x13d\
+    esired_online_cpus\x18\x01\x20\x01(\rR\x11desiredOnlineCpusB\0\x122\n\
+    \x14desired_memory_bytes\x18\x02\x20\x01(\x04R\x12desiredMemoryBytesB\0\
+    \x12\x20\n\ngeneration\x18\x03\x20\x01(\x04R\ngenerationB\0:\0\"\xb1\x01\
+    \n\x1cReconcileVmResourcesResponse\x12.\n\x12actual_online_cpus\x18\x01\
+    \x20\x01(\rR\x10actualOnlineCpusB\0\x12=\n\x1aactual_online_memory_bytes\
+    \x18\x02\x20\x01(\x04R\x17actualOnlineMemoryBytesB\0\x12\x20\n\ngenerati\
+    on\x18\x03\x20\x01(\x04R\ngenerationB\0:\0\"0\n\x16ReseedRandomDevReques\
+    t\x12\x14\n\x04data\x18\x02\x20\x01(\x0cR\x04dataB\0:\0\"\xd4\x01\n\x0cA\
+    gentDetails\x12\x1a\n\x07version\x18\x01\x20\x01(\tR\x07versionB\0\x12!\
+    \n\x0binit_daemon\x18\x02\x20\x01(\x08R\ninitDaemonB\0\x12)\n\x0fdevice_\
+    handlers\x18\x03\x20\x03(\tR\x0edeviceHandlersB\0\x12+\n\x10storage_hand\
+    lers\x18\x04\x20\x03(\tR\x0fstorageHandlersB\0\x12+\n\x10supports_seccom\
+    p\x18\x05\x20\x01(\x08R\x0fsupportsSeccompB\0:\0\"m\n\x13GuestDetailsReq\
+    uest\x12&\n\x0emem_block_size\x18\x01\x20\x01(\x08R\x0cmemBlockSizeB\0\
+    \x12,\n\x11mem_hotplug_probe\x18\x02\x20\x01(\x08R\x0fmemHotplugProbeB\0\
+    :\0\"\xc3\x01\n\x14GuestDetailsResponse\x121\n\x14mem_block_size_bytes\
+    \x18\x01\x20\x01(\x04R\x11memBlockSizeBytesB\0\x129\n\ragent_details\x18\
+    \x02\x20\x01(\x0b2\x12.grpc.AgentDetailsR\x0cagentDetailsB\0\x12;\n\x19s\
+    upport_mem_hotplug_probe\x18\x03\x20\x01(\x08R\x16supportMemHotplugProbe\
+    B\0:\0\"P\n\x18MemHotplugByProbeRequest\x122\n\x13memHotplugProbeAddr\
+    \x18\x01\x20\x03(\x04R\x13memHotplugProbeAddrB\0:\0\"E\n\x17SetGuestDate\
+    TimeRequest\x12\x12\n\x03Sec\x18\x01\x20\x01(\x03R\x03SecB\0\x12\x14\n\
+    \x04Usec\x18\x02\x20\x01(\x03R\x04UsecB\0:\0\"v\n\x07FSGroup\x12\x1b\n\
+    \x08group_id\x18\x02\x20\x01(\rR\x07groupIdB\0\x12L\n\x13group_change_po\
+    licy\x18\x03\x20\x01(\x0e2\x1a.types.FSGroupChangePolicyR\x11groupChange\
+    PolicyB\0:\0\"\xb3\x02\n\x07Storage\x12\x18\n\x06driver\x18\x01\x20\x01(\
+    \tR\x06driverB\0\x12'\n\x0edriver_options\x18\x02\x20\x03(\tR\rdriverOpt\
+    ionsB\0\x12\x18\n\x06source\x18\x03\x20\x01(\tR\x06sourceB\0\x12\x18\n\
+    \x06fstype\x18\x04\x20\x01(\tR\x06fstypeB\0\x12\x1a\n\x07options\x18\x05\
+    \x20\x03(\tR\x07optionsB\0\x12!\n\x0bmount_point\x18\x06\x20\x01(\tR\nmo\
+    untPointB\0\x12*\n\x08fs_group\x18\x07\x20\x01(\x0b2\r.grpc.FSGroupR\x07\
+    fsGroupB\0\x12!\n\x0bneed_format\x18\x08\x20\x01(\x08R\nneedFormatB\0\
+    \x12!\n\x0bneed_resize\x18\t\x20\x01(\x08R\nneedResizeB\0:\0\"\x92\x01\n\
+    \x06Device\x12\x10\n\x02id\x18\x01\x20\x01(\tR\x02idB\0\x12\x14\n\x04typ\
+    e\x18\x02\x20\x01(\tR\x04typeB\0\x12\x19\n\x07vm_path\x18\x03\x20\x01(\t\
+    R\x06vmPathB\0\x12'\n\x0econtainer_path\x18\x04\x20\x01(\tR\rcontainerPa\
+    thB\0\x12\x1a\n\x07options\x18\x05\x20\x03(\tR\x07optionsB\0:\0\"`\n\nSt\
+    ringUser\x12\x12\n\x03uid\x18\x01\x20\x01(\tR\x03uidB\0\x12\x12\n\x03gid\
+    \x18\x02\x20\x01(\tR\x03gidB\0\x12(\n\x0eadditionalGids\x18\x03\x20\x03(\
+    \tR\x0eadditionalGidsB\0:\0\"\xdc\x01\n\x0fCopyFileRequest\x12\x14\n\x04\
+    path\x18\x01\x20\x01(\tR\x04pathB\0\x12\x1d\n\tfile_size\x18\x02\x20\x01\
+    (\x03R\x08fileSizeB\0\x12\x1d\n\tfile_mode\x18\x03\x20\x01(\rR\x08fileMo\
+    deB\0\x12\x1b\n\x08dir_mode\x18\x04\x20\x01(\rR\x07dirModeB\0\x12\x12\n\
+    \x03uid\x18\x05\x20\x01(\x05R\x03uidB\0\x12\x12\n\x03gid\x18\x06\x20\x01\
+    (\x05R\x03gidB\0\x12\x18\n\x06offset\x18\x07\x20\x01(\x03R\x06offsetB\0\
+    \x12\x14\n\x04data\x18\x08\x20\x01(\x0cR\x04dataB\0:\0\"\x16\n\x12GetOOM\
+    EventRequest:\0\"1\n\x08OOMEvent\x12#\n\x0ccontainer_id\x18\x01\x20\x01(\
+    \tR\x0bcontainerIdB\0:\0\".\n\x0eAddSwapRequest\x12\x1a\n\x07PCIPath\x18\
     \x01\x20\x03(\rR\x07PCIPathB\0:\0\"\x15\n\x11GetMetricsRequest:\0\"'\n\
     \x07Metrics\x12\x1a\n\x07metrics\x18\x01\x20\x01(\tR\x07metricsB\0:\0\"D\
     \n\x12VolumeStatsRequest\x12,\n\x11volume_guest_path\x18\x01\x20\x01(\tR\
