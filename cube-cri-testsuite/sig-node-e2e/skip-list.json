@@ -43,6 +43,14 @@
       "exitCriteria": "产品决定支持 hostNetwork，并完成 hostNetwork、hostPID/hostIPC、hostexec 的最小用例和上游用例回归。"
     },
     {
+      "id": "agc49-host-access-unsupported",
+      "enabled": true,
+      "pattern": "\\[Feature:HostAccess\\]",
+      "reason": "Cube 首版明确不支持 hostNetwork、hostPID 和 hostIPC，按 AGC-49 决策整体跳过 Kubernetes v1.36.2 的 HostAccess 标签。该标签还包含三个 non-host 隔离反例和一个 privileged=true 用例；后四项属于附带跳过，不能据此视为 Cube 不支持，必须由独立回归持续覆盖。",
+      "source": "AGC-49, Kubernetes v1.36.2 e2e labels",
+      "exitCriteria": "巡检能够只排除三个 Host namespace 正例并持续运行 non-host 隔离与 privileged 用例时，改为细粒度规则；每次 Kubernetes 版本升级时重新盘点标签范围；产品完成 hostNetwork、hostPID、hostIPC 实现、安全评审及同节点测试夹具校验，并通过全部 HostAccess 专项回归后删除。"
+    },
+    {
       "id": "agc39-runtimeclass-node-affinity-topology",
       "enabled": true,
       "pattern": "RuntimeClass should run a Pod requesting a RuntimeClass with (scheduling without taints|a configured handler)",
@@ -57,6 +65,14 @@
       "reason": "Kubernetes v1.36.2 node e2e 按默认 handler 的 recursiveReadOnlyMounts=true 选择支持分支，但当前巡检会把测试 Pod 注入 runtimeClassName=cube，而 cube handler 准确上报 false，导致用例按 runc 能力选中后被 kubelet 根据 cube handler 能力按预期拒绝。",
       "source": "AGC-47",
       "exitCriteria": "改用 Cube 作为默认 runtime 的专用 node e2e 节点，或让测试按 cube handler 判断能力；Cube 完成跨容器 mount topology 和 RRO 端到端支持后也应移除此规则。"
+    },
+    {
+      "id": "agc50-checkpoint-container-unsupported",
+      "enabled": true,
+      "pattern": "\\[Feature:CheckpointContainer\\]",
+      "reason": "Cube 当前不支持 CRI 单容器 checkpoint；此外，上游用例会断言 kubelet checkpoint 累计指标初始值为零，不适用于复用 kubelet 的巡检环境。",
+      "source": "AGC-50",
+      "exitCriteria": "上游或本地用例改为按指标增量断言，或巡检使用无 checkpoint 历史指标的专用 kubelet；同时宿主机 CRIU、Guest 内核和 CRIU、Cube 标准容器级 Pause/Checkpoint 能力全部就绪，并通过 runc 对照与 Cube 专项回归。"
     }
   ]
 }
