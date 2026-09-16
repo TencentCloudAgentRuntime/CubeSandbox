@@ -46,9 +46,10 @@ func panels() []any {
 		}),
 
 		row(32, "Kubernetes 控制链路", 9),
-		timeseriesWidth(34, "Kubelet 与 CRI（RunPodSandbox 含 CNI）P95", 10, 0, 8, "s", false, kubeletRuntimeP95()),
-		timeseriesWidth(40, "Scheduler 调度耗时 P95", 10, 8, 8, "s", false, schedulerPodSchedulingP95()),
-		timeseriesWidth(39, "API Server Pod POST P95", 10, 16, 8, "s", false, apiserverPodPostP95()),
+		timeseriesWidth(34, "Kubelet Pod Worker P95", 10, 0, 6, "s", false, kubeletPodWorkerP95()),
+		timeseriesWidth(43, "Kubelet Sandbox 与 Runtime P95", 10, 6, 6, "s", false, kubeletRuntimeP95()),
+		timeseriesWidth(40, "Scheduler 调度耗时 P95", 10, 12, 6, "s", false, schedulerPodSchedulingP95()),
+		timeseriesWidth(39, "API Server Pod POST P95", 10, 18, 6, "s", false, apiserverPodPostP95()),
 
 		row(8, "Shim 与 VMM worker", 18),
 		timeseries(9, "Worker 阶段 P95", 19, 0, "s", false, []query{
@@ -88,6 +89,7 @@ func panels() []any {
 		timeseries(21, "内部操作错误速率", 97, 0, "ops", true, []query{{"sum by (component, operation) (rate(cube_cri_operations_total{node=~\"$node\",result=\"error\"}[$__rate_interval]))", "{{component}} {{operation}}"}}),
 		timeseries(22, "错误类别速率", 97, 12, "ops", true, []query{{"sum by (component, operation, error_class) (rate(cube_cri_operation_failures_total{node=~\"$node\"}[$__rate_interval]))", "{{component}} {{operation}} {{error_class}}"}}),
 		timeseries(23, "RuntimeResource RPC 错误速率", 105, 0, "ops", true, []query{{"sum by (method, code) (rate(cube_cri_rpc_requests_total{node=~\"$node\",code!=\"OK\"}[$__rate_interval]))", "{{method}} {{code}}"}}),
+		timeseries(44, "Kubelet 启动与 Runtime 错误速率", 105, 12, "ops", true, kubeletErrorRates()),
 
 		row(24, "节点与采集健康", 113),
 		timeseries(25, "指标端点可达性", 114, 0, "short", false, []query{{"up{job=~\"cube-cri|kubelet|node-exporter\",node=~\"$node\"}", "{{job}} {{node}}"}}),
@@ -97,6 +99,9 @@ func panels() []any {
 		}),
 		timeseries(27, "状态采样结果", 122, 0, "short", false, []query{{"cube_cri_state_collection_success{node=~\"$node\"}", "{{node}}"}}),
 		timeseries(28, "状态采样年龄", 122, 12, "s", false, []query{{"time() - cube_cri_state_collection_timestamp_seconds{node=~\"$node\"}", "{{node}}"}}),
+		timeseriesWidth(45, "Kubelet Pod/Container 启动速率", 130, 0, 8, "ops", true, kubeletStartRates()),
+		timeseriesWidth(46, "Kubelet PLEG Relist P95", 130, 8, 8, "s", false, kubeletPLEGP95()),
+		timeseriesWidth(47, "Kubelet 镜像检查与拉取", 130, 16, 8, "s", false, kubeletImageMetrics()),
 	}
 }
 
@@ -122,20 +127,57 @@ func kubeletPodStartP95() []query {
 	}
 }
 
+func kubeletPodWorkerP95() []query {
+	return []query{
+		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_pod_worker_start_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))", "worker start p95"},
+		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_pod_worker_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))", "pod worker p95"},
+	}
+}
+
 func kubeletRuntimeP95() []query {
 	return []query{
-		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_pod_worker_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))", "pod worker p95"},
+		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_run_podsandbox_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))", "RunPodSandbox p95"},
 		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_runtime_operations_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\",operation_type=\"run_podsandbox\"}[1m])))", "RunPodSandbox（含 CNI）p95"},
 		{"histogram_quantile(0.95, sum by (le, operation_type) (rate(kubelet_runtime_operations_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\",operation_type=~\"create_container|start_container\"}[1m])))", "{{operation_type}} p95"},
 	}
 }
 
+func kubeletPLEGP95() []query {
+	return []query{
+		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_pleg_relist_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))", "relist p95"},
+		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_pleg_pod_relist_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))", "pod relist p95"},
+		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_pleg_relist_interval_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))", "relist interval p95"},
+	}
+}
+
+func kubeletErrorRates() []query {
+	return []query{
+		{"sum by (node) (rate(kubelet_started_pods_errors_total{job=\"kubelet\",node=~\"$node\"}[$__rate_interval]))", "{{node}} started pod errors"},
+		{"sum by (operation_type) (rate(kubelet_runtime_operations_errors_total{job=\"kubelet\",node=~\"$node\"}[$__rate_interval]))", "{{operation_type}} errors"},
+	}
+}
+
+func kubeletStartRates() []query {
+	return []query{
+		{"sum by (node) (rate(kubelet_started_pods_total{job=\"kubelet\",node=~\"$node\"}[$__rate_interval]))", "{{node}} pods"},
+		{"sum by (node) (rate(kubelet_started_containers_total{job=\"kubelet\",node=~\"$node\"}[$__rate_interval]))", "{{node}} containers"},
+		{"sum by (node) (rate(kubelet_restarted_pods_total{job=\"kubelet\",node=~\"$node\"}[$__rate_interval]))", "{{node}} restarted pods"},
+	}
+}
+
+func kubeletImageMetrics() []query {
+	return []query{
+		{"histogram_quantile(0.95, sum by (le) (rate(kubelet_image_pull_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))", "image pull p95"},
+		{"sum by (node) (rate(kubelet_image_manager_ensure_image_requests_total{job=\"kubelet\",node=~\"$node\"}[$__rate_interval]))", "{{node}} ensure image"},
+	}
+}
+
 func apiserverPodPostP95() []query {
-	return []query{{"histogram_quantile(0.95, sum by (le) (rate(apiserver_request_duration_seconds_bucket{job=\"apiserver\",verb=\"POST\",resource=\"pods\",subresource=\"\"}[1m])))", "POST pods p95"}}
+	return []query{{"histogram_quantile(0.95, sum by (le) (rate(apiserver_request_duration_seconds_bucket{job=\"apiserver\",verb=\"POST\",resource=\"pods\",subresource=\"\"}[15s])))", "POST pods p95"}}
 }
 
 func schedulerPodSchedulingP95() []query {
-	return []query{{"histogram_quantile(0.95, sum by (le) (rate(scheduler_pod_scheduling_sli_duration_seconds_bucket{job=\"kube-scheduler\"}[1m])))", "排队到调度完成 p95"}}
+	return []query{{"histogram_quantile(0.95, sum by (le) (rate(scheduler_pod_scheduling_sli_duration_seconds_bucket{job=\"kube-scheduler\"}[15s])))", "排队到调度完成 p95"}}
 }
 
 func ipamdPodSetIPP95() []query {

@@ -48,7 +48,7 @@ data:
         target_label: node
       metric_relabel_configs:
       - source_labels: [__name__]
-        regex: kubelet_(pod_start_duration_seconds|pod_start_sli_duration_seconds|pod_start_total_duration_seconds|pod_worker_duration_seconds|runtime_operations_duration_seconds)_(bucket|sum|count)
+        regex: kubelet_((pod_start_duration_seconds|pod_start_sli_duration_seconds|pod_start_total_duration_seconds|pod_worker_start_duration_seconds|pod_worker_duration_seconds|run_podsandbox_duration_seconds|runtime_operations_duration_seconds|pleg_relist_duration_seconds|pleg_relist_interval_seconds|pleg_pod_relist_duration_seconds|image_pull_duration_seconds)_(bucket|sum|count)|runtime_operations_(errors_)?total|started_pods(_errors)?_total|started_containers_total|restarted_pods_total|image_manager_ensure_image_requests_total)
         action: keep
     - job_name: node-exporter
       metrics_path: /metrics
@@ -155,9 +155,9 @@ spec:
     spec:
       hostNetwork: true
       hostPID: true
-      nodeSelector: {agc.cloud.tencent.com/cube-ready: "true"}
+      nodeSelector: {agc.cloud.tencent.com/cube-monitoring: "true"}
       tolerations:
-      - operator: Exists
+      - {key: cube-cri-load-generator, operator: Equal, value: "true", effect: NoSchedule}
       containers:
       - name: node-exporter
         image: prom/node-exporter:v1.8.2
@@ -207,6 +207,9 @@ spec:
       labels: {app: cube-cri-prometheus}
     spec:
       serviceAccountName: cube-cri-prometheus
+      nodeSelector: {agc.cloud.tencent.com/cube-monitoring: "true"}
+      tolerations:
+      - {key: cube-cri-load-generator, operator: Equal, value: "true", effect: NoSchedule}
       securityContext:
         fsGroup: 65534
         fsGroupChangePolicy: OnRootMismatch
@@ -568,7 +571,7 @@ data:
           },
           "gridPos": {
             "h": 8,
-            "w": 8,
+            "w": 6,
             "x": 0,
             "y": 10
           },
@@ -595,8 +598,78 @@ data:
                 "uid": "cube-cri-prometheus"
               },
               "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(kubelet_pod_worker_start_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))",
+              "legendFormat": "worker start p95",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
               "expr": "histogram_quantile(0.95, sum by (le) (rate(kubelet_pod_worker_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))",
               "legendFormat": "pod worker p95",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "Kubelet Pod Worker P95",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "cube-cri-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "lineWidth": 1,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "mode": "none"
+                }
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 6,
+            "x": 6,
+            "y": 10
+          },
+          "id": 43,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(kubelet_run_podsandbox_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))",
+              "legendFormat": "RunPodSandbox p95",
               "range": true,
               "refId": "A"
             },
@@ -623,7 +696,7 @@ data:
               "refId": "C"
             }
           ],
-          "title": "Kubelet 与 CRI（RunPodSandbox 含 CNI）P95",
+          "title": "Kubelet Sandbox 与 Runtime P95",
           "type": "timeseries"
         },
         {
@@ -649,8 +722,8 @@ data:
           },
           "gridPos": {
             "h": 8,
-            "w": 8,
-            "x": 8,
+            "w": 6,
+            "x": 12,
             "y": 10
           },
           "id": 40,
@@ -676,7 +749,7 @@ data:
                 "uid": "cube-cri-prometheus"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.95, sum by (le) (rate(scheduler_pod_scheduling_sli_duration_seconds_bucket{job=\"kube-scheduler\"}[1m])))",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(scheduler_pod_scheduling_sli_duration_seconds_bucket{job=\"kube-scheduler\"}[15s])))",
               "legendFormat": "排队到调度完成 p95",
               "range": true,
               "refId": "A"
@@ -708,8 +781,8 @@ data:
           },
           "gridPos": {
             "h": 8,
-            "w": 8,
-            "x": 16,
+            "w": 6,
+            "x": 18,
             "y": 10
           },
           "id": 39,
@@ -735,7 +808,7 @@ data:
                 "uid": "cube-cri-prometheus"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.95, sum by (le) (rate(apiserver_request_duration_seconds_bucket{job=\"apiserver\",verb=\"POST\",resource=\"pods\",subresource=\"\"}[1m])))",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(apiserver_request_duration_seconds_bucket{job=\"apiserver\",verb=\"POST\",resource=\"pods\",subresource=\"\"}[15s])))",
               "legendFormat": "POST pods p95",
               "range": true,
               "refId": "A"
@@ -2277,6 +2350,76 @@ data:
           "type": "timeseries"
         },
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "cube-cri-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "lineWidth": 1,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "mode": "normal"
+                }
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 105
+          },
+          "id": 44,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "sum by (node) (rate(kubelet_started_pods_errors_total{job=\"kubelet\",node=~\"$node\"}[$__rate_interval]))",
+              "legendFormat": "{{node}} started pod errors",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "sum by (operation_type) (rate(kubelet_runtime_operations_errors_total{job=\"kubelet\",node=~\"$node\"}[$__rate_interval]))",
+              "legendFormat": "{{operation_type}} errors",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "Kubelet 启动与 Runtime 错误速率",
+          "type": "timeseries"
+        },
+        {
           "collapsed": false,
           "gridPos": {
             "h": 1,
@@ -2535,6 +2678,238 @@ data:
           ],
           "title": "状态采样年龄",
           "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "cube-cri-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "lineWidth": 1,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "mode": "normal"
+                }
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 130
+          },
+          "id": 45,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "sum by (node) (rate(kubelet_started_pods_total{job=\"kubelet\",node=~\"$node\"}[$__rate_interval]))",
+              "legendFormat": "{{node}} pods",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "sum by (node) (rate(kubelet_started_containers_total{job=\"kubelet\",node=~\"$node\"}[$__rate_interval]))",
+              "legendFormat": "{{node}} containers",
+              "range": true,
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "sum by (node) (rate(kubelet_restarted_pods_total{job=\"kubelet\",node=~\"$node\"}[$__rate_interval]))",
+              "legendFormat": "{{node}} restarted pods",
+              "range": true,
+              "refId": "C"
+            }
+          ],
+          "title": "Kubelet Pod/Container 启动速率",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "cube-cri-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "lineWidth": 1,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "mode": "none"
+                }
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 130
+          },
+          "id": 46,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(kubelet_pleg_relist_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))",
+              "legendFormat": "relist p95",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(kubelet_pleg_pod_relist_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))",
+              "legendFormat": "pod relist p95",
+              "range": true,
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(kubelet_pleg_relist_interval_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))",
+              "legendFormat": "relist interval p95",
+              "range": true,
+              "refId": "C"
+            }
+          ],
+          "title": "Kubelet PLEG Relist P95",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "cube-cri-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "lineWidth": 1,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "mode": "none"
+                }
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 130
+          },
+          "id": 47,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(kubelet_image_pull_duration_seconds_bucket{job=\"kubelet\",node=~\"$node\"}[1m])))",
+              "legendFormat": "image pull p95",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "cube-cri-prometheus"
+              },
+              "editorMode": "code",
+              "expr": "sum by (node) (rate(kubelet_image_manager_ensure_image_requests_total{job=\"kubelet\",node=~\"$node\"}[$__rate_interval]))",
+              "legendFormat": "{{node}} ensure image",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "Kubelet 镜像检查与拉取",
+          "type": "timeseries"
         }
       ],
       "refresh": "10s",
@@ -2586,6 +2961,9 @@ spec:
     metadata:
       labels: {app: cube-cri-grafana}
     spec:
+      nodeSelector: {agc.cloud.tencent.com/cube-monitoring: "true"}
+      tolerations:
+      - {key: cube-cri-load-generator, operator: Equal, value: "true", effect: NoSchedule}
       securityContext: {fsGroup: 472}
       containers:
       - name: grafana

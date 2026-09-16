@@ -20,9 +20,26 @@ workers=""
 timeout_seconds=""
 stable_seconds=""
 target_node=""
+snapshotter_profile=""
+load_image=""
+cube_template_mode=""
+
+erox_load_image="tcr-cube.tencentcloudcr.com/journeyyou/busybox@sha256:5b0745afdfec8efe7225bbe20cd87dc9139381e676400707ea979ec5406de3a8"
+overlayfs_load_image="mirror.ccs.tencentyun.com/library/busybox:1.36.1"
 
 usage() {
-  echo "用法: $0 --stage S0|S1|S2 --generator-node NODE [--target-node NODE] [--run-id ID] [--output DIR]" >&2
+  cat >&2 <<EOF
+用法: $0 --stage S0|S1|S2 --generator-node NODE [--target-node NODE] [--run-id ID] [--output DIR]
+
+镜像/快照器模板参数:
+  --snapshotter-profile erox|overlayfs
+      erox:     使用正式 EROX 负载镜像，并设置 agc.cloud.tencent.com/cube-template-mode=auto
+      overlayfs: 使用普通 overlayfs 镜像，并移除 cube-template-mode annotation
+  --load-image IMAGE
+      覆盖当前 profile 的默认镜像，会同步写入全部 initContainers/containers
+  --cube-template-mode auto|none
+      覆盖当前 profile 的 template-mode 行为
+EOF
 }
 
 while (($#)); do
@@ -38,6 +55,9 @@ while (($#)); do
     --timeout) timeout_seconds="$2"; shift 2 ;;
     --stable-seconds) stable_seconds="$2"; shift 2 ;;
     --target-node) target_node="$2"; shift 2 ;;
+    --snapshotter-profile) snapshotter_profile="$2"; shift 2 ;;
+    --load-image) load_image="$2"; shift 2 ;;
+    --cube-template-mode) cube_template_mode="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1" >&2; usage; exit 2 ;;
   esac
@@ -60,8 +80,25 @@ qps="${qps:-${defaults[2]}}"
 workers="${workers:-${defaults[3]}}"
 timeout_seconds="${timeout_seconds:-${defaults[4]}}"
 stable_seconds="${stable_seconds:-${defaults[5]}}"
+snapshotter_profile="${snapshotter_profile:-erox}"
+case "$snapshotter_profile" in
+  erox)
+    load_image="${load_image:-$erox_load_image}"
+    cube_template_mode="${cube_template_mode:-auto}"
+    ;;
+  overlayfs)
+    load_image="${load_image:-$overlayfs_load_image}"
+    cube_template_mode="${cube_template_mode:-none}"
+    ;;
+  *) echo "snapshotter-profile 只支持 erox、overlayfs" >&2; exit 2 ;;
+esac
+case "$cube_template_mode" in
+  auto|none) ;;
+  *) echo "cube-template-mode 只支持 auto、none" >&2; exit 2 ;;
+esac
+[[ -n "$load_image" ]] || { echo "load-image 不能为空" >&2; exit 2; }
 run_id="${run_id:-$(tr '[:upper:]' '[:lower:]' <<<"$stage")-$(date -u +%Y%m%dT%H%M%SZ)}"
-run_id="$(sed -E 's/[^a-z0-9-]+/-/g; s/^-+|-+$//g' <<<"${run_id,,}" | cut -c1-32)"
+run_id="$(printf '%s' "$run_id" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+|-+$//g' | cut -c1-32)"
 [[ -n "$run_id" ]] || { echo "run-id 规范化后为空" >&2; exit 2; }
 output="${output:-$repo_root/_output/cube-cri-scale/$run_id}"
 mkdir -p "$output"
@@ -148,13 +185,39 @@ EOF
 done
 namespace_csv="$(IFS=,; echo "${target_namespaces[*]}")"
 
-yq -o=json '.' "$template" > "$output/pod-template.json"
+yq -o=json '.' "$template" \
+  | jq \
+      --arg image "$load_image" \
+      --arg profile "$snapshotter_profile" \
+      --arg templateMode "$cube_template_mode" '
+        def set_images($image):
+          .spec.containers = ((.spec.containers // []) | map(.image = $image))
+          | if (.spec.initContainers? // null) == null then .
+            else .spec.initContainers |= map(.image = $image)
+            end;
+        def prune_empty_annotations:
+          if ((.metadata.annotations // {}) | length) == 0 then del(.metadata.annotations) else . end;
+
+        set_images($image)
+        | .metadata.labels = (.metadata.labels // {})
+        | .metadata.labels["load-test-snapshotter-profile"] = $profile
+        | if $templateMode == "auto" then
+            .metadata.annotations = (.metadata.annotations // {})
+            | .metadata.annotations["agc.cloud.tencent.com/cube-template-mode"] = "auto"
+          elif $templateMode == "none" then
+            del(.metadata.annotations["agc.cloud.tencent.com/cube-template-mode"])
+            | prune_empty_annotations
+          else .
+          end
+      ' > "$output/pod-template.json"
 jq -n \
   --arg runId "$run_id" --arg stage "$stage" --arg generatorNode "$generator_node" \
   --arg namespaces "$namespace_csv" --argjson count "$count" --argjson qps "$qps" \
   --argjson workers "$workers" --argjson timeout "$timeout_seconds" \
   --argjson stable "$stable_seconds" --arg targetNode "$target_node" \
-  '{runId:$runId,stage:$stage,generatorNode:$generatorNode,targetNode:$targetNode,targetNamespaces:($namespaces|split(",")),podCount:$count,createQPS:$qps,createWorkers:$workers,timeoutSeconds:$timeout,stableSeconds:$stable}' \
+  --arg snapshotterProfile "$snapshotter_profile" --arg loadImage "$load_image" \
+  --arg cubeTemplateMode "$cube_template_mode" \
+  '{runId:$runId,stage:$stage,generatorNode:$generatorNode,targetNode:$targetNode,targetNamespaces:($namespaces|split(",")),podCount:$count,createQPS:$qps,createWorkers:$workers,timeoutSeconds:$timeout,stableSeconds:$stable,snapshotterProfile:$snapshotterProfile,loadImage:$loadImage,cubeTemplateMode:$cubeTemplateMode}' \
   > "$output/run-config.json"
 sha256sum "$script_dir/runner.py" "$template" "$runtime_class" "$output/pod-template.json" "$output/run-config.json" > "$output/artifacts.sha256"
 

@@ -15,7 +15,10 @@ done
 [[ -n "$run_id" ]] || { echo "必须指定 --run-id" >&2; exit 2; }
 [[ -n "${KUBECONFIG:-}" && -r "$KUBECONFIG" ]] || { echo "必须显式设置可读的 KUBECONFIG" >&2; exit 2; }
 
-mapfile -t namespaces < <(
+namespaces=()
+while IFS= read -r namespace; do
+  [[ -n "$namespace" ]] && namespaces+=("$namespace")
+done < <(
   kubectl get namespaces -l "cube-cri-load-owned=true,load-test-run=$run_id" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
 )
 

@@ -56,7 +56,7 @@ data:
         target_label: node
       metric_relabel_configs:
       - source_labels: [__name__]
-        regex: kubelet_(pod_start_duration_seconds|pod_start_sli_duration_seconds|pod_start_total_duration_seconds|pod_worker_duration_seconds|runtime_operations_duration_seconds)_(bucket|sum|count)
+        regex: kubelet_((pod_start_duration_seconds|pod_start_sli_duration_seconds|pod_start_total_duration_seconds|pod_worker_start_duration_seconds|pod_worker_duration_seconds|run_podsandbox_duration_seconds|runtime_operations_duration_seconds|pleg_relist_duration_seconds|pleg_relist_interval_seconds|pleg_pod_relist_duration_seconds|image_pull_duration_seconds)_(bucket|sum|count)|runtime_operations_(errors_)?total|started_pods(_errors)?_total|started_containers_total|restarted_pods_total|image_manager_ensure_image_requests_total)
         action: keep
     - job_name: node-exporter
       metrics_path: /metrics
@@ -163,9 +163,9 @@ spec:
     spec:
       hostNetwork: true
       hostPID: true
-      nodeSelector: {agc.cloud.tencent.com/cube-ready: "true"}
+      nodeSelector: {agc.cloud.tencent.com/cube-monitoring: "true"}
       tolerations:
-      - operator: Exists
+      - {key: cube-cri-load-generator, operator: Equal, value: "true", effect: NoSchedule}
       containers:
       - name: node-exporter
         image: prom/node-exporter:v1.8.2
@@ -215,6 +215,9 @@ spec:
       labels: {app: cube-cri-prometheus}
     spec:
       serviceAccountName: cube-cri-prometheus
+      nodeSelector: {agc.cloud.tencent.com/cube-monitoring: "true"}
+      tolerations:
+      - {key: cube-cri-load-generator, operator: Equal, value: "true", effect: NoSchedule}
       securityContext:
         fsGroup: 65534
         fsGroupChangePolicy: OnRootMismatch
@@ -304,6 +307,9 @@ spec:
     metadata:
       labels: {app: cube-cri-grafana}
     spec:
+      nodeSelector: {agc.cloud.tencent.com/cube-monitoring: "true"}
+      tolerations:
+      - {key: cube-cri-load-generator, operator: Equal, value: "true", effect: NoSchedule}
       securityContext: {fsGroup: 472}
       containers:
       - name: grafana
