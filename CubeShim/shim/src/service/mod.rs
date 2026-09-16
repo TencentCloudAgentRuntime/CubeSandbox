@@ -10,6 +10,7 @@ mod sandbox_srv;
 mod srv;
 mod standard_rootfs;
 mod task_srv;
+pub(crate) mod tracing;
 mod tools;
 mod update_ext;
 pub use runner::run;

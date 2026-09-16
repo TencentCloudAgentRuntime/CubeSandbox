@@ -72,6 +72,7 @@ func templateKey(resources *runtimev1.ResourceRequest, assets Assets) string {
 		assetFingerprint(assets.KernelPath),
 		assetFingerprint(assets.AgentPath),
 		assetFingerprint(assets.GuestImagePath),
+		os.Getenv("CUBE_GUEST_KERNEL_CMDLINE_APPEND"),
 	}, "\x00")
 	digest := sha256.Sum256([]byte(identity))
 	return fmt.Sprintf("%dC%dM-%s", cpu, memory, hex.EncodeToString(digest[:8]))

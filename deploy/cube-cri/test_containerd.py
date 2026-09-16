@@ -36,7 +36,7 @@ SystemdCgroup = true
     def test_both_config_families_preserve_node_settings_and_are_idempotent(self):
         for major, plugin, version, key in [('1.7', module.CRI17, 2, 'sandbox_mode'), ('2', module.CRI2, 3, 'sandboxer'), ('2', module.CRI2, 4, 'sandboxer')]:
             source = self.source(plugin, version)
-            result = module.configure(source, major)
+            result = module.configure(source, major, [], False)
             parsed = tomllib.loads(result)
             self.assertTrue(result.startswith(source))
             self.assertEqual(parsed['plugins'][plugin]['containerd']['runtimes']['cube'][key], 'shim')
@@ -50,12 +50,12 @@ SystemdCgroup = true
             self.assertEqual(parsed['grpc']['address'], '/custom/containerd.sock')
             self.assertEqual(parsed['plugins'][plugin]['cni']['conf_dir'], '/custom/cni')
             self.assertTrue(parsed['plugins'][plugin]['containerd']['runtimes']['runc']['options']['SystemdCgroup'])
-            self.assertEqual(module.configure(result, major), result)
+            self.assertEqual(module.configure(result, major, [], False), result)
             self.assertEqual(parsed['required_plugins'], ['io.containerd.grpc.v1.cri'])
 
     def test_containerd2_legacy_config_keeps_legacy_cri_table(self):
         source = self.source(module.CRI17, 2)
-        result = tomllib.loads(module.configure(source, '2'))
+        result = tomllib.loads(module.configure(source, '2', [], False))
         cube = result['plugins'][module.CRI17]['containerd']['runtimes']['cube']
         self.assertEqual(cube['sandbox_mode'], 'shim')
         self.assertNotIn(module.CRI2, result['plugins'])
@@ -69,11 +69,11 @@ sandbox_mode = 'podsandbox'
 [plugins."{module.CRI17}".containerd.runtimes.other]
 runtime_type = 'io.containerd.runc.v2'
 '''
-        result = tomllib.loads(module.configure(source, '1.7'))['plugins'][module.CRI17]['containerd']['runtimes']
+        result = tomllib.loads(module.configure(source, '1.7', [], False))['plugins'][module.CRI17]['containerd']['runtimes']
         self.assertIn('other', result)
         self.assertNotIn('options', result['cube'])
         with self.assertRaises(ValueError):
-            module.configure(source.replace("runtime_type = 'io.containerd.cube.rs'", "runtime_type = 'io.containerd.other.v2'"), '1.7')
+            module.configure(source.replace("runtime_type = 'io.containerd.cube.rs'", "runtime_type = 'io.containerd.other.v2'"), '1.7', [], False)
 
     def test_privileged_switch_replaces_stale_values_and_preserves_shim_settings(self):
         source = self.source(module.CRI2, 3) + f'''
@@ -81,11 +81,19 @@ runtime_type = 'io.containerd.runc.v2'
 env = ['CUBE_ALLOW_PRIVILEGED=false', 'OTHER=value', 'CUBE_ALLOW_PRIVILEGED=true']
 socket_dir = '/custom/shim'
 '''
-        result = module.configure(source, '2')
+        result = module.configure(source, '2', [], False)
         manager = tomllib.loads(result)['plugins'][module.SHIM_MANAGER]
         self.assertEqual(manager['env'], ['OTHER=value', 'CUBE_ALLOW_PRIVILEGED=true'])
         self.assertEqual(manager['socket_dir'], '/custom/shim')
-        self.assertEqual(module.configure(result, '2'), result)
+        self.assertEqual(module.configure(result, '2', [], False), result)
+
+    def test_proxy_backend_socket_is_restored_to_native_cri_socket(self):
+        source = self.source(module.CRI2, 3).replace(
+            "/custom/containerd.sock", "/run/containerd/containerd-real.sock"
+        )
+        result = module.configure(source, "2", [], False)
+        self.assertEqual(tomllib.loads(result)["grpc"]["address"], "/run/containerd/containerd.sock")
+        self.assertEqual(module.configure(result, "2", [], False), result)
 
     def test_preserves_launch_overrides(self):
         for args in [['-c', '/old/config', '--root', '/custom/root', '--state=/custom/state'], ['--config=/old/config', '-a', '/custom/socket']]:

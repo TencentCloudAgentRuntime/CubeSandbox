@@ -1,0 +1,12 @@
+[Unit]
+Description=Cube CRI guest trace vsock bridge
+After=cube-cri-trace-forwarder.service
+Before=containerd.service
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/cube-cri/current/bin/agent-trace-bridge.py
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

@@ -51,9 +51,11 @@ spec:
             - name: CUBE_CRI_MODE
               value: runtime
             - name: CUBE_GUEST_KERNEL_CMDLINE_APPEND
-              value: {{ toJson .Values.guest.kernelCmdlineAppend | quote }}
+              value: {{ toJson (ternary (uniq (append .Values.guest.kernelCmdlineAppend "agent.trace=1")) .Values.guest.kernelCmdlineAppend .Values.tracing.enabled) | quote }}
             - name: CUBE_GUEST_BOOT_TRACE
               value: {{ ternary "1" "0" .Values.guest.bootTrace | quote }}
+            - name: CUBE_CRI_TRACING_ENABLED
+              value: {{ ternary "1" "0" .Values.tracing.enabled | quote }}
           resources:
             {{- toYaml .Values.daemonSet.resources | nindent 12 }}
           readinessProbe:

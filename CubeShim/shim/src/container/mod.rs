@@ -1044,7 +1044,7 @@ impl Container {
         let client = self.client.as_ref().unwrap().lock().await;
 
         client
-            .create_container(self.ctx.clone(), &req)
+            .create_container(crate::service::tracing::agent_context(self.ctx.clone()), &req)
             .await
             .map_err(|e: ttrpc::Error| format!("create container failed:{}", e))?;
 
@@ -1085,7 +1085,7 @@ impl Container {
 
         let client = self.client.as_ref().unwrap().lock().await;
         client
-            .reconnect_container_io(self.ctx.clone(), &req)
+            .reconnect_container_io(crate::service::tracing::agent_context(self.ctx.clone()), &req)
             .await
             .map_err(|e| format!("reconnect container io failed:{}", e))?;
 
@@ -1105,7 +1105,7 @@ impl Container {
                 ..Default::default()
             };
             client
-                .start_container(self.ctx.clone(), &req)
+                .start_container(crate::service::tracing::agent_context(self.ctx.clone()), &req)
                 .await
                 .map_err(|e| format!("start container failed:{}", e))?;
             total.succeed();
@@ -1235,7 +1235,7 @@ impl Container {
         };
         let client = self.client.as_ref().unwrap().lock().await;
 
-        if let Err(err) = client.signal_process(self.ctx.clone(), &req).await {
+        if let Err(err) = client.signal_process(crate::service::tracing::agent_context(self.ctx.clone()), &req).await {
             let err_msg = err.to_string();
             if sig == libc::SIGPIPE as u32 && err_msg.contains("Invalid exec id") {
                 warnf!(
@@ -1271,7 +1271,7 @@ impl Container {
         };
         let client = self.client.as_ref().unwrap().lock().await;
 
-        if let Err(err) = client.close_stdin(self.ctx.clone(), &req).await {
+        if let Err(err) = client.close_stdin(crate::service::tracing::agent_context(self.ctx.clone()), &req).await {
             let err_msg = err.to_string();
             warnf!(self.log, "close_io failed:{}, execid:{}", err_msg, exec_id);
             return Err(Error::Other(format!("close_io failed: {}", err_msg)));
@@ -1520,7 +1520,7 @@ impl Container {
         let client = self.client.as_ref().unwrap().lock().await.clone();
 
         let _ = client
-            .exec_process(self.ctx.clone(), &req)
+            .exec_process(crate::service::tracing::agent_context(self.ctx.clone()), &req)
             .await
             .map_err(|e| Error::Other(format!("start execid:{} failed:{}", exec_id, e)))?;
         let mut state = exec.state.clone().unwrap();
@@ -1621,7 +1621,7 @@ impl Container {
         let client = self.client.as_ref().unwrap().lock().await.clone();
 
         let _ = client
-            .update_container(self.ctx.clone(), &req)
+            .update_container(crate::service::tracing::agent_context(self.ctx.clone()), &req)
             .await
             .map_err(|e| format!("update container:{} failed:{}", &self.real_id, e))?;
         Ok(())

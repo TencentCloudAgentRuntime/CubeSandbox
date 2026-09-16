@@ -95,6 +95,15 @@ def configure(text, major, kernel_cmdline_append, guest_boot_trace):
     if any(p in data.get("disabled_plugins", []) for p in ("cri", plugin)):
         raise ValueError("节点禁用了 CRI 插件")
     expected = copy.deepcopy(data)
+    # Retire the temporary CRI trace proxy's backend socket when upgrading.
+    # The native containerd endpoint must be the kubelet's socket again.
+    if data.get("grpc", {}).get("address") == "/run/containerd/containerd-real.sock":
+        expected["grpc"]["address"] = "/run/containerd/containerd.sock"
+        text = re.sub(
+            r'(?m)^(\s*address\s*=\s*["\'])/run/containerd/containerd-real\.sock(["\']\s*)$',
+            r'\g<1>/run/containerd/containerd.sock\2',
+            text,
+        )
     handler = {
         "runtime_type": "io.containerd.cube.rs",
         "runtime_path": "/opt/cube-cri/current/bin/containerd-shim-cube-rs",
@@ -170,12 +179,14 @@ def load_kernel_cmdline_append(path):
     return [param.strip() for param in params if param.strip()]
 
 
-def prepare(pid, output, config_path, kernel_cmdline_append, guest_boot_trace):
+def prepare(pid, output, config_path, kernel_cmdline_append, guest_boot_trace, tracing_enabled=False):
     proc = pathlib.Path(f"/proc/{pid}")
     binary = str((proc / "exe").resolve(strict=True))
     if not pathlib.Path(binary).is_file():
         raise ValueError("运行中的 containerd 二进制已被替换，请先恢复节点服务")
     args = (proc / "cmdline").read_bytes().decode().rstrip("\0").split("\0")[1:]
+    if option(args, ("--address", "-a"), None) == "/run/containerd/containerd-real.sock":
+        raise ValueError("containerd 启动参数仍指向 trace proxy 后端 socket，需先恢复原生 CRI 地址")
     cwd = str((proc / "cwd").resolve(strict=True))
     source = config_path
     if not source.is_absolute():
@@ -184,7 +195,6 @@ def prepare(pid, output, config_path, kernel_cmdline_append, guest_boot_trace):
     version = command(binary, "--version")
     major = family(version)
     source_text = source.read_text()
-    source_data = tomllib.loads(source_text)
     rendered = configure(source_text, major, kernel_cmdline_append, guest_boot_trace)
     output.mkdir(parents=True, exist_ok=True)
     (output / "containerd.toml").write_text(rendered)
@@ -212,12 +222,14 @@ Environment=CUBE_RUNTIME_RESOURCE_REAPER_DIR=/data/cubelet/runtime-resource-reap
 Environment=CUBE_CRI_METRICS_SOCKET=/run/cube-cri/metrics.sock
 Environment=CUBE_VMM_WORKER_PATH=/opt/cube-cri/current/bin/cube-vmm-worker
 """
+    if tracing_enabled:
+        unit = unit.replace("[Service]\n", "[Service]\nEnvironmentFile=-/etc/cube-cri/tracing.env\n", 1)
     for env in shim_env(kernel_cmdline_append, guest_boot_trace, include_privileged=False):
         unit += "Environment=" + unit_arg(env) + "\n"
     unit += "Environment=ENABLE_CRI_SANDBOXES=1\nEnvironment=CUBE_ALLOW_PRIVILEGED=true\n" if major == "1.7" else "UnsetEnvironment=ENABLE_CRI_SANDBOXES\n"
     (output / "containerd.service.conf").write_text(unit)
     metadata = {"binary": binary, "version": version, "family": major, "source_config": str(source),
-                "address": option(args, ("--address", "-a"), source_data.get("grpc", {}).get("address", "/run/containerd/containerd.sock"))}
+                "address": option(args, ("--address", "-a"), tomllib.loads(rendered).get("grpc", {}).get("address", "/run/containerd/containerd.sock"))}
     (output / "containerd.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
     print(f"复用节点 containerd: {version}; binary={binary}; config={source}")
 
@@ -229,6 +241,7 @@ if __name__ == "__main__":
     parser.add_argument("--config-path", type=pathlib.Path)
     parser.add_argument("--guest-kernel-cmdline-append-file", type=pathlib.Path)
     parser.add_argument("--guest-boot-trace", action="store_true", help="捕获每个 Guest 的 serial/console 日志")
+    parser.add_argument("--tracing-enabled", action="store_true", help="加载节点 tracing 环境配置")
     options = parser.parse_args()
     pid = options.pid or int(command("systemctl", "show", "containerd", "--property=MainPID", "--value"))
     if pid <= 0:
@@ -239,4 +252,5 @@ if __name__ == "__main__":
         options.config_path or options.output / "containerd.toml",
         load_kernel_cmdline_append(options.guest_kernel_cmdline_append_file),
         options.guest_boot_trace,
+        options.tracing_enabled,
     )

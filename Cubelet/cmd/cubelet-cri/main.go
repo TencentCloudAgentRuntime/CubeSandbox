@@ -25,6 +25,7 @@ import (
 	runtime "github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/handoff"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/services/runtime/state"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 )
@@ -138,6 +139,14 @@ func run() error {
 		return err
 	}
 	options := make([]grpc.ServerOption, 0, 1)
+	tracer, shutdownTracing, err := runtimeResourceTracing(ctx)
+	if err != nil {
+		return err
+	}
+	if shutdownTracing != nil {
+		defer shutdownTracing()
+		options = append(options, grpc.StatsHandler(otelgrpc.NewServerHandler(otelgrpc.WithTracerProvider(tracer))))
+	}
 	if metrics != nil {
 		options = append(options, grpc.UnaryInterceptor(metrics.UnaryInterceptor))
 	}

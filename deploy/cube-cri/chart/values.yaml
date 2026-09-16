@@ -20,6 +20,10 @@ guest:
   # /data/log/CubeShim/guest-boot/<sandbox-id>.console.log
   bootTrace: false
 
+tracing:
+  # 默认不安装 trace 服务、socket 或 Guest tracing 参数。
+  enabled: false
+
 daemonSet:
   hostStatePath: /var/lib/cube-cri/installer
   updateStrategy:

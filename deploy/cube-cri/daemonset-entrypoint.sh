@@ -5,7 +5,9 @@ state=/var/lib/cube-cri/installer
 base_version=$(cat /installer/version)
 guest_kernel_cmdline_append=${CUBE_GUEST_KERNEL_CMDLINE_APPEND:-[]}
 guest_boot_trace=${CUBE_GUEST_BOOT_TRACE:-0}
-version=$(printf '%s\n%s\n%s\n' "$base_version" "$guest_kernel_cmdline_append" "$guest_boot_trace" | sha256sum | cut -d ' ' -f1)
+tracing_enabled=${CUBE_CRI_TRACING_ENABLED:-0}
+case "$tracing_enabled" in 0|1) ;; *) echo "invalid CUBE_CRI_TRACING_ENABLED: $tracing_enabled" >&2; exit 1;; esac
+version=$(printf '%s\n%s\n%s\n%s\n' "$base_version" "$guest_kernel_cmdline_append" "$guest_boot_trace" "$tracing_enabled" | sha256sum | cut -d ' ' -f1)
 mode=${CUBE_CRI_MODE:-runtime}
 node_name=${NODE_NAME:?NODE_NAME is required}
 api_server="https://${KUBERNETES_SERVICE_HOST:?KUBERNETES_SERVICE_HOST is required}:${KUBERNETES_SERVICE_PORT_HTTPS:-443}"
@@ -36,7 +38,17 @@ ready() {
   for service in cube-cri-runtime-resource cubesandbox-shim-watchdog containerd; do
     host systemctl is-active --quiet "$service" || return 1
   done
-  host test -S /run/cube-cri/runtime-resource.sock
+  host test -S /run/cube-cri/runtime-resource.sock || return 1
+  if [ "$tracing_enabled" = 1 ]; then
+    for service in cube-cri-trace-forwarder cube-cri-agent-trace-bridge; do
+      host systemctl is-active --quiet "$service" || return 1
+    done
+    host test -S /run/cube-cri/agent-trace.sock || return 1
+  else
+    host test ! -S /run/cube-cri/agent-trace.sock || return 1
+    if host systemctl is-active --quiet cube-cri-trace-forwarder; then return 1; fi
+    if host systemctl is-active --quiet cube-cri-agent-trace-bridge; then return 1; fi
+  fi
 }
 case "${1:-}" in
   check) ready; exit ;;
@@ -50,6 +62,7 @@ if ! pvm_ready || host test -f /var/lib/cube-cri/pvm/reboot-request || { [ "$mod
     cp /installer/runtime.tar.gz /installer/daemonset-install.sh /installer/daemonset-pvm.sh "/host-state/$POD_UID/"
     printf '%s' "$guest_kernel_cmdline_append" > "/host-state/$POD_UID/guest-kernel-cmdline-append.json"
     if [ "$guest_boot_trace" = 1 ]; then touch "/host-state/$POD_UID/guest-boot-trace.enabled"; fi
+    if [ "$tracing_enabled" = 1 ]; then touch "/host-state/$POD_UID/tracing.enabled"; fi
     if ! pvm_ready && [ ! -s "/host-state/$POD_UID/pvm-host.rpm" ]; then cp /installer/pvm-host.rpm "/host-state/$POD_UID/"; fi
     host systemd-run --collect --unit "$unit" --property=Type=oneshot --property=TimeoutStartSec=20min \
       /bin/bash -c 'bash "$1/daemonset-install.sh" "$1" "$2" "$3" > "$1/install.log" 2>&1; rc=$?; printf "%s\n" "$rc" > "$1/install.exit"; exit "$rc"' bash "$src" "$version" "$mode"

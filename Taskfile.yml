@@ -24,6 +24,9 @@ tasks:
   build:agent:
     desc: 构建静态 Guest Agent 和独立 ext4 镜像。
     cmds: ['{{.BUILD}} agent']
+  build:forwarder:
+    desc: 构建 Guest span 的宿主机 OTLP 转发器。
+    cmds: ['{{.BUILD}} forwarder']
   build:guest:
     desc: 构建 cube-init 和 Guest 系统镜像。
     cmds: ['{{.BUILD}} guest']

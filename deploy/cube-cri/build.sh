@@ -23,6 +23,9 @@ case "${1:-runtime}" in
   agent)
     builder 'cd agent && make && cd /workspace && OUTPUT_DIR=/workspace/_output/cube-agent ONE_CLICK_CUBE_AGENT_BIN=/workspace/agent/target/x86_64-unknown-linux-musl/release/cube-agent bash deploy/one-click/build-agent-ext4.sh'
     cp _output/cube-agent/cube-agent.ext4 "$out/assets/agent" ;;
+  forwarder)
+    builder 'cd agent && cargo build --release --target x86_64-unknown-linux-musl -p cube-trace-forwarder'
+    install agent/target/x86_64-unknown-linux-musl/release/cube-trace-forwarder "$out/bin/" ;;
   guest)
     builder 'cd guest-init && make -B && make BINDIR=/workspace/_output/bin install'
     OUTPUT_DIR="$out/guest" ONE_CLICK_CUBE_INIT_BIN="$root/_output/bin/cube-init" bash deploy/one-click/build-guest-image.sh
@@ -37,7 +40,7 @@ case "${1:-runtime}" in
     ((${#rpms[@]} == 1)) || { echo '需要唯一的 PVM kernel RPM' >&2; exit 1; }
     cp "${rpms[0]}" "$out/pvm-host.rpm" ;;
   runtime)
-    for component in cubelet shim agent; do bash "$0" "$component"; done ;;
+    for component in cubelet shim agent forwarder; do bash "$0" "$component"; done ;;
   all)
     for component in runtime guest kernel; do bash "$0" "$component"; done ;;
   *) echo "unknown component: $1" >&2; exit 2 ;;

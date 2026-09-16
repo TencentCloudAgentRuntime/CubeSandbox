@@ -3,6 +3,7 @@
 //
 
 use crate::common::utils::Utils;
+use crate::sandbox::sb::global_guest_kernel_params;
 use crate::common::utils::VM_PATH;
 use crate::common::CResult;
 use crate::hypervisor::config::VmConfig;
@@ -28,6 +29,7 @@ use hyper::client;
 use hyper_util::rt::TokioIo;
 use net_util::Tap;
 use std::fs;
+use std::collections::HashSet;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
@@ -342,6 +344,16 @@ impl Snapshot {
                 "cube_reserve_nr_pages_order8={}",
                 self.res.preserve_memory
             ));
+        }
+        let global_kernel_params = global_guest_kernel_params()?;
+        let allowed_duplicates = HashSet::from(["console", "earlyprintk", "earlycon"]);
+        let conflicts = vm_config
+            .check_cmdline_conflicts_except(&global_kernel_params, &allowed_duplicates);
+        if !conflicts.is_empty() {
+            return Err(format!("global kernel parameter conflicts: {}", conflicts.join("; ")).into());
+        }
+        for param in global_kernel_params {
+            vm_config.add_cmdline(param);
         }
 
         let b_vm_config = Box::new(vm_config.to_vm_config());

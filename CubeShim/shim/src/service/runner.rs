@@ -304,6 +304,7 @@ async fn delete(runtime_id: &str, flags: Flags) -> Result<(), Error> {
 }
 
 async fn serve(runtime_id: &str, flags: Flags) -> Result<(), Error> {
+    super::tracing::initialize().map_err(Error::Other)?;
     if flags.id.is_empty() || flags.namespace.is_empty() {
         return Err(Error::InvalidArgument(
             "shim id and namespace cannot be empty".to_string(),
@@ -383,12 +384,18 @@ async fn serve(runtime_id: &str, flags: Flags) -> Result<(), Error> {
 
     shim.wait().await;
     server.shutdown().await.unwrap_or_default();
-    if let Some(lifecycle) = host_cgroup::lifecycle_from_env().map_err(Error::Other)? {
-        lifecycle
-            .request_cleanup("CubeShim server exited gracefully")
-            .map_err(Error::Other)?;
-    }
-    Ok(())
+    let cleanup = host_cgroup::lifecycle_from_env()
+        .map_err(Error::Other)
+        .and_then(|lifecycle| {
+            if let Some(lifecycle) = lifecycle {
+                lifecycle
+                    .request_cleanup("CubeShim server exited gracefully")
+                    .map_err(Error::Other)?;
+            }
+            Ok(())
+        });
+    opentelemetry::global::shutdown_tracer_provider();
+    cleanup
 }
 
 fn create_task_v3(

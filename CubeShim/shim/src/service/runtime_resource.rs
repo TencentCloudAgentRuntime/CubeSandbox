@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use tokio::net::UnixStream;
 use tonic::codegen::http::uri::PathAndQuery;
 use tonic::transport::{Channel, Endpoint};
-use tonic::{Request, Status};
+use tonic::Status;
 use tower::service_fn;
 
 use crate::service::host_cgroup::{lifecycle_from_env, RuntimeOwnerState, RuntimeResourceOwner};
@@ -1020,7 +1020,7 @@ impl RuntimeResourceClient {
         let codec = tonic_prost::ProstCodec::default();
         self.inner
             .unary(
-                Request::new(request),
+                super::tracing::tonic_request(request),
                 PathAndQuery::from_static(path),
                 codec,
             )

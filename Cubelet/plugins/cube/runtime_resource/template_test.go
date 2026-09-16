@@ -143,3 +143,12 @@ func TestTemplateKeyTracksResolvedAssetRelease(t *testing.T) {
 		t.Fatal("template key must change when the resolved asset release changes")
 	}
 }
+
+func TestTemplateKeyTracksGuestKernelParameters(t *testing.T) {
+	t.Setenv("CUBE_GUEST_KERNEL_CMDLINE_APPEND", "[]")
+	before := templateKey(testTemplateRequest(), testTemplateAssets())
+	t.Setenv("CUBE_GUEST_KERNEL_CMDLINE_APPEND", `["agent.trace=1"]`)
+	if after := templateKey(testTemplateRequest(), testTemplateAssets()); after == before {
+		t.Fatal("guest kernel parameters must invalidate a snapshot template")
+	}
+}

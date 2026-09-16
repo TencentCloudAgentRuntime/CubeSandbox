@@ -35,5 +35,8 @@ kubectl get node <node> -L agc.cloud.tencent.com/cube-ready
 | `imagePullSecrets` | `[]` | 私有仓库拉取凭据 |
 | `guest.kernelCmdlineAppend` | `[]` | 追加到所有 Cube Guest kernel cmdline 的参数 |
 | `guest.bootTrace` | `false` | 捕获 Guest serial/console 日志到宿主机 `/data/log/CubeShim/guest-boot/` |
+| `tracing.enabled` | `false` | 启用 Cube CRI tracing；自动追加 `agent.trace=1`，安装 trace 服务、socket 和 vsock 映射 |
 | `runtimeClass.name` | `cube` | 创建的 RuntimeClass 名称 |
 | `runtimeClass.enabled` | `true` | 已有同名 RuntimeClass 时设为 `false` |
+
+默认安装不部署 trace 服务，不加载节点 tracing 环境，也不向 Guest 追加 tracing 参数。启用前在目标节点准备 `/etc/cube-cri/tracing.env`，至少配置 `OTEL_EXPORTER_OTLP_ENDPOINT` 和 `CUBE_CRI_TRACING_OTLP_ENDPOINT`，并准备可接收 OTLP 的 Collector；随后设置 `tracing.enabled=true` 并升级 Helm。若需 kubelet 到 Guest 的完整链路，还需单独配置 kubelet tracing。关闭时安装器会停止并移除本节点的 trace 服务、socket 和 vsock 映射，保留由用户管理的 `tracing.env` 文件；已有 Cube Pod 的 Shim 和 Guest 需重建后才完全停止 tracing。

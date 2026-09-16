@@ -1,0 +1,13 @@
+[Unit]
+Description=Cube CRI guest trace forwarder
+After=local-fs.target
+Before=cube-cri-agent-trace-bridge.service containerd.service
+
+[Service]
+EnvironmentFile=-/etc/cube-cri/tracing.env
+ExecStart=/opt/cube-cri/current/bin/cube-trace-forwarder
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

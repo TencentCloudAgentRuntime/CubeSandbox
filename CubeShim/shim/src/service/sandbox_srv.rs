@@ -21,6 +21,7 @@ use std::sync::Mutex as StdMutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Notify};
 use tokio::time::{sleep, Duration};
+use tracing::Instrument;
 
 use crate::common::utils::Utils;
 use crate::container::resources::RESOURCE_V2_CAPABILITY;
@@ -1124,9 +1125,10 @@ fn encode_sandbox_spec(spec: &Spec) -> Result<Any, String> {
 impl Sandbox for SandboxService {
     async fn create_sandbox(
         &self,
-        _ctx: &TtrpcContext,
+        ctx: &TtrpcContext,
         req: api::CreateSandboxRequest,
     ) -> TtrpcResult<api::CreateSandboxResponse> {
+        super::tracing::inbound(ctx, ::tracing::info_span!("CubeShim.CreateSandbox", otel.status_code = ::tracing::field::Empty, otel.status_message = ::tracing::field::Empty), async {
         let total_started = Instant::now();
         self.validate_id(&req.sandbox_id)?;
         if req.bundle_path.is_empty() || !Path::new(&req.bundle_path).is_absolute() {
@@ -1261,7 +1263,7 @@ impl Sandbox for SandboxService {
                         config,
                         plan,
                         publisher,
-                    ));
+                    ).instrument(tracing::Span::current()));
                 }
                 phase => {
                     let error = rpc_error(
@@ -1314,13 +1316,15 @@ impl Sandbox for SandboxService {
             result.is_ok()
         );
         result
+        }).await
     }
 
     async fn start_sandbox(
         &self,
-        _ctx: &TtrpcContext,
+        ctx: &TtrpcContext,
         req: api::StartSandboxRequest,
     ) -> TtrpcResult<api::StartSandboxResponse> {
+        super::tracing::inbound(ctx, ::tracing::info_span!("CubeShim.StartSandbox", otel.status_code = ::tracing::field::Empty, otel.status_message = ::tracing::field::Empty), async {
         let total_started = Instant::now();
         self.validate_id(&req.sandbox_id)?;
         let should_start = {
@@ -1340,7 +1344,7 @@ impl Sandbox for SandboxService {
             }
         };
         if should_start {
-            tokio::spawn(self.clone().run_start());
+            tokio::spawn(self.clone().run_start().instrument(tracing::Span::current()));
         }
         let result = self.wait_for_start().await;
         crate::cube_perf!(
@@ -1351,6 +1355,7 @@ impl Sandbox for SandboxService {
             result.is_ok()
         );
         result
+        }).await
     }
 
     async fn platform(

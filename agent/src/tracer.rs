@@ -5,7 +5,15 @@
 
 use anyhow::Result;
 use opentelemetry::sdk::propagation::TraceContextPropagator;
-use opentelemetry::{global, sdk::trace::Config, trace::TracerProvider};
+use opentelemetry::{
+    global,
+    sdk::{
+        trace::{Config, Sampler},
+        Resource,
+    },
+    trace::TracerProvider,
+    KeyValue,
+};
 use slog::{info, o, Logger};
 use std::collections::HashMap;
 use tracing_opentelemetry::OpenTelemetryLayer;
@@ -20,7 +28,11 @@ pub fn setup_tracing(name: &'static str, logger: &Logger) -> Result<()> {
         .with_logger(&logger)
         .init();
 
-    let config = Config::default();
+    let config = Config::default()
+        .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
+            0.1,
+        ))))
+        .with_resource(Resource::new(vec![KeyValue::new("service.name", name)]));
 
     let builder = opentelemetry::sdk::trace::TracerProvider::builder()
         .with_batch_exporter(exporter, opentelemetry::runtime::TokioCurrentThread)
@@ -63,7 +75,7 @@ pub fn extract_carrier_from_ttrpc(ttrpc_context: &TtrpcContext) -> HashMap<Strin
 
 #[macro_export]
 macro_rules! trace_rpc_call {
-    ($ctx: ident, $name:literal, $req: ident) => {
+    ($ctx: ident, $name:literal, $req: ident) => {{
         // extract context from request context
         let parent_context = global::get_text_map_propagator(|propagator| {
             propagator.extract(&extract_carrier_from_ttrpc($ctx))
@@ -72,8 +84,9 @@ macro_rules! trace_rpc_call {
         // generate tracing span
         let rpc_span = span!(tracing::Level::INFO, $name, "mod"="rpc.rs", req=?$req);
 
-        // assign parent span from external context
+        // assign parent span from external context; the caller instruments the
+        // entire future so the span is re-entered on every poll.
         rpc_span.set_parent(parent_context);
-        let _enter = rpc_span.enter();
-    };
+        rpc_span
+    }};
 }

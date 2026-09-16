@@ -664,9 +664,10 @@ impl TaskService {
 impl Task for TaskService {
     async fn create(
         &self,
-        _ctx: &TtrpcContext,
+        ctx: &TtrpcContext,
         req: api::CreateTaskRequest,
     ) -> TtrpcResult<api::CreateTaskResponse> {
+        super::tracing::inbound(ctx, ::tracing::info_span!("CubeShim.CreateContainer", otel.status_code = ::tracing::field::Empty, otel.status_message = ::tracing::field::Empty), async {
         let mut total = metrics::OperationTimer::new("shim", "TaskCreate");
         infof!(self.log, "create req start");
         let start = Instant::now();
@@ -963,12 +964,14 @@ impl Task for TaskService {
             total.succeed();
         }
         result
+        }).await
     }
     async fn start(
         &self,
-        _ctx: &TtrpcContext,
+        ctx: &TtrpcContext,
         req: api::StartRequest,
     ) -> TtrpcResult<api::StartResponse> {
+        super::tracing::inbound(ctx, ::tracing::info_span!("CubeShim.StartContainer", otel.status_code = ::tracing::field::Empty, otel.status_message = ::tracing::field::Empty), async {
         let mut total = metrics::OperationTimer::new("shim", "TaskStart");
         let start_at = Instant::now();
         infof!(
@@ -1026,6 +1029,7 @@ impl Task for TaskService {
             pid: sb.pid(),
             ..Default::default()
         })
+        }).await
     }
 
     async fn wait(

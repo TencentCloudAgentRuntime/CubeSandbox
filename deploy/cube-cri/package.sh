@@ -2,7 +2,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 out=$PWD/_output/cube-cri
-files=(bin/cubelet-cri bin/containerd-shim-cube-rs bin/cube-vmm-worker bin/cube-template-builder assets/kernel assets/agent assets/guest.img)
+files=(bin/cubelet-cri bin/containerd-shim-cube-rs bin/cube-vmm-worker bin/cube-template-builder bin/cube-trace-forwarder bin/agent-trace-bridge.py assets/kernel assets/agent assets/guest.img cube-cri-agent-trace-bridge.service cube-cri-trace-forwarder.service)
+cp deploy/cube-cri/agent-trace-bridge.py "$out/bin/"
+cp deploy/cube-cri/{cube-cri-agent-trace-bridge.service,cube-cri-trace-forwarder.service} "$out/"
 for file in "${files[@]}"; do
   test -s "$out/$file" || { echo "缺少制品: $out/$file" >&2; exit 1; }
 done

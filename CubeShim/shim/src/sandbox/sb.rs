@@ -55,7 +55,7 @@ const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
 const AGENT_PROTOCOL_VERSION_LEGACY: u32 = 0;
 const ENV_GUEST_KERNEL_CMDLINE_APPEND: &str = "CUBE_GUEST_KERNEL_CMDLINE_APPEND";
 
-fn global_guest_kernel_params() -> CResult<Vec<String>> {
+pub(crate) fn global_guest_kernel_params() -> CResult<Vec<String>> {
     let Some(raw) = std::env::var_os(ENV_GUEST_KERNEL_CMDLINE_APPEND) else {
         return Ok(Vec::new());
     };
@@ -613,7 +613,7 @@ impl SandBox {
         };
 
         client
-            .set_guest_date_time(self.ctx.clone(), &req)
+            .set_guest_date_time(crate::service::tracing::agent_context(self.ctx.clone()), &req)
             .await
             .map_err(|e| format!("reset guest time failed:{}", e))?;
 
@@ -624,7 +624,7 @@ impl SandBox {
         };
 
         client
-            .reseed_random_dev(self.ctx.clone(), &req)
+            .reseed_random_dev(crate::service::tracing::agent_context(self.ctx.clone()), &req)
             .await
             .map_err(|e| format!("reset reseed random dev failed:{}", e))?;
         stat.set_ok();
@@ -720,7 +720,7 @@ impl SandBox {
             req.cube_preserve_mem_m = self.conf.vm_res.preserve_memory as u32;
         }
 
-        let mut ctx = self.ctx.clone();
+        let mut ctx = crate::service::tracing::agent_context(self.ctx.clone());
 
         ctx.timeout_nano = 25 * 1000 * 1000 * 1000;
         if self.app_snapshot_create() {
@@ -1636,7 +1636,7 @@ impl SandBox {
         };
 
         client
-            .stats_container(self.ctx.clone(), &req)
+            .stats_container(crate::service::tracing::agent_context(self.ctx.clone()), &req)
             .await
             .map_err(|e| Error::Other(format!("StatsContainer failed for {}: {}", id, e)))
     }

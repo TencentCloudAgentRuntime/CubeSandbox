@@ -84,7 +84,7 @@ x86_64 = { version = "0.14.2", default-features = false, features = [
 tempfile = "3.20.0"
 
 [workspace]
-members = ["rustjail", "cube"]
+members = ["rustjail", "cube", "trace-forwarder"]
 
 [profile.release]
 lto = true
