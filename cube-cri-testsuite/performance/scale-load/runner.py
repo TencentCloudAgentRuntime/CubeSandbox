@@ -117,6 +117,7 @@ class LoadRun:
         self.template = json.loads(pathlib.Path(required_env("TEMPLATE_PATH")).read_text())
         self.lock = threading.Condition()
         self.records = {}
+        self.ready_count = 0
         self.errors = []
         self.watch_reconnects = 0
         self.watch_ready = {namespace: threading.Event() for namespace in self.namespaces}
@@ -202,9 +203,12 @@ class LoadRun:
             for condition_type, key_name in (("Initialized", "initialized"), ("Ready", "ready")):
                 condition = conditions.get(condition_type, {})
                 if condition.get("status") == "True":
+                    first_observation = key_name not in record["observed"]
                     record["observed"].setdefault(key_name, observed_ns)
                     if condition.get("lastTransitionTime"):
                         record["server"].setdefault(key_name, condition["lastTransitionTime"])
+                    if key_name == "ready" and first_observation:
+                        self.ready_count += 1
                 elif key_name == "ready" and "ready" in record["observed"]:
                     record["readyLost"] = True
             container_statuses = status.get("containerStatuses", [])
@@ -240,8 +244,7 @@ class LoadRun:
                     f"pod {record['namespace']}/{record['name']} terminated before Ready: "
                     f"phase={record['phase']} reason={record['reason']} message={record['message']}"
                 )
-            ready_count = sum("ready" in item["observed"] for item in self.records.values())
-            if ready_count == self.count:
+            if self.ready_count == self.count:
                 self.done.set()
             self.lock.notify_all()
 

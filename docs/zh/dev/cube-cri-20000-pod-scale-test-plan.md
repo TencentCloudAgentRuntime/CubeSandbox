@@ -204,6 +204,7 @@ Kubernetes 官方大集群参考范围为最多 5,000 节点、150,000 Pod 和 3
 |---|---|---|
 | kubelet `maxPods` | **固定为 250** | 所有有效 Cube 节点逐一核验 `status.allocatable.pods=250`，不一致时不得开始正式轮次 |
 | kubelet `podsPerCore` | `0` | 避免与 `maxPods` 叠加造成意外限制 |
+| kubelet `kubeAPIQPS` / `kubeAPIBurst` | **显式配置，建议从 `200/400` 起步** | 默认 `50/100` 容易在突发启动时限制 Pod status PATCH 和 Event 请求，使 `Create→Ready observed` 混入 kubelet API client 排队；最终值须经 S1～S3 预演验证并在正式轮次冻结 |
 | 镜像拉取 | 主场景保持 `IfNotPresent`，正式压测镜像在所有节点保持冷态 | 按 2 万 Pod 冷拉取评估 TCR、Token 和 Range 请求容量 |
 | Namespace | 20 个，每个 1,000 Pod | 分散对象、Watch 和清理压力 |
 | ResourceQuota | 预留完整 20,000 Pod 和总 request | 检查 CPU、内存、临时存储和 Pod 等维度 |
@@ -213,6 +214,16 @@ Kubernetes 官方大集群参考范围为最多 5,000 节点、150,000 Pod 和 3
 | 优先级 | 使用专用、低于系统组件的 PriorityClass | 压测不能阻塞 DNS、CNI 和控制面组件 |
 
 创建 20 个专用 Namespace，每个 Namespace 预置同名的最小权限 ServiceAccount。`kube-root-ca.crt` ConfigMap 由 Kubernetes 自动维护，不为每个 Pod 创建独立 Secret、ConfigMap 或 Service。
+
+kubelet 的 `kubeAPIQPS` 和 `kubeAPIBurst` 是节点侧 Kubernetes client 的限流参数，不是负载生成器的 Create QPS。正式压测不得依赖默认值；必须逐节点读取实际生效配置并确认一致：
+
+```bash
+node=10.0.244.13
+kubectl get --raw "/api/v1/nodes/$node/proxy/configz" |
+  jq '.kubeletconfig | {kubeAPIQPS, kubeAPIBurst}'
+```
+
+`200/400` 是当前 150 Pod/节点并发预演的建议起点，不是脱离节点密度和控制面容量的通用生产值。S1～S3 必须同时观察 `rest_client_rate_limiter_duration_seconds`、`kubelet_pod_status_sync_duration_seconds`、Pod status PATCH 延迟和 API Server 429；若 kubelet client 限流等待仍显著，应在确认控制面余量后调高。不同轮次的 QPS/Burst 不一致时，结果不得直接对比。
 
 ### 5.3 网络地址
 
@@ -411,7 +422,7 @@ S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成�
 | API Server/APF | Pod POST/PATCH/DELETE、请求时延、排队、拒绝、inflight |
 | scheduler | pending Pod、调度吞吐、attempt、queue 和 e2e scheduling latency |
 | etcd | request、WAL/fsync、commit、DB 大小、leader 变更 |
-| kubelet | pod worker、pod start、RunPodSandbox/Create/Start、PLEG、runtime error |
+| kubelet | pod worker、pod start、Pod status sync、API client rate limiter、RunPodSandbox/Create/Start、PLEG、runtime error |
 | containerd | CRI 请求、shim/task、snapshot、GC、进程 CPU/内存/FD |
 | EROX | 派生发现命中/失败、native fallback、Token/Range 请求、远端读取字节、NBD slot、mount/snapshot、Adapter 与 Snapshotter 错误 |
 | Cube | operation duration/inflight/error、RPC、锁等待、模板命中、lease、reaper |
@@ -498,6 +509,7 @@ S1 至 S3 每级至少成功两轮。S4 正式执行三轮，轮次之间完成�
 - [ ] 20,000 Pod 的目标提交速率、正式镜像 digest、冷态口径和 RuntimeTemplate 制品已冻结。
 - [ ] 节点数按实际 allocatable 重算，10% 备用节点已就绪但不参与调度。
 - [ ] 全部有效 Cube 节点已逐一确认 `status.allocatable.pods=250`。
+- [ ] 全部有效 Cube 节点已显式设置并逐一核验相同的 kubelet `kubeAPIQPS` / `kubeAPIBurst`，预演中无显著 client 限流等待或 API Server 429。
 - [ ] vCPU、内存、临时存储、Pod IP、镜像和云产品配额均已确认。
 - [ ] 全部 Cube 节点使用相同 TS4/PVM、containerd、CNI 和不可变 runtime 制品。
 - [ ] 脱敏 workload 已使用预检或专用验证镜像通过 `task test:cri` 和单 Pod 完整功能验证，未在有效节点拉取正式压测镜像。
