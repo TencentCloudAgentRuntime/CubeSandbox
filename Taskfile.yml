@@ -70,6 +70,9 @@ tasks:
   deploy:monitoring:
     desc: 部署 Cube CRI Prometheus 与 Grafana 监控栈。
     cmds: [bash ./deploy/cube-cri/monitoring.sh]
+  deploy:tracing:
+    desc: 部署使用 PVC 持久化的 Cube CRI OpenTelemetry Collector 与 Jaeger。
+    cmds: [bash ./deploy/cube-cri/tracing.sh]
   test:cri:
     aliases: [test]
     desc: 在指定节点验证 Pod 启动、init、卷、探针、日志和 exec，完成后清理。

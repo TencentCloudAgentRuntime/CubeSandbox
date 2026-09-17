@@ -1,0 +1,173 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: __NAMESPACE__
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cube-cri-jaeger-data
+  namespace: __NAMESPACE__
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: __STORAGE_CLASS__
+  resources:
+    requests:
+      storage: __STORAGE_SIZE__
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cube-cri-jaeger
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: cube-cri-jaeger
+spec:
+  strategy: {type: Recreate}
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cube-cri-jaeger
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cube-cri-jaeger
+    spec:
+      tolerations:
+      - {key: cube-cri-load-generator, operator: Equal, value: "true", effect: NoSchedule}
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+      - name: jaeger
+        image: jaegertracing/all-in-one:1.57
+        env:
+        - {name: COLLECTOR_OTLP_ENABLED, value: "true"}
+        - {name: SPAN_STORAGE_TYPE, value: badger}
+        - {name: BADGER_EPHEMERAL, value: "false"}
+        - {name: BADGER_DIRECTORY_VALUE, value: /badger/data}
+        - {name: BADGER_DIRECTORY_KEY, value: /badger/key}
+        ports:
+        - {name: ui, containerPort: 16686}
+        - {name: otlp-grpc, containerPort: 4317}
+        - {name: otlp-http, containerPort: 4318}
+        readinessProbe:
+          httpGet: {path: /, port: ui}
+          initialDelaySeconds: 5
+        resources:
+          requests: {cpu: 100m, memory: 512Mi}
+          limits: {memory: 4Gi}
+        volumeMounts:
+        - {name: data, mountPath: /badger}
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: cube-cri-jaeger-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cube-cri-jaeger
+  namespace: __NAMESPACE__
+spec:
+  selector:
+    app.kubernetes.io/name: cube-cri-jaeger
+  ports:
+  - {name: ui, port: 16686, targetPort: ui}
+  - {name: otlp-grpc, port: 4317, targetPort: otlp-grpc}
+  - {name: otlp-http, port: 4318, targetPort: otlp-http}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cube-cri-otel-collector
+  namespace: __NAMESPACE__
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      batch:
+        # Jaeger all-in-one 的 OTLP gRPC 默认接收上限为 4MiB。Guest span
+        # 可能携带较大的调试属性，限制每批数量以降低整批超限并被丢弃的概率。
+        send_batch_size: 512
+        send_batch_max_size: 512
+        timeout: 1s
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 256
+    exporters:
+      otlp/jaeger:
+        endpoint: cube-cri-jaeger.__NAMESPACE__.svc.cluster.local:4317
+        tls:
+          insecure: true
+        sending_queue:
+          enabled: true
+          queue_size: 10000
+        retry_on_failure:
+          enabled: true
+          max_elapsed_time: 5m
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlp/jaeger]
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cube-cri-otel-collector
+  namespace: __NAMESPACE__
+  labels:
+    app.kubernetes.io/name: cube-cri-otel-collector
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cube-cri-otel-collector
+  template:
+    metadata:
+      annotations:
+        checksum/collector-config: __COLLECTOR_CONFIG_SHA__
+      labels:
+        app.kubernetes.io/name: cube-cri-otel-collector
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        agc.cloud.tencent.com/cube: "true"
+      tolerations:
+      - {key: cube-cri-load-generator, operator: Equal, value: "true", effect: NoSchedule}
+      containers:
+      - name: otel-collector
+        image: otel/opentelemetry-collector-contrib:0.102.1
+        args: [--config=/etc/otelcol/config.yaml]
+        ports:
+        - {name: otlp-grpc, containerPort: 4317, hostPort: 4317}
+        - {name: otlp-http, containerPort: 4318, hostPort: 4318}
+        resources:
+          requests: {cpu: 50m, memory: 128Mi}
+          limits: {memory: 512Mi}
+        volumeMounts:
+        - {name: config, mountPath: /etc/otelcol, readOnly: true}
+      volumes:
+      - name: config
+        configMap:
+          name: cube-cri-otel-collector
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cube-cri-otel-collector
+  namespace: __NAMESPACE__
+spec:
+  selector:
+    app.kubernetes.io/name: cube-cri-otel-collector
+  ports:
+  - {name: otlp-grpc, port: 4317, targetPort: otlp-grpc}
+  - {name: otlp-http, port: 4318, targetPort: otlp-http}

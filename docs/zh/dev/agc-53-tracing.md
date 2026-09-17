@@ -30,6 +30,18 @@ CUBE_CRI_TRACING_SAMPLING_RATIO=0.1
 
 Collector 须监听上述 OTLP 地址。若要从 kubelet span 开始观察完整链路，还需单独启用 kubelet 的 tracing 配置；Helm 开关不修改 kubelet。
 
+集群侧 Jaeger 与 Collector 使用独立部署入口。Jaeger 默认使用 Badger 写入 20Gi PVC，避免 all-in-one 内存存储在高采样压测中 OOM 或滚动重启后丢失 trace：
+
+```bash
+source local.env
+export CUBE_CRI_TRACING_JAEGER_NODE=<可挂载 PVC 且目标节点可访问的物理节点>
+task deploy:tracing
+```
+
+首次部署默认使用 `sandbox-cbs-wait`、`20Gi` 和 `cube-cri-tracing`；可通过 `CUBE_CRI_TRACING_STORAGE_CLASS`、`CUBE_CRI_TRACING_STORAGE_SIZE` 和 `CUBE_CRI_TRACING_NAMESPACE` 覆盖。已有 PVC 的 StorageClass 和容量不会被脚本隐式修改；配置匹配的 Pending PVC 可通过重跑继续绑定。Jaeger 使用单副本 `Recreate` 策略，确保 ReadWriteOnce PVC 不会在滚动发布期间被两个 Pod 争用。Collector 只部署到带 `agc.cloud.tencent.com/cube=true` 标签的节点。部署任务会发送一个已知 trace ID 的合成 OTLP span，并从 Jaeger 查询作为端到端门禁。
+
+默认 StorageClass 的 reclaim policy 为 `Delete` 时，删除 PVC 会永久删除后端磁盘和 trace 数据；常规升级只 apply 资源，不应删除 `cube-cri-jaeger-data` PVC。
+
 构建、发布与验证：
 
 ```bash
