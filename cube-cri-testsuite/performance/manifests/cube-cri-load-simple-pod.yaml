@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cube-cri-load-simple-00000
+  namespace: cube-cri-load
+  labels:
+    app: cube-cri-load
+    load-test-batch: batch-000
+  annotations:
+    agc.cloud.tencent.com/cube-template-mode: auto
+spec:
+  runtimeClassName: cube-load
+  serviceAccountName: cube-cri-load
+  automountServiceAccountToken: false
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 30
+  dnsPolicy: ClusterFirst
+  enableServiceLinks: false
+  tolerations:
+    - key: cube-cri-load
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app: cube-cri-load
+  containers:
+    - name: main
+      image: tcr-cube.tencentcloudcr.com/journeyyou/busybox@sha256:5b0745afdfec8efe7225bbe20cd87dc9139381e676400707ea979ec5406de3a8
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - exec sleep 3600
+      resources:
+        requests:
+          cpu: 83m
+          memory: "0"
+          ephemeral-storage: 512Mi
+        limits:
+          cpu: 83m
+          memory: "0"
+          ephemeral-storage: 512Mi

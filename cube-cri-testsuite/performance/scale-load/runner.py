@@ -108,6 +108,11 @@ class LoadRun:
         self.timeout = env_int("TIMEOUT_SECONDS", 1800, 1)
         self.stable_seconds = env_int("STABLE_SECONDS", 0, 0)
         self.target_node = os.environ.get("TARGET_NODE", "").strip()
+        self.workload_profile = required_env("WORKLOAD_PROFILE")
+        self.stage = required_env("STAGE")
+        self.snapshotter_profile = required_env("SNAPSHOTTER_PROFILE")
+        self.load_image = required_env("LOAD_IMAGE")
+        self.cube_template_mode = required_env("CUBE_TEMPLATE_MODE")
         self.output = pathlib.Path(os.environ.get("OUTPUT_DIR", "/output"))
         self.template = json.loads(pathlib.Path(required_env("TEMPLATE_PATH")).read_text())
         self.lock = threading.Condition()
@@ -136,6 +141,8 @@ class LoadRun:
                 "server": {},
                 "restartCount": 0,
                 "readyLost": False,
+                "images": [],
+                "workloadShape": {},
             }
 
     def add_error(self, message):
@@ -173,6 +180,21 @@ class LoadRun:
             record["reason"] = status.get("reason", "")
             record["message"] = status.get("message", "")
             record["podIP"] = status.get("podIP", "")
+            spec = pod.get("spec", {})
+            containers = spec.get("containers", [])
+            init_containers = spec.get("initContainers", [])
+            record["workloadShape"] = {
+                "serviceAccountName": spec.get("serviceAccountName", ""),
+                "automountServiceAccountToken": spec.get("automountServiceAccountToken"),
+                "containerCount": len(containers),
+                "initContainerCount": len(init_containers),
+                "volumeCount": len(spec.get("volumes", [])),
+                "probeCount": sum(
+                    probe in container
+                    for container in containers + init_containers
+                    for probe in ("startupProbe", "readinessProbe", "livenessProbe")
+                ),
+            }
             if metadata.get("creationTimestamp"):
                 record["server"].setdefault("created", metadata["creationTimestamp"])
             if record["node"]:
@@ -186,6 +208,23 @@ class LoadRun:
                 elif key_name == "ready" and "ready" in record["observed"]:
                     record["readyLost"] = True
             container_statuses = status.get("containerStatuses", [])
+            init_container_statuses = status.get("initContainerStatuses", [])
+            record["images"] = sorted(
+                [
+                    {
+                        "name": item.get("name", ""),
+                        "image": item.get("image", ""),
+                        "imageID": item.get("imageID", ""),
+                        "init": is_init,
+                    }
+                    for is_init, statuses in (
+                        (False, container_statuses),
+                        (True, init_container_statuses),
+                    )
+                    for item in statuses
+                ],
+                key=lambda item: (item["init"], item["name"]),
+            )
             expected_containers = len(pod.get("spec", {}).get("containers", []))
             started = [
                 item.get("state", {}).get("running", {}).get("startedAt")
@@ -325,6 +364,7 @@ class LoadRun:
         self.output.mkdir(parents=True, exist_ok=True)
         records = sorted(self.records.values(), key=lambda item: item["index"])
         metric_values = {
+            "create_schedule_delay_ms": [],
             "create_request_ms": [],
             "create_start_to_scheduled_observed_ms": [],
             "create_start_to_initialized_observed_ms": [],
@@ -337,6 +377,9 @@ class LoadRun:
             start_ns = record.get("createStartNs")
             return_ns = record.get("createReturnNs")
             observed = record["observed"]
+            planned_ns = record.get("plannedCreateNs")
+            if planned_ns and start_ns:
+                metric_values["create_schedule_delay_ms"].append((start_ns - planned_ns) / 1_000_000)
             if start_ns and return_ns:
                 metric_values["create_request_ms"].append((return_ns - start_ns) / 1_000_000)
             for observed_key, metric_name in (
@@ -362,6 +405,27 @@ class LoadRun:
         started = [x["observed"].get("containersStarted") for x in records if x["observed"].get("containersStarted")]
         ready = [x["observed"].get("ready") for x in records if x["observed"].get("ready")]
         first_start = min(create_starts) if create_starts else None
+        last_start = max(create_starts) if create_starts else None
+        expected_digest = self.load_image.partition("@")[2]
+        image_identity_mismatches = 0
+        simple_shape_violations = 0
+        for record in records:
+            images = record["images"]
+            if expected_digest and (
+                not images or any(not item["imageID"].endswith(expected_digest) for item in images)
+            ):
+                image_identity_mismatches += 1
+            if self.workload_profile == "simple":
+                shape = record["workloadShape"]
+                if (
+                    shape.get("serviceAccountName") != "cube-cri-load"
+                    or shape.get("automountServiceAccountToken") is not False
+                    or shape.get("containerCount") != 1
+                    or shape.get("initContainerCount") != 0
+                    or shape.get("volumeCount") != 0
+                    or shape.get("probeCount") != 0
+                ):
+                    simple_shape_violations += 1
 
         def from_first(values):
             return (max(values) - first_start) / 1_000_000 if first_start and values else None
@@ -372,18 +436,32 @@ class LoadRun:
             "count": self.count,
             "createQPS": self.qps,
             "workers": self.workers,
+            "workloadProfile": self.workload_profile,
+            "stage": self.stage,
+            "stableSeconds": self.stable_seconds,
+            "targetNode": self.target_node,
+            "snapshotterProfile": self.snapshotter_profile,
+            "loadImage": self.load_image,
+            "cubeTemplateMode": self.cube_template_mode,
             "created": sum(item["created"] for item in records),
             "scheduled": len(scheduled),
             "containersStarted": len(started),
             "ready": len(ready),
             "restartCount": sum(item["restartCount"] for item in records),
             "readyLost": sum(item["readyLost"] for item in records),
+            "imageIdentityMismatches": image_identity_mismatches,
+            "workloadShapeViolations": simple_shape_violations,
             "watchReconnects": self.watch_reconnects,
             "errors": self.errors,
             "batch": {
                 "submitMs": (
                     (max(create_returns) - min(create_starts)) / 1_000_000
                     if create_returns and create_starts
+                    else None
+                ),
+                "actualCreateStartQPS": (
+                    ((len(create_starts) - 1) * 1_000_000_000 / (last_start - first_start))
+                    if len(create_starts) > 1 and last_start > first_start
                     else None
                 ),
                 "allScheduledMs": from_first(scheduled),
@@ -399,6 +477,8 @@ class LoadRun:
             and summary["containersStarted"] == self.count
             and summary["ready"] == self.count
             and summary["readyLost"] == 0
+            and summary["imageIdentityMismatches"] == 0
+            and summary["workloadShapeViolations"] == 0
         )
         with (self.output / "pods.jsonl").open("w") as output:
             for record in records:

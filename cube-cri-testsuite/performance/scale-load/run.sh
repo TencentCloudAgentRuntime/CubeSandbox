@@ -3,7 +3,9 @@ set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../../.." && pwd)"
-template="$repo_root/cube-cri-testsuite/performance/manifests/cube-cri-load-pod.yaml"
+production_template="$repo_root/cube-cri-testsuite/performance/manifests/cube-cri-load-pod.yaml"
+simple_template="$repo_root/cube-cri-testsuite/performance/manifests/cube-cri-load-simple-pod.yaml"
+template=""
 runtime_class="$repo_root/cube-cri-testsuite/performance/manifests/cube-cri-load-runtimeclass.yaml"
 system_namespace=cube-cri-load-system
 generator_service_account=cube-cri-load-generator
@@ -23,13 +25,19 @@ target_node=""
 snapshotter_profile=""
 load_image=""
 cube_template_mode=""
+workload_profile=""
 
 erox_load_image="tcr-cube.tencentcloudcr.com/journeyyou/busybox@sha256:5b0745afdfec8efe7225bbe20cd87dc9139381e676400707ea979ec5406de3a8"
-overlayfs_load_image="mirror.ccs.tencentyun.com/library/busybox:1.36.1"
+overlayfs_load_image="mirror.ccs.tencentyun.com/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
 
 usage() {
   cat >&2 <<EOF
 用法: $0 --stage S0|S1|S2 --generator-node NODE [--target-node NODE] [--run-id ID] [--output DIR]
+
+工作负载模板参数:
+  --workload-profile production|simple
+      production: 生产近似模板，包含 init container、多容器、volume 和 probe（默认）
+      simple:     单容器常驻模板，无 init container、volume、probe 和 ServiceAccount token 挂载
 
 镜像/快照器模板参数:
   --snapshotter-profile erox|overlayfs
@@ -58,6 +66,7 @@ while (($#)); do
     --snapshotter-profile) snapshotter_profile="$2"; shift 2 ;;
     --load-image) load_image="$2"; shift 2 ;;
     --cube-template-mode) cube_template_mode="$2"; shift 2 ;;
+    --workload-profile) workload_profile="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1" >&2; usage; exit 2 ;;
   esac
@@ -65,8 +74,15 @@ done
 
 [[ -n "$stage" && -n "$generator_node" ]] || { usage; exit 2; }
 [[ -n "${KUBECONFIG:-}" && -r "$KUBECONFIG" ]] || { echo "必须显式设置可读的 KUBECONFIG" >&2; exit 2; }
-[[ -r "$template" ]] || { echo "找不到 workload: $template" >&2; exit 2; }
 [[ -r "$runtime_class" ]] || { echo "找不到 RuntimeClass: $runtime_class" >&2; exit 2; }
+
+workload_profile="${workload_profile:-production}"
+case "$workload_profile" in
+  production) template="$production_template" ;;
+  simple) template="$simple_template" ;;
+  *) echo "workload-profile 只支持 production、simple" >&2; exit 2 ;;
+esac
+[[ -r "$template" ]] || { echo "找不到 workload: $template" >&2; exit 2; }
 
 case "$stage" in
   S0) defaults=(1 1 1 1 600 0) ;;
@@ -101,7 +117,6 @@ run_id="${run_id:-$(tr '[:upper:]' '[:lower:]' <<<"$stage")-$(date -u +%Y%m%dT%H
 run_id="$(printf '%s' "$run_id" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+|-+$//g' | cut -c1-32)"
 [[ -n "$run_id" ]] || { echo "run-id 规范化后为空" >&2; exit 2; }
 output="${output:-$repo_root/_output/cube-cri-scale/$run_id}"
-mkdir -p "$output"
 
 for value in "$count" "$namespace_count" "$qps" "$workers" "$timeout_seconds" "$stable_seconds"; do
   [[ "$value" =~ ^[0-9]+$ ]] || { echo "数值参数格式错误: $value" >&2; exit 2; }
@@ -132,6 +147,22 @@ if [[ -n "$target_node" ]]; then
     exit 1
   }
 fi
+owned_artifacts=(
+  artifacts.sha256 batch-summary.json done exit-code generator-events.json
+  generator-pod.json generator.log pod-template.json pods.jsonl run-config.json
+  run.sh runner.py runtimeclass.yaml source-pod-template.yaml warning-events.json
+)
+for artifact in "${owned_artifacts[@]}"; do
+  if [[ -e "$output/$artifact" ]]; then
+    echo "输出目录已有测试产物，拒绝混用: $output/$artifact" >&2
+    exit 1
+  fi
+done
+mkdir -p "$output"
+cp "$0" "$output/run.sh"
+cp "$script_dir/runner.py" "$output/runner.py"
+cp "$template" "$output/source-pod-template.yaml"
+cp "$runtime_class" "$output/runtimeclass.yaml"
 kubectl label node "$generator_node" cube-cri-load-generator=true --overwrite >/dev/null
 kubectl taint node "$generator_node" cube-cri-load-generator=true:NoSchedule --overwrite >/dev/null
 kubectl apply -f "$runtime_class" >/dev/null
@@ -189,6 +220,7 @@ yq -o=json '.' "$template" \
   | jq \
       --arg image "$load_image" \
       --arg profile "$snapshotter_profile" \
+      --arg workloadProfile "$workload_profile" \
       --arg templateMode "$cube_template_mode" '
         def set_images($image):
           .spec.containers = ((.spec.containers // []) | map(.image = $image))
@@ -201,6 +233,7 @@ yq -o=json '.' "$template" \
         set_images($image)
         | .metadata.labels = (.metadata.labels // {})
         | .metadata.labels["load-test-snapshotter-profile"] = $profile
+        | .metadata.labels["load-test-workload-profile"] = $workloadProfile
         | if $templateMode == "auto" then
             .metadata.annotations = (.metadata.annotations // {})
             | .metadata.annotations["agc.cloud.tencent.com/cube-template-mode"] = "auto"
@@ -216,15 +249,13 @@ jq -n \
   --argjson workers "$workers" --argjson timeout "$timeout_seconds" \
   --argjson stable "$stable_seconds" --arg targetNode "$target_node" \
   --arg snapshotterProfile "$snapshotter_profile" --arg loadImage "$load_image" \
-  --arg cubeTemplateMode "$cube_template_mode" \
-  '{runId:$runId,stage:$stage,generatorNode:$generatorNode,targetNode:$targetNode,targetNamespaces:($namespaces|split(",")),podCount:$count,createQPS:$qps,createWorkers:$workers,timeoutSeconds:$timeout,stableSeconds:$stable,snapshotterProfile:$snapshotterProfile,loadImage:$loadImage,cubeTemplateMode:$cubeTemplateMode}' \
+  --arg cubeTemplateMode "$cube_template_mode" --arg workloadProfile "$workload_profile" \
+  '{runId:$runId,stage:$stage,generatorNode:$generatorNode,targetNode:$targetNode,targetNamespaces:($namespaces|split(",")),podCount:$count,createQPS:$qps,createWorkers:$workers,timeoutSeconds:$timeout,stableSeconds:$stable,workloadProfile:$workloadProfile,snapshotterProfile:$snapshotterProfile,loadImage:$loadImage,cubeTemplateMode:$cubeTemplateMode}' \
   > "$output/run-config.json"
-sha256sum "$script_dir/runner.py" "$template" "$runtime_class" "$output/pod-template.json" "$output/run-config.json" > "$output/artifacts.sha256"
-
 config_map="cube-cri-load-${run_id}"
 generator_pod="cube-cri-load-generator-${run_id}"
 kubectl create configmap "$config_map" -n "$system_namespace" \
-  --from-file=runner.py="$script_dir/runner.py" \
+  --from-file=runner.py="$output/runner.py" \
   --from-file=pod-template.json="$output/pod-template.json" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 jq --arg namespace "${target_namespaces[0]}" '.metadata.namespace = $namespace' "$output/pod-template.json" \
@@ -266,6 +297,11 @@ spec:
         - {name: TIMEOUT_SECONDS, value: "$timeout_seconds"}
         - {name: STABLE_SECONDS, value: "$stable_seconds"}
         - {name: TARGET_NODE, value: "$target_node"}
+        - {name: WORKLOAD_PROFILE, value: "$workload_profile"}
+        - {name: STAGE, value: "$stage"}
+        - {name: SNAPSHOTTER_PROFILE, value: "$snapshotter_profile"}
+        - {name: LOAD_IMAGE, value: "$load_image"}
+        - {name: CUBE_TEMPLATE_MODE, value: "$cube_template_mode"}
         - {name: TEMPLATE_PATH, value: /config/pod-template.json}
         - {name: OUTPUT_DIR, value: /output}
       resources:
@@ -304,6 +340,43 @@ kubectl logs -n "$system_namespace" "$generator_pod" -c generator > "$output/gen
 kubectl cp -n "$system_namespace" -c artifact-holder "$generator_pod:/output/." "$output" >/dev/null
 kubectl get pod -n "$system_namespace" "$generator_pod" -o json > "$output/generator-pod.json"
 kubectl get events -n "$system_namespace" --field-selector "involvedObject.name=$generator_pod" -o json > "$output/generator-events.json"
+warning_events='{"apiVersion":"v1","kind":"List","items":[]}'
+warning_collection_errors=()
+for namespace in "${target_namespaces[@]}"; do
+  if namespace_events="$(kubectl get events -n "$namespace" --field-selector type=Warning -o json)"; then
+    warning_events="$(jq --argjson events "$namespace_events" '.items += $events.items' <<<"$warning_events")"
+  else
+    warning_collection_errors+=("$namespace")
+  fi
+done
+printf '%s\n' "$warning_events" > "$output/warning-events.json"
+warning_count="$(jq '.items | length' "$output/warning-events.json")"
+jq \
+  --argjson warningCount "$warning_count" \
+  --arg warningCollectionErrors "$(IFS=,; echo "${warning_collection_errors[*]}")" \
+  --slurpfile warningEvents "$output/warning-events.json" '
+    ($warningEvents[0].items // []) as $items
+    | .workloadWarnings = {
+        count: $warningCount,
+        affectedPods: ([$items[].involvedObject.name // empty] | unique),
+        reasons: ([$items[].reason // empty] | sort | group_by(.) | map({reason: .[0], count: length})),
+        collectionErrors: ($warningCollectionErrors | if length == 0 then [] else split(",") end)
+      }
+    | if ($warningCollectionErrors | length) > 0 then
+        .success = false
+        | .errors += ["failed to collect Warning events from: \($warningCollectionErrors)"]
+      else . end
+  ' "$output/batch-summary.json" > "$output/batch-summary.json.tmp"
+mv "$output/batch-summary.json.tmp" "$output/batch-summary.json"
+if ((${#warning_collection_errors[@]} > 0)); then
+  state=1
+fi
+printf '%s\n' "$state" > "$output/exit-code"
+printf 'FINAL_SUMMARY_JSON=%s\n' "$(jq -c . "$output/batch-summary.json")" >> "$output/generator.log"
+(
+  cd "$output"
+  find . -type f ! -name artifacts.sha256 -print0 | sort -z | xargs -0 sha256sum > artifacts.sha256
+)
 printf 'run_id=%s generator_exit=%s output=%s\n' "$run_id" "$state" "$output"
 printf 'cleanup: %s/cleanup.sh --run-id %s\n' "$script_dir" "$run_id"
 exit "$state"

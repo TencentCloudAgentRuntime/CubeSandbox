@@ -107,6 +107,7 @@
 
 | 数据项 | 记录值 | 证据路径 |
 |---|---:|---|
+| Workload profile | production / simple | `run-config.json`、`batch-summary.json` |
 | RuntimeClass overhead | 待填写 | 待填写 |
 | 单 Pod CPU request/limit，含 overhead | 待填写 | 待填写 |
 | 单 Pod memory request/limit，含 overhead | 待填写 | 待填写 |
@@ -191,8 +192,8 @@
 | Create 409/429/5xx/timeout | 0/0/0/0 | 待填写 | 通过 / 失败 | 待填写 |
 | Ready Pod | 待填写 | 待填写 | 通过 / 失败 | 待填写 |
 | Failed/Unknown Pod | 0/0 | 待填写 | 通过 / 失败 | 待填写 |
-| 成功 init container | 目标 Pod 数 × 2 | 待填写 | 通过 / 失败 | 待填写 |
-| 成功普通容器 | 目标 Pod 数 × 3 | 待填写 | 通过 / 失败 | 待填写 |
+| 成功 init container | production: 目标 Pod 数 × 2；simple: 不适用 | 待填写 | 通过 / 失败 / 不适用 | 待填写 |
+| 成功普通容器 | production: 目标 Pod 数 × 3；simple: 目标 Pod 数 × 1 | 待填写 | 通过 / 失败 | 待填写 |
 | 非注入容器重启 | 0 | 待填写 | 通过 / 失败 | 待填写 |
 | probe 失败 Pod | 0 | 待填写 | 通过 / 失败 | 待填写 |
 | Unschedulable Pod | 0 | 待填写 | 通过 / 失败 | 待填写 |
@@ -230,6 +231,8 @@
 | 6-10 | 追加记录 | - | - | - | - | - | - |
 
 ## 11. 功能抽检
+
+`simple` profile 下，init、volume、Projected token、probe 和跨容器通信相关检查均填写“不适用”；改为核验每个 Pod 恰有一个普通容器，且无 init container、volume、probe 和自动 ServiceAccount token 挂载。
 
 | 检查项 | 样本数 | 通过 | 失败 | 失败 Pod/证据路径 |
 |---|---:|---:|---:|---|
