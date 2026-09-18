@@ -43,6 +43,10 @@ type NetworkOps interface {
 	Open(string, string) (*os.File, error)
 }
 
+type preparedTapNetwork interface {
+	prepareWithTap(context.Context, string, string, string) (*runtimev1.NetworkAttachment, *os.File, error)
+}
+
 type prepareStage string
 
 type startupTraceIdentity struct {
@@ -268,9 +272,18 @@ func (a *adapter) resumePrepare(ctx context.Context, record *diskRecord) (prepar
 		validateRoot += time.Since(stageStart)
 		stageStart = time.Now()
 		finishNetwork := a.metrics.Start("resource", "NetworkPrepare")
-		network, err := a.network.Prepare(ctx, record.NetNSPath, record.InterfaceName, record.TapName)
+		var preparedTap *os.File
+		var network *runtimev1.NetworkAttachment
+		if provider, ok := a.network.(preparedTapNetwork); ok {
+			network, preparedTap, err = provider.prepareWithTap(ctx, record.NetNSPath, record.InterfaceName, record.TapName)
+		} else {
+			network, err = a.network.Prepare(ctx, record.NetNSPath, record.InterfaceName, record.TapName)
+		}
 		finishNetwork(err)
 		if err != nil {
+			if preparedTap != nil {
+				_ = preparedTap.Close()
+			}
 			if rollbackErr := a.rollbackPreparing(ctx, record); rollbackErr != nil {
 				return nil, fmt.Errorf("prepare network: %v; rollback: %v", err, rollbackErr)
 			}
@@ -278,6 +291,9 @@ func (a *adapter) resumePrepare(ctx context.Context, record *diskRecord) (prepar
 		}
 		networkPrepare += time.Since(stageStart)
 		if network == nil {
+			if preparedTap != nil {
+				_ = preparedTap.Close()
+			}
 			err := errors.New("network adapter returned no attachment")
 			if rollbackErr := a.rollbackPreparing(ctx, record); rollbackErr != nil {
 				return nil, fmt.Errorf("%v; rollback: %v", err, rollbackErr)
@@ -292,7 +308,13 @@ func (a *adapter) resumePrepare(ctx context.Context, record *diskRecord) (prepar
 		record.Network = network
 		stageStart = time.Now()
 		if err := a.persistStage(record, stagePrepared, trace); err != nil {
+			if preparedTap != nil {
+				_ = preparedTap.Close()
+			}
 			return nil, err
+		}
+		if preparedTap != nil {
+			a.setTap(record.SandboxID, preparedTap)
 		}
 		persistPrepared += time.Since(stageStart)
 	case stagePrepared:
@@ -551,6 +573,7 @@ func (a *adapter) OpenTap(binding handoff.Binding) (descriptorFile *os.File, err
 	totalStart := time.Now()
 	stageStart := totalStart
 	var lockWait, loadTime, openTime, duplicateTime time.Duration
+	tapSource := "cached"
 	trace := monotime.NewTraceBuffer()
 	defer trace.Flush()
 	if err := a.operations.Lock(context.Background(), binding.SandboxID); err != nil {
@@ -564,8 +587,8 @@ func (a *adapter) OpenTap(binding handoff.Binding) (descriptorFile *os.File, err
 			return
 		}
 		trace.Addf(
-			"cube_perf component=cubelet operation=start phase=adapter-open-tap sandbox_id=%s operation_id=%s generation=%d ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d load_us=%d open_us=%d duplicate_us=%d",
-			binding.SandboxID, binding.SandboxID, binding.Generation, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
+			"cube_perf component=cubelet operation=start phase=adapter-open-tap sandbox_id=%s operation_id=%s generation=%d source=%s ts_mono_us=%d duration_us=%d success=%t lock_wait_us=%d load_us=%d open_us=%d duplicate_us=%d",
+			binding.SandboxID, binding.SandboxID, binding.Generation, tapSource, monotime.Micros(), time.Since(totalStart).Microseconds(), err == nil,
 			lockWait.Microseconds(), loadTime.Microseconds(), openTime.Microseconds(), duplicateTime.Microseconds(),
 		)
 	}()
@@ -580,6 +603,7 @@ func (a *adapter) OpenTap(binding handoff.Binding) (descriptorFile *os.File, err
 	stageStart = time.Now()
 	file := a.getTap(binding.SandboxID)
 	if file == nil {
+		tapSource = "reopened"
 		file, err = a.network.Open(record.NetNSPath, record.TapName)
 		if err != nil {
 			return nil, err

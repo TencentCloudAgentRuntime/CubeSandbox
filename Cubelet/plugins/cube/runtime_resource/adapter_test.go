@@ -27,6 +27,19 @@ type fakeNetwork struct {
 	releaseErr   error
 }
 
+type preparedTapFakeNetwork struct {
+	fakeNetwork
+}
+
+func (n *preparedTapFakeNetwork) prepareWithTap(ctx context.Context, netnsPath, interfaceName, tapName string) (*runtimev1.NetworkAttachment, *os.File, error) {
+	attachment, err := n.Prepare(ctx, netnsPath, interfaceName, tapName)
+	if err != nil {
+		return nil, nil, err
+	}
+	file, err := os.Open("/dev/null")
+	return attachment, file, err
+}
+
 func (n *fakeNetwork) Prepare(context.Context, string, string, string) (*runtimev1.NetworkAttachment, error) {
 	n.prepareCalls++
 	if n.prepareErr != nil {
@@ -350,6 +363,45 @@ func TestAdapterLifecycleIsPersistentAndExactLeaseScoped(t *testing.T) {
 	}
 	if err := restarted.Release(ctx, release, prepared.GetNetwork().GetNetworkHandle()); err != nil {
 		t.Fatalf("release retry: %v", err)
+	}
+}
+
+func TestAdapterReusesTapPreparedWithNetwork(t *testing.T) {
+	ctx := context.Background()
+	network := new(preparedTapFakeNetwork)
+	adapter, err := newAdapter(filepath.Join(t.TempDir(), "resources"), testAssets(t), network)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := state.Lease{Generation: 3, LeaseID: "lease-a"}
+	prepared, err := adapter.Prepare(ctx, adapterRequest(), lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned := adapter.getTap("sandbox-a")
+	if owned == nil {
+		t.Fatal("Prepare did not retain the TAP queue FD")
+	}
+	file, err := adapter.OpenTap(handoff.Binding{
+		SandboxID: "sandbox-a", Generation: lease.Generation, LeaseID: lease.LeaseID,
+		NetworkHandle: prepared.GetNetwork().GetNetworkHandle(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if network.openCalls != 0 {
+		t.Fatalf("OpenTap reopened the prepared TAP: calls=%d", network.openCalls)
+	}
+	if file.Fd() == owned.Fd() {
+		t.Fatal("OpenTap returned the provider-owned FD instead of a duplicate")
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Release(ctx, state.ReleaseRequest{
+		SandboxID: "sandbox-a", Generation: lease.Generation, LeaseID: lease.LeaseID,
+	}, prepared.GetNetwork().GetNetworkHandle()); err != nil {
+		t.Fatal(err)
 	}
 }
 

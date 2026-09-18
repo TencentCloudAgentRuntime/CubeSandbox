@@ -19,10 +19,6 @@ use tokio::runtime::Builder;
 //const CH_VERSION: &str = env!("CH_GIT_COMMIT_INFO");
 fn main() {
     let process_started = Instant::now();
-    if let Err(error) = service::early_server_gate() {
-        eprintln!("CubeShim early server gate failed: {error}");
-        unsafe { libc::exit(1) };
-    }
     let mut thread_num = 1;
     let os_args: Vec<_> = std::env::args_os().collect();
     if is_version_request(&os_args[1..]) {
@@ -39,6 +35,16 @@ fn main() {
         return;
     }
     let flags = parse(&os_args[1..]).expect("Invalid params");
+    // Only the long-running server child is configured with a lifecycle gate.
+    // An action helper can be launched from a process that already carries a
+    // sandbox lifecycle environment; treating that inherited context as its
+    // own makes concurrent sandbox creation read another sandbox's record.
+    if service::requires_early_server_gate(&flags.action) {
+        if let Err(error) = service::early_server_gate() {
+            eprintln!("CubeShim early server gate failed: {error}");
+            unsafe { libc::exit(1) };
+        }
+    }
     let parsed_at = Instant::now();
     if flags.version {
         print_version();

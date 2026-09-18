@@ -141,6 +141,17 @@ func newNetlinkNetwork() *netlinkNetwork {
 }
 
 func (n *netlinkNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, tapName string) (attachment *runtimev1.NetworkAttachment, err error) {
+	attachment, preparedTap, err := n.prepareWithTap(ctx, netnsPath, interfaceName, tapName)
+	if preparedTap != nil {
+		_ = preparedTap.Close()
+	}
+	return attachment, err
+}
+
+// prepareWithTap keeps the queue FD returned while creating a new TAP. The
+// adapter can hand it to the VMM without entering the Pod netns a second time.
+// Existing/recovered TAPs return nil and retain the Open fallback.
+func (n *netlinkNetwork) prepareWithTap(ctx context.Context, netnsPath, interfaceName, tapName string) (attachment *runtimev1.NetworkAttachment, preparedTap *os.File, err error) {
 	started := time.Now()
 	trace := monotime.TraceBufferFromContext(ctx)
 	identity := startupTraceIdentityFromContext(ctx)
@@ -149,27 +160,37 @@ func (n *netlinkNetwork) Prepare(ctx context.Context, netnsPath, interfaceName, 
 			return
 		}
 		trace.Addf(
-			"cube_perf component=cubelet operation=create phase=network-prepare backend=netlink sandbox_id=%s pod_uid=%s operation_id=%s netns=%s interface=%s tap=%s ts_mono_us=%d duration_us=%d success=%t",
-			identity.sandboxID, identity.podUID, identity.operationID, netnsPath, interfaceName, tapName, monotime.Micros(), time.Since(started).Microseconds(), err == nil,
+			"cube_perf component=cubelet operation=create phase=network-prepare backend=netlink sandbox_id=%s pod_uid=%s operation_id=%s netns=%s interface=%s tap=%s retained_fd=%t ts_mono_us=%d duration_us=%d success=%t",
+			identity.sandboxID, identity.podUID, identity.operationID, netnsPath, interfaceName, tapName, preparedTap != nil, monotime.Micros(), time.Since(started).Microseconds(), err == nil,
 		)
 	}()
 	if _, err := os.Stat(netnsPath); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	err = n.executor.Run(ctx, netnsPath, func(handle netlinkHandle) error {
 		var prepareErr error
-		attachment, prepareErr = n.prepare(ctx, handle, interfaceName, tapName)
+		attachment, preparedTap, prepareErr = n.prepare(ctx, handle, interfaceName, tapName)
 		return prepareErr
 	})
 	if err != nil {
-		return nil, err
+		if preparedTap != nil {
+			_ = preparedTap.Close()
+		}
+		return nil, nil, err
 	}
-	return attachment, nil
+	return attachment, preparedTap, nil
 }
 
-func (n *netlinkNetwork) prepare(ctx context.Context, handle netlinkHandle, interfaceName, tapName string) (*runtimev1.NetworkAttachment, error) {
+func (n *netlinkNetwork) prepare(ctx context.Context, handle netlinkHandle, interfaceName, tapName string) (attachment *runtimev1.NetworkAttachment, preparedTap *os.File, err error) {
+	committed := false
+	defer func() {
+		if !committed && preparedTap != nil {
+			_ = preparedTap.Close()
+			preparedTap = nil
+		}
+	}()
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	waitStarted := time.Now()
 	cniLink, ips, routes, gateways, err := waitForCNIConfiguration(ctx, handle, interfaceName)
@@ -182,44 +203,45 @@ func (n *netlinkNetwork) prepare(ctx context.Context, handle netlinkHandle, inte
 		)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	mac := cniLink.Attrs().HardwareAddr.String()
 	mtu := cniLink.Attrs().MTU
-	tap, err := ensureNetlinkTap(ctx, handle, tapName)
+	tap, preparedTap, err := ensureNetlinkTap(ctx, handle, tapName)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := handle.LinkSetMTU(tap, mtu); err != nil {
-		return nil, fmt.Errorf("set TAP %q MTU: %w", tapName, err)
+		return nil, nil, fmt.Errorf("set TAP %q MTU: %w", tapName, err)
 	}
 	if err := handle.LinkSetUp(tap); err != nil {
-		return nil, fmt.Errorf("set TAP %q up: %w", tapName, err)
+		return nil, nil, fmt.Errorf("set TAP %q up: %w", tapName, err)
 	}
 	neighbors, err := n.netlinkNeighbors(ctx, handle, cniLink, interfaceName, gateways)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Resolve gateway neighbors before redirecting ingress traffic to the TAP.
 	// Once installed, the catch-all filter sends ARP/NDP replies to the guest.
 	cniIngressParent, err := ensureNetlinkIngress(ctx, handle, cniLink)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tapIngressParent, err := ensureNetlinkIngress(ctx, handle, tap)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := replaceNetlinkRedirect(ctx, handle, cniLink, tap, cniIngressParent); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := replaceNetlinkRedirect(ctx, handle, tap, cniLink, tapIngressParent); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	committed = true
 	return &runtimev1.NetworkAttachment{
 		TapName: tapName, GuestInterfaceName: "eth0", Mac: mac, Mtu: uint32(mtu),
 		Ips: ips, Routes: routes, Neighbors: neighbors,
-	}, nil
+	}, preparedTap, nil
 }
 
 func waitForCNIConfiguration(ctx context.Context, handle netlinkHandle, interfaceName string) (netlink.Link, []string, []*runtimev1.Route, []string, error) {
@@ -282,16 +304,16 @@ func cniConfigurationPending(err error) bool {
 		message == "CNI interface has no default gateway"
 }
 
-func ensureNetlinkTap(ctx context.Context, handle netlinkHandle, tapName string) (netlink.Link, error) {
+func ensureNetlinkTap(ctx context.Context, handle netlinkHandle, tapName string) (netlink.Link, *os.File, error) {
 	tap, err := handle.LinkByName(tapName)
 	if err == nil {
 		if err := validateNetlinkTap(tap, tapName); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return tap, nil
+		return tap, nil, nil
 	}
 	if !isLinkNotFound(err) {
-		return nil, fmt.Errorf("find TAP %q: %w", tapName, err)
+		return nil, nil, fmt.Errorf("find TAP %q: %w", tapName, err)
 	}
 	created := &netlink.Tuntap{
 		LinkAttrs: netlink.LinkAttrs{Name: tapName},
@@ -300,23 +322,49 @@ func ensureNetlinkTap(ctx context.Context, handle netlinkHandle, tapName string)
 		Queues:    1,
 	}
 	if err := handle.LinkAdd(created); err != nil {
-		return nil, fmt.Errorf("create TAP %q: %w", tapName, err)
+		return nil, nil, fmt.Errorf("create TAP %q: %w", tapName, err)
 	}
-	for _, file := range created.Fds {
-		_ = file.Close()
+	var preparedTap *os.File
+	if len(created.Fds) > 0 {
+		preparedTap = created.Fds[0]
+		for _, file := range created.Fds[1:] {
+			_ = file.Close()
+		}
 	}
 	created.Fds = nil
 	alias := tapOwnershipAlias(tapName)
 	if err := handle.LinkSetAlias(created, alias); err != nil {
+		if preparedTap != nil {
+			_ = preparedTap.Close()
+		}
 		// This invocation created the device, so it is safe to delete even
 		// before the durable ownership marker is installed.
 		if cleanupErr := deleteKnownCreatedTap(handle, created); cleanupErr != nil {
-			return nil, fmt.Errorf("mark TAP %q ownership: %w; delete unmarked TAP: %v", tapName, err, cleanupErr)
+			return nil, nil, fmt.Errorf("mark TAP %q ownership: %w; delete unmarked TAP: %v", tapName, err, cleanupErr)
 		}
-		return nil, fmt.Errorf("mark TAP %q ownership: %w", tapName, err)
+		return nil, nil, fmt.Errorf("mark TAP %q ownership: %w", tapName, err)
 	}
 	created.Attrs().Alias = alias
-	return created, nil
+	if preparedTap != nil {
+		// netlink opens TUN/TAP queues with O_NONBLOCK for Go's poller. The
+		// historical handoff path opens a blocking queue, which is the VMM ABI
+		// we must preserve when reusing the creation FD.
+		if err := unix.SetNonblock(int(preparedTap.Fd()), false); err != nil {
+			_ = preparedTap.Close()
+			if cleanupErr := deleteKnownCreatedTap(handle, created); cleanupErr != nil {
+				return nil, nil, fmt.Errorf("set TAP %q queue blocking mode: %w; delete unusable TAP: %v", tapName, err, cleanupErr)
+			}
+			return nil, nil, fmt.Errorf("set TAP %q queue blocking mode: %w", tapName, err)
+		}
+		if err := prepareTapForHandoff(int(preparedTap.Fd())); err != nil {
+			_ = preparedTap.Close()
+			if cleanupErr := deleteKnownCreatedTap(handle, created); cleanupErr != nil {
+				return nil, nil, fmt.Errorf("prepare TAP %q queue for handoff: %w; delete unusable TAP: %v", tapName, err, cleanupErr)
+			}
+			return nil, nil, fmt.Errorf("prepare TAP %q queue for handoff: %w", tapName, err)
+		}
+	}
+	return created, preparedTap, nil
 }
 
 func deleteKnownCreatedTap(handle netlinkHandle, tap netlink.Link) error {

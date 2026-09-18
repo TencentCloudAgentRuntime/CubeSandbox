@@ -13,10 +13,10 @@ mod task_srv;
 pub(crate) mod tracing;
 mod tools;
 mod update_ext;
-pub use runner::run;
+pub use runner::{requires_early_server_gate, run};
 pub use srv::Service;
 
-/// Run before argument parsing or Tokio creates worker threads.  A server
+/// Run after argument parsing but before Tokio creates worker threads. A server
 /// spawned by the bootstrap helper must publish its immutable identity and
 /// pass the inherited placement gate before it can bind the shim socket.
 pub fn early_server_gate() -> Result<(), String> {

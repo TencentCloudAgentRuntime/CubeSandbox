@@ -57,6 +57,7 @@ type fakeNetlinkHandle struct {
 	addrReads       int
 	routeReadyAfter int
 	routeReads      int
+	tapFile         *os.File
 }
 
 func newFakeNetlinkHandle() *fakeNetlinkHandle {
@@ -110,6 +111,9 @@ func (h *fakeNetlinkHandle) LinkAdd(link netlink.Link) error {
 		return unix.EEXIST
 	}
 	link.Attrs().Index = h.nextLinkIndex
+	if tap, ok := link.(*netlink.Tuntap); ok && h.tapFile != nil {
+		tap.Fds = []*os.File{h.tapFile}
+	}
 	h.nextLinkIndex++
 	h.links[link.Attrs().Name] = link
 	return nil
@@ -720,6 +724,119 @@ func TestNetlinkNetworkDoesNotAdoptCompatibleUnownedTap(t *testing.T) {
 		if len(filters) != 1 || filters[0].Attrs().Priority != tcPriority {
 			t.Fatalf("filters on index %d changed: %+v", index, filters)
 		}
+	}
+}
+
+func TestNetlinkNetworkRetainsPreparedBlockingTapFD(t *testing.T) {
+	handle := newFakeNetlinkHandle()
+	configureFakeDualStack(t, handle)
+	readFile, writeFile, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = readFile.Close()
+		_ = writeFile.Close()
+	})
+	if err := unix.SetNonblock(int(readFile.Fd()), true); err != nil {
+		t.Fatal(err)
+	}
+	handle.tapFile = readFile
+
+	originalHeader := runtimeResourceIoctlSetPointerInt
+	originalOffload := runtimeResourceIoctlSetTunOffload
+	t.Cleanup(func() {
+		runtimeResourceIoctlSetPointerInt = originalHeader
+		runtimeResourceIoctlSetTunOffload = originalOffload
+	})
+	var headerCalls, offloadCalls int
+	runtimeResourceIoctlSetPointerInt = func(fd int, request uint, value int) error {
+		headerCalls++
+		if fd != int(readFile.Fd()) || request != unix.TUNSETVNETHDRSZ || value != runtimeResourceVnetHeaderSize {
+			t.Fatalf("unexpected header ioctl fd=%d request=%d value=%d", fd, request, value)
+		}
+		return nil
+	}
+	runtimeResourceIoctlSetTunOffload = func(fd int, features uintptr) error {
+		offloadCalls++
+		if fd != int(readFile.Fd()) || features != 0 {
+			t.Fatalf("unexpected offload ioctl fd=%d features=%#x", fd, features)
+		}
+		return nil
+	}
+
+	network := &netlinkNetwork{
+		executor: &fakeNetlinkExecutor{handle: handle},
+		probe:    func(context.Context, string, net.IP) error { return nil },
+	}
+	_, retained, err := network.prepareWithTap(context.Background(), t.TempDir(), "eth0", "cb123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained != readFile {
+		t.Fatalf("retained fd=%v, want creation fd=%v", retained, readFile)
+	}
+	flags, err := unix.FcntlInt(readFile.Fd(), unix.F_GETFL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags&unix.O_NONBLOCK != 0 {
+		t.Fatalf("retained TAP fd flags=%#x, want blocking", flags)
+	}
+	if headerCalls != 1 || offloadCalls != 1 {
+		t.Fatalf("handoff ioctls header=%d offload=%d, want one each", headerCalls, offloadCalls)
+	}
+	if got := handle.links["cb123"].Attrs().Alias; got != tapOwnershipAlias("cb123") {
+		t.Fatalf("ownership alias=%q", got)
+	}
+}
+
+func TestNetlinkPreparedTapFailureCanRollbackAfterDirectDeleteExhausted(t *testing.T) {
+	tapName := nameFor("cb", "sandbox-a", 3)
+	handle := newFakeNetlinkHandle()
+	configureFakeDualStack(t, handle)
+	readFile, writeFile, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = readFile.Close()
+		_ = writeFile.Close()
+	})
+	handle.tapFile = readFile
+	handle.failCounts = map[string]int{"link-del " + tapName: tapDeleteRetryLimit}
+
+	originalHeader := runtimeResourceIoctlSetPointerInt
+	t.Cleanup(func() { runtimeResourceIoctlSetPointerInt = originalHeader })
+	want := errors.New("injected TAP header failure")
+	runtimeResourceIoctlSetPointerInt = func(int, uint, int) error { return want }
+
+	network := &netlinkNetwork{
+		executor: &fakeNetlinkExecutor{handle: handle},
+		probe:    func(context.Context, string, net.IP) error { return nil },
+	}
+	adapterState := filepath.Join(t.TempDir(), "adapter")
+	adapter, err := newAdapter(adapterState, testAssets(t), network)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := adapterRequest()
+	request.Network.NetnsPath = t.TempDir()
+	_, err = adapter.Prepare(context.Background(), request, state.Lease{Generation: 3, LeaseID: "lease-a"})
+	if err == nil || !errors.Is(err, want) {
+		t.Fatalf("Prepare error=%v, want %v", err, want)
+	}
+	if _, exists := handle.links[tapName]; exists {
+		t.Fatalf("owned TAP remains after durable rollback: operations=%v", handle.operations)
+	}
+	deleteAttempts := 0
+	for _, operation := range handle.operations {
+		if operation == "link-del "+tapName {
+			deleteAttempts++
+		}
+	}
+	if deleteAttempts != tapDeleteRetryLimit+1 {
+		t.Fatalf("TAP delete attempts=%d, want %d: operations=%v", deleteAttempts, tapDeleteRetryLimit+1, handle.operations)
 	}
 }
 

@@ -35,6 +35,17 @@ const TTRPC_ADDRESS_ENV: &str = "TTRPC_ADDRESS";
 const TASK_SERVICE_V2: &str = "containerd.task.v2.Task";
 const TASK_SERVICE_V3: &str = "containerd.task.v3.Task";
 
+pub fn requires_early_server_gate(action: &str) -> bool {
+    ![
+        "start",
+        "delete",
+        runtime_resource::RUNTIME_REAPER_ACTION,
+        host_cgroup::WATCHDOG_ACTION,
+        host_cgroup::SYSTEMD_PROBE_ACTION,
+    ]
+    .contains(&action)
+}
+
 pub async fn run(runtime_id: &str, flags: Flags) -> Result<(), Error> {
     match flags.action.as_str() {
         "start" => start(flags).await,
@@ -603,5 +614,20 @@ mod tests {
         let error =
             socket_address(&directory, "/run/containerd.sock", "k8s.io", "pod-1").unwrap_err();
         assert!(error.to_string().contains("too long"));
+    }
+
+    #[test]
+    fn only_known_short_lived_actions_skip_the_server_gate() {
+        for action in [
+            "start",
+            "delete",
+            runtime_resource::RUNTIME_REAPER_ACTION,
+            host_cgroup::WATCHDOG_ACTION,
+            host_cgroup::SYSTEMD_PROBE_ACTION,
+        ] {
+            assert!(!requires_early_server_gate(action), "action={action}");
+        }
+        assert!(requires_early_server_gate(""));
+        assert!(requires_early_server_gate("unknown-action"));
     }
 }

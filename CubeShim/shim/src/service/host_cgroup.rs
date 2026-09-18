@@ -10,7 +10,7 @@
 
 use cgroups::systemd::props::PropertiesBuilder;
 use cgroups::systemd::utils::expand_slice;
-use cgroups::systemd::SystemdClient;
+use cgroups::systemd::Property;
 use oci_spec::runtime::Spec;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -49,6 +49,10 @@ const RUNTIME_QUEUE_DIRECTORY: &str = "runtime-resource";
 const SOCKET_LOCK_DIRECTORY: &str = "socket-locks";
 const CLEANUP_REASON_FILE: &str = "cleanup-reason";
 const PRECOMMIT_GRACE: Duration = Duration::from_secs(30);
+const SYSTEMD_PLACEMENT_TIMEOUT: Duration = Duration::from_secs(2);
+const SYSTEMD_PLACEMENT_FAST_POLL_WINDOW: Duration = Duration::from_millis(100);
+const SYSTEMD_PLACEMENT_INITIAL_POLL_INTERVAL: Duration = Duration::from_millis(2);
+const SYSTEMD_PLACEMENT_MAX_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 const RECORD_FILE: &str = "record.json";
 const RECORD_LOCK_FILE: &str = "record.lock";
@@ -58,6 +62,22 @@ const RUNTIME_OWNER_FILE: &str = "runtime-resource-owner.json";
 
 const CONTAINER_TYPE_ANNOTATION: &str = "io.kubernetes.cri.container-type";
 const SANDBOX_ID_ANNOTATION: &str = "io.kubernetes.cri.sandbox-id";
+
+#[zbus::proxy(
+    interface = "org.freedesktop.systemd1.Manager",
+    default_service = "org.freedesktop.systemd1",
+    default_path = "/org/freedesktop/systemd1"
+)]
+trait HostSystemdManager {
+    #[allow(clippy::type_complexity)]
+    fn start_transient_unit(
+        &self,
+        name: &str,
+        mode: &str,
+        properties: &[&(&str, &zbus::zvariant::Value<'_>)],
+        aux: &[&(&str, &[&(&str, &zbus::zvariant::Value<'_>)])],
+    ) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -6321,26 +6341,12 @@ fn create_and_join_target(
                 .pids(vec![pid as u32])
                 .build();
             properties.push(("CollectMode", ZbusValue::Str("inactive-or-failed".into())));
-            let client = SystemdClient::new(unit, properties)
-                .map_err(|error| format!("construct systemd scope {unit}: {error}"))?;
             let phase_started = Instant::now();
-            let exists = client.exists();
-            crate::cube_perf!(
-                "cube_perf component=shim operation=create phase=systemd-exists sandbox_id={} operation_id={} unit={} target_pid={} ts_mono_us={} duration_us={} exists={}",
-                sandbox_id,
-                sandbox_id,
-                unit,
-                pid,
-                Utils::monotonic_time_micros(),
-                phase_started.elapsed().as_micros(),
-                exists
-            );
-            if exists {
-                return Err(format!("refuse to reuse existing systemd scope {unit}"));
-            }
-            let phase_started = Instant::now();
-            let result = client
-                .start()
+            // `fail` makes systemd reject an existing unit atomically with
+            // creation. The old GetUnit + StartTransientUnit("replace") pair
+            // used two independent D-Bus connections, serialized badly under
+            // burst load, and still left a check/use race.
+            let result = start_unique_systemd_scope(unit, &properties)
                 .map_err(|error| format!("start systemd scope {unit}: {error}"));
             crate::cube_perf!(
                 "cube_perf component=shim operation=create phase=systemd-start-transient sandbox_id={} operation_id={} unit={} target_pid={} ts_mono_us={} duration_us={} success={}",
@@ -6367,6 +6373,22 @@ fn create_and_join_target(
         }
         HostTarget::Pending { .. } | HostTarget::Legacy { .. } => Ok(()),
     }
+}
+
+fn start_unique_systemd_scope(unit: &str, properties: &[Property<'_>]) -> Result<(), String> {
+    let connection = zbus::blocking::Connection::system()
+        .map_err(|error| format!("connect system D-Bus: {error}"))?;
+    let proxy = HostSystemdManagerProxyBlocking::new(&connection)
+        .map_err(|error| format!("construct systemd manager proxy: {error}"))?;
+    let borrowed: Vec<(&str, &zbus::zvariant::Value<'_>)> = properties
+        .iter()
+        .map(|(name, value)| (*name, value))
+        .collect();
+    let borrowed: Vec<&(&str, &zbus::zvariant::Value<'_>)> = borrowed.iter().collect();
+    proxy
+        .start_transient_unit(unit, "fail", &borrowed, &[])
+        .map_err(|error| format!("StartTransientUnit(mode=fail): {error}"))?;
+    Ok(())
 }
 
 fn verify_target_membership(target: &HostTarget, pid: i32) -> Result<(), String> {
@@ -6431,7 +6453,11 @@ fn verify_systemd_placement(
     // leaf, and process membership remain stable before persisting the leaf.
     let readiness_started = Instant::now();
     let mut leaf_identity = None;
-    for _ in 0..200 {
+    let readiness_deadline = readiness_started + SYSTEMD_PLACEMENT_TIMEOUT;
+    let mut poll_interval = SYSTEMD_PLACEMENT_INITIAL_POLL_INTERVAL;
+    let mut polls = 0_u32;
+    loop {
+        polls += 1;
         if path.exists()
             && current_process_cgroup(pid).ok().as_deref() == Some(cgroup.as_str())
             && file_identity(parent).ok().as_ref() == Some(expected_parent)
@@ -6439,7 +6465,16 @@ fn verify_systemd_placement(
             leaf_identity = Some(file_identity(&path)?);
             break;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        let now = Instant::now();
+        if now >= readiness_deadline {
+            break;
+        }
+        std::thread::sleep(poll_interval.min(readiness_deadline - now));
+        if readiness_started.elapsed() >= SYSTEMD_PLACEMENT_FAST_POLL_WINDOW {
+            poll_interval = poll_interval
+                .saturating_mul(2)
+                .min(SYSTEMD_PLACEMENT_MAX_POLL_INTERVAL);
+        }
     }
     let leaf_identity = leaf_identity.ok_or_else(|| {
         format!(
@@ -6448,10 +6483,11 @@ fn verify_systemd_placement(
         )
     })?;
     crate::cube_perf!(
-        "cube_perf component=shim operation=create phase=systemd-placement-ready sandbox_id={} operation_id={} target_pid={} ts_mono_us={} duration_us={} success=true",
+        "cube_perf component=shim operation=create phase=systemd-placement-ready sandbox_id={} operation_id={} target_pid={} polls={} strategy=fast-window-backoff ts_mono_us={} duration_us={} success=true",
         sandbox_id,
         sandbox_id,
         pid,
+        polls,
         Utils::monotonic_time_micros(),
         readiness_started.elapsed().as_micros()
     );
