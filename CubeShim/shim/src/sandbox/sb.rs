@@ -149,6 +149,8 @@ struct VmResizeState {
     generation: u64,
     initial_vcpus: u32,
     initial_memory_bytes: u64,
+    aggregate_floor_vcpus: u32,
+    aggregate_floor_memory_bytes: u64,
     physical_vcpus: u32,
     desired_vcpus: u32,
     physical_memory_bytes: u64,
@@ -156,6 +158,9 @@ struct VmResizeState {
     balloon_bytes: u64,
     pending_memory_shrink: bool,
     pending_memory_shrink_since: Option<Instant>,
+    /// Active containers that have not yet acknowledged the current
+    /// authoritative Pod memory generation through Task.Update.
+    pending_memory_updates: HashSet<String>,
     /// Set before the first VMM resize request is emitted. The VMM API is not
     /// transactional, so even an error can leave part of the topology changed.
     snapshot_forbidden: bool,
@@ -242,6 +247,8 @@ impl Default for VmResizeState {
             generation: 0,
             initial_vcpus: 0,
             initial_memory_bytes: 0,
+            aggregate_floor_vcpus: 0,
+            aggregate_floor_memory_bytes: 0,
             physical_vcpus: 0,
             desired_vcpus: 0,
             physical_memory_bytes: 0,
@@ -249,6 +256,7 @@ impl Default for VmResizeState {
             balloon_bytes: 0,
             pending_memory_shrink: false,
             pending_memory_shrink_since: None,
+            pending_memory_updates: HashSet::new(),
             snapshot_forbidden: false,
             phase: VmResizePhase::Committed,
             last_error: None,
@@ -273,17 +281,87 @@ impl VmResizeState {
 fn memory_shrink_ready(
     active_limits: impl IntoIterator<Item = Option<u64>>,
     desired_memory_bytes: u64,
+    authoritative: bool,
+    authoritative_updates_converged: bool,
 ) -> CResult<bool> {
-    let mut aggregate = 0u64;
+    let mut finite = Vec::new();
+    let mut has_unlimited = false;
     for limit in active_limits {
         let Some(limit) = limit else {
-            return Ok(false);
+            has_unlimited = true;
+            continue;
         };
+        finite.push(limit);
+    }
+    if !authoritative && has_unlimited {
+        return Ok(false);
+    }
+    if authoritative && finite.is_empty() {
+        // UpdatePodSandboxResources precedes Pod/child cgroup updates. With no
+        // finite child observation there is no signal that the Guest-side
+        // limit has converged unless every active child successfully applied
+        // an explicit memory.limit update in this generation.
+        return Ok(authoritative_updates_converged);
+    }
+    let mut aggregate = 0u64;
+    for limit in &finite {
         aggregate = aggregate
-            .checked_add(limit)
+            .checked_add(*limit)
             .ok_or_else(|| "container memory limit aggregate overflow".to_string())?;
     }
-    Ok(aggregate <= desired_memory_bytes)
+    if !has_unlimited && aggregate <= desired_memory_bytes {
+        return Ok(true);
+    }
+    if authoritative && authoritative_updates_converged {
+        // Pod-level resources may be represented as one finite leaf plus
+        // unlimited siblings, or repeated as the same shared limit on every
+        // leaf. This path is only reached after a child Task.Update, never
+        // directly from UpdateSandbox. Every active child must acknowledge
+        // this Pod memory generation before shared/unlimited representations
+        // can open the barrier.
+        let first = finite[0];
+        if first <= desired_memory_bytes
+            && (has_unlimited || finite.iter().all(|limit| *limit == first))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn pre_container_resize_target(
+    state: &VmResizeState,
+    inferred: Option<(u32, u64)>,
+    authoritative_cpu: bool,
+    authoritative_memory: bool,
+) -> CResult<Option<(u32, u64)>> {
+    let Some((inferred_cpu, inferred_memory)) = inferred else {
+        return Ok(None);
+    };
+    let effective_memory = state.effective_memory_bytes()?;
+    let cpu_grow = !authoritative_cpu && inferred_cpu > state.desired_vcpus;
+    let memory_grow = !authoritative_memory && inferred_memory > effective_memory;
+    if !cpu_grow && !memory_grow {
+        return Ok(None);
+    }
+    Ok(Some((
+        if cpu_grow {
+            inferred_cpu
+        } else {
+            state.desired_vcpus
+        },
+        if memory_grow {
+            inferred_memory
+        } else {
+            // Keep an existing deferred shrink pending while another
+            // dimension is grown before the child cgroup is relaxed.
+            state.desired_memory_bytes
+        },
+    )))
+}
+
+fn memory_update_advances_convergence(pending: bool, memory_limit_updated: bool) -> bool {
+    memory_limit_updated && pending
 }
 
 #[derive(Clone)]
@@ -315,7 +393,8 @@ pub struct SandBox {
     container_vm_resources: HashMap<String, ContainerVmResource>,
     /// A controller-provided Pod aggregate is authoritative. Once observed,
     /// per-container Task.Update must not replace it with the legacy fallback.
-    authoritative_vm_target: bool,
+    authoritative_cpu_target: bool,
+    authoritative_memory_target: bool,
 }
 
 impl SandBox {
@@ -361,7 +440,8 @@ impl SandBox {
             pod_cpuset_mapper: PodCpusetMapper::default(),
             vm_resize: VmResizeState::default(),
             container_vm_resources: HashMap::new(),
-            authoritative_vm_target: false,
+            authoritative_cpu_target: false,
+            authoritative_memory_target: false,
         }
     }
 
@@ -432,6 +512,8 @@ impl SandBox {
         self.vm_resize = VmResizeState {
             initial_vcpus: self.conf.vm_res.cpu,
             initial_memory_bytes,
+            aggregate_floor_vcpus: 0,
+            aggregate_floor_memory_bytes: 0,
             physical_vcpus: self.conf.vm_res.cpu,
             desired_vcpus: self.conf.vm_res.cpu,
             physical_memory_bytes: initial_memory_bytes,
@@ -1658,31 +1740,37 @@ impl SandBox {
         info: ContainerInfo,
         resources_v2: Option<Vec<u8>>,
     ) -> CResult<()> {
-        {
-            let containers = self.containers.lock().await;
-            if containers.contains_key(&id) {
-                return Err(format!("container {} already exists", id.clone()));
-            }
+        let containers = self.containers.lock().await;
+        if containers.contains_key(&id) {
+            return Err(format!("container {} already exists", id.clone()));
         }
+        drop(containers);
+
         let vm_resource = ContainerVmResource::from_spec(&spec);
         let mut speculative_vm_resize = false;
-        // RestartContainer may replace a container instead of issuing a
-        // Task.Update. In legacy containerd mode, grow the VM before creating
-        // the replacement container so its cgroup/process never observes an
-        // undersized VM.
-        if !self.authoritative_vm_target
-            && (self.conf.vm_res.max_cpu > self.conf.vm_res.cpu
-                || self.conf.vm_res.max_memory > self.conf.vm_res.memory)
+        let hotplug_capable = self.conf.vm_res.max_cpu > self.conf.vm_res.cpu
+            || self.conf.vm_res.max_memory > self.conf.vm_res.memory;
+        let inferred_vm_target = if hotplug_capable
+            && (self.authoritative_cpu_target || self.authoritative_memory_target)
         {
-            if let Some((desired_vcpus, desired_memory)) = self
-                .vm_targets_with_container_update(&id, &vm_resource)
+            self.vm_targets_with_container_update(&id, &vm_resource)
                 .await?
-            {
-                let generation_before = self.vm_resize.generation;
-                self.prepare_vm_resize(desired_vcpus, desired_memory)
-                    .await?;
-                speculative_vm_resize = self.vm_resize.generation != generation_before;
-            }
+        } else {
+            None
+        };
+        // Grow each non-authoritative dimension before creating a child whose
+        // cgroup can consume it. Authoritative dimensions were prepared by
+        // UpdateSandbox and must not suppress a legacy grow in the other one.
+        if let Some((desired_vcpus, desired_memory)) = pre_container_resize_target(
+            &self.vm_resize,
+            inferred_vm_target,
+            self.authoritative_cpu_target,
+            self.authoritative_memory_target,
+        )? {
+            let generation_before = self.vm_resize.generation;
+            self.prepare_vm_resize(desired_vcpus, desired_memory)
+                .await?;
+            speculative_vm_resize = self.vm_resize.generation != generation_before;
         }
         let mapper_before = self.pod_cpuset_mapper.clone();
         let resources_v2 = if self.conf.sandbox_hostname.is_empty() {
@@ -1737,13 +1825,14 @@ impl SandBox {
         let mut containers = self.containers.lock().await;
         containers.insert(id, c);
         drop(containers);
-        self.finalize_pending_memory_shrink_best_effort("container-create")
+        let _ = self
+            .reconcile_pending_memory_shrink("container-create")
             .await;
 
         Ok(())
     }
 
-    pub async fn start_container(&mut self, id: &String) -> Result<()> {
+    pub async fn start_container(&self, id: &String) -> Result<()> {
         let mut container = {
             let containers = self.containers.lock().await;
             match containers.get(id) {
@@ -1756,8 +1845,6 @@ impl SandBox {
             .start_container()
             .await
             .map_err(|e| Error::Other(e.to_string()))?;
-        self.finalize_pending_memory_shrink_best_effort("container-start")
-            .await;
         Ok(())
     }
 
@@ -1821,7 +1908,9 @@ impl SandBox {
             }
         }
         self.container_vm_resources.remove(id);
-        self.finalize_pending_memory_shrink_best_effort("container-delete")
+        self.vm_resize.pending_memory_updates.remove(id);
+        let _ = self
+            .reconcile_pending_memory_shrink("container-delete")
             .await;
         // Live Task.Delete. Crash leftover is cleaned by the delete subcommand
         // (`clean_sandbox_resource`). Pause-to-snapshot returns before here.
@@ -1958,21 +2047,28 @@ impl SandBox {
             .unwrap_or_default();
         let updated_vm_resource = current_vm_resource.with_update(res);
         let mut speculative_vm_resize = false;
-        if !self.authoritative_vm_target
-            && (self.conf.vm_res.max_cpu > self.conf.vm_res.cpu
-                || self.conf.vm_res.max_memory > self.conf.vm_res.memory)
-        {
-            if let Some((desired_vcpus, desired_memory)) = self
-                .vm_targets_with_container_update(id, &updated_vm_resource)
+        let hotplug_capable = self.conf.vm_res.max_cpu > self.conf.vm_res.cpu
+            || self.conf.vm_res.max_memory > self.conf.vm_res.memory;
+        let inferred_vm_target = if hotplug_capable {
+            self.vm_targets_with_container_update(id, &updated_vm_resource)
                 .await
                 .map_err(Error::Other)?
-            {
-                let generation_before = self.vm_resize.generation;
-                self.prepare_vm_resize(desired_vcpus, desired_memory)
-                    .await
-                    .map_err(Error::Other)?;
-                speculative_vm_resize = self.vm_resize.generation != generation_before;
-            }
+        } else {
+            None
+        };
+        if let Some((desired_vcpus, desired_memory)) = pre_container_resize_target(
+            &self.vm_resize,
+            inferred_vm_target,
+            self.authoritative_cpu_target,
+            self.authoritative_memory_target,
+        )
+        .map_err(Error::Other)?
+        {
+            let generation_before = self.vm_resize.generation;
+            self.prepare_vm_resize(desired_vcpus, desired_memory)
+                .await
+                .map_err(Error::Other)?;
+            speculative_vm_resize = self.vm_resize.generation != generation_before;
         }
 
         let mapper_before = self.pod_cpuset_mapper.clone();
@@ -2006,10 +2102,27 @@ impl SandBox {
             );
             return result;
         }
+        let memory_limit_updated = res
+            .memory()
+            .as_ref()
+            .is_some_and(|memory| memory.limit().is_some());
+        let memory_converged = memory_update_advances_convergence(
+            self.vm_resize.pending_memory_updates.contains(id),
+            memory_limit_updated,
+        );
         self.container_vm_resources
             .insert(id.clone(), updated_vm_resource);
-        self.finalize_pending_memory_shrink_best_effort("container-update")
-            .await;
+        if memory_converged {
+            self.vm_resize.pending_memory_updates.remove(id);
+        }
+        if let Some((desired_vcpus, desired_memory)) = inferred_vm_target {
+            self.prepare_vm_resize(desired_vcpus, desired_memory)
+                .await
+                .map_err(Error::Other)?;
+        }
+        self.reconcile_pending_memory_shrink("container-update")
+            .await
+            .map_err(Error::Other)?;
         Ok(())
     }
 
@@ -2100,6 +2213,16 @@ impl SandBox {
             if let Err(error) = result {
                 self.vm_resize.phase = VmResizePhase::Degraded;
                 self.vm_resize.last_error = Some(error.clone());
+                errf!(
+                    self.log,
+                    "VM resize VMM request failed: generation={} desired={}vCPU/{}B physical={}vCPU/{}B error={}",
+                    generation,
+                    desired_vcpus,
+                    desired_memory_bytes,
+                    physical_vcpus,
+                    physical_memory_bytes,
+                    error
+                );
                 return Err(error);
             }
         }
@@ -2130,6 +2253,14 @@ impl SandBox {
             Err(error) => {
                 self.vm_resize.phase = VmResizePhase::Degraded;
                 self.vm_resize.last_error = Some(error.clone());
+                errf!(
+                    self.log,
+                    "VM resize guest reconcile failed: generation={} physical={}vCPU/{}B error={}",
+                    generation,
+                    physical_vcpus,
+                    physical_memory_bytes,
+                    error
+                );
                 return Err(error);
             }
         };
@@ -2148,11 +2279,22 @@ impl SandBox {
             );
             self.vm_resize.phase = VmResizePhase::Degraded;
             self.vm_resize.last_error = Some(error.clone());
+            errf!(
+                self.log,
+                "VM resize guest readback failed: generation={} response_generation={} actual={}vCPU/{}B expected={}vCPU/{}B",
+                generation,
+                response.generation,
+                response.actual_online_cpus,
+                response.actual_online_memory_bytes,
+                physical_vcpus,
+                physical_memory_bytes
+            );
             return Err(error);
         }
         self.vm_resize.phase = VmResizePhase::GuestApplied;
         self.vm_resize.pending_memory_shrink = false;
         self.vm_resize.pending_memory_shrink_since = None;
+        self.vm_resize.pending_memory_updates.clear();
         self.vm_resize.last_error = None;
         self.vm_resize.phase = VmResizePhase::Committed;
         infof!(
@@ -2189,6 +2331,12 @@ impl SandBox {
             .map(|value| value / ACPI_MEMORY_BLOCK_BYTES * ACPI_MEMORY_BLOCK_BYTES)
             .ok_or_else(|| "VM resize memory alignment overflow".to_string())?;
         let effective_memory = self.vm_resize.effective_memory_bytes()?;
+        if self.vm_resize.pending_memory_shrink
+            && desired_vcpus == self.vm_resize.desired_vcpus
+            && aligned_memory == self.vm_resize.desired_memory_bytes
+        {
+            return Ok(());
+        }
         if self.vm_resize.phase == VmResizePhase::Committed
             && !self.vm_resize.pending_memory_shrink
             && desired_vcpus == self.vm_resize.desired_vcpus
@@ -2205,11 +2353,13 @@ impl SandBox {
         // Kubernetes calls UpdatePodSandboxResources before per-container
         // Task.Update. Hot-add CPU immediately, but defer balloon inflation
         // until all known Guest container limits fit below the new aggregate.
+        let pending_memory_updates = self.vm_resize.pending_memory_updates.clone();
         self.resize_vm_resources(desired_vcpus, effective_memory)
             .await?;
         self.vm_resize.desired_vcpus = desired_vcpus;
         self.vm_resize.desired_memory_bytes = aligned_memory;
         self.vm_resize.pending_memory_shrink = true;
+        self.vm_resize.pending_memory_updates = pending_memory_updates;
         self.vm_resize
             .pending_memory_shrink_since
             .get_or_insert_with(Instant::now);
@@ -2223,17 +2373,105 @@ impl SandBox {
 
     pub async fn prepare_authoritative_vm_resize(
         &mut self,
-        desired_vcpus: u32,
-        desired_memory_bytes: u64,
+        desired_vcpus: Option<u32>,
+        desired_memory_bytes: Option<u64>,
     ) -> CResult<()> {
-        self.prepare_vm_resize(desired_vcpus, desired_memory_bytes)
-            .await?;
-        self.authoritative_vm_target = true;
+        let previous_resize_policy = self.vm_resize.clone();
+        let previous_authorities = (
+            self.authoritative_cpu_target,
+            self.authoritative_memory_target,
+        );
+        let current = self.vm_resource_targets();
+        let effective_memory = self.vm_resize.effective_memory_bytes()?;
+        let previous_memory_authority = self.authoritative_memory_target;
+        let previous_memory_target = self.vm_resize.desired_memory_bytes;
+        let was_pending = self.vm_resize.pending_memory_shrink;
+        if let Err(error) = self
+            .prepare_vm_resize(
+                desired_vcpus.unwrap_or(current.0),
+                desired_memory_bytes.unwrap_or(effective_memory),
+            )
+            .await
+        {
+            self.restore_authoritative_resize_policy(&previous_resize_policy, previous_authorities);
+            return Err(error);
+        }
+        let authoritative = self.vm_resource_targets();
+        self.authoritative_cpu_target = desired_vcpus.is_some();
+        if self.authoritative_cpu_target {
+            self.vm_resize.aggregate_floor_vcpus = authoritative.0;
+        } else {
+            self.vm_resize.aggregate_floor_vcpus = 0;
+        }
+        self.authoritative_memory_target = desired_memory_bytes.is_some();
+        if self.authoritative_memory_target {
+            self.vm_resize.aggregate_floor_memory_bytes = authoritative.1;
+            if self.vm_resize.pending_memory_shrink
+                && (!was_pending
+                    || !previous_memory_authority
+                    || previous_memory_target != authoritative.1)
+            {
+                self.vm_resize.pending_memory_updates =
+                    self.container_vm_resources.keys().cloned().collect();
+            }
+        } else {
+            self.vm_resize.aggregate_floor_memory_bytes = 0;
+            self.vm_resize.pending_memory_shrink = false;
+            self.vm_resize.pending_memory_shrink_since = None;
+            self.vm_resize.pending_memory_updates.clear();
+            self.vm_resize.desired_memory_bytes = effective_memory;
+        }
+        // Removing one Pod-level limit returns that dimension to the legacy
+        // active-container aggregate immediately. Containerd need not emit a
+        // child Task.Update when the child resources themselves did not
+        // change, so waiting for a later event could leave the VM undersized.
+        if desired_vcpus.is_none() || desired_memory_bytes.is_none() {
+            let legacy_target = match self.vm_targets_from_active_containers().await {
+                Ok(target) => target,
+                Err(error) => {
+                    self.restore_authoritative_resize_policy(
+                        &previous_resize_policy,
+                        previous_authorities,
+                    );
+                    return Err(error);
+                }
+            };
+            if let Some((legacy_cpu, legacy_memory)) = legacy_target {
+                if let Err(error) = self.prepare_vm_resize(legacy_cpu, legacy_memory).await {
+                    self.restore_authoritative_resize_policy(
+                        &previous_resize_policy,
+                        previous_authorities,
+                    );
+                    return Err(error);
+                }
+            }
+        }
         // The Pod target arrives before per-container Task.Update. Keep a
-        // smaller target pending until the Guest child cgroups have actually
-        // converged; the authoritative target only overrides legacy target
-        // inference, not the shrink ordering barrier.
+        // smaller target pending until a child Task.Update proves that Guest
+        // cgroups have converged. UpdateSandbox alone must never open the
+        // barrier because ordinary multi-container aggregate limits and
+        // Pod-level shared limits use the same wire representation.
         Ok(())
+    }
+
+    fn restore_authoritative_resize_policy(
+        &mut self,
+        previous: &VmResizeState,
+        authorities: (bool, bool),
+    ) {
+        self.authoritative_cpu_target = authorities.0;
+        self.authoritative_memory_target = authorities.1;
+        self.vm_resize.aggregate_floor_vcpus = previous.aggregate_floor_vcpus;
+        self.vm_resize.aggregate_floor_memory_bytes = previous.aggregate_floor_memory_bytes;
+        self.vm_resize.desired_vcpus = previous.desired_vcpus;
+        self.vm_resize.desired_memory_bytes = previous.desired_memory_bytes;
+        self.vm_resize.pending_memory_shrink = previous.pending_memory_shrink;
+        self.vm_resize.pending_memory_shrink_since = previous.pending_memory_shrink_since;
+        self.vm_resize.pending_memory_updates = previous.pending_memory_updates.clone();
+        if self.vm_resize.phase != VmResizePhase::Degraded {
+            self.vm_resize.phase = previous.phase;
+            self.vm_resize.last_error = previous.last_error.clone();
+        }
     }
 
     fn settle_vm_target_after_container_failure(
@@ -2255,10 +2493,17 @@ impl SandBox {
                 return;
             }
         };
-        self.vm_resize.desired_vcpus = self.vm_resize.physical_vcpus;
-        self.vm_resize.desired_memory_bytes = effective_memory;
-        self.vm_resize.pending_memory_shrink = false;
-        self.vm_resize.pending_memory_shrink_since = None;
+        self.vm_resize.desired_vcpus = if self.authoritative_cpu_target {
+            self.vm_resize.aggregate_floor_vcpus
+        } else {
+            self.vm_resize.physical_vcpus
+        };
+        if !self.authoritative_memory_target {
+            self.vm_resize.desired_memory_bytes = effective_memory;
+            self.vm_resize.pending_memory_shrink = false;
+            self.vm_resize.pending_memory_shrink_since = None;
+            self.vm_resize.pending_memory_updates.clear();
+        }
         if self.vm_resize.phase != VmResizePhase::Degraded {
             self.vm_resize.phase = VmResizePhase::Committed;
             self.vm_resize.last_error = None;
@@ -2284,6 +2529,7 @@ impl SandBox {
                 .collect()
         };
         let mut active_limits = Vec::new();
+        let mut active_ids = HashSet::new();
         for (id, container) in containers {
             let state = container
                 .get_container_info(&String::new())
@@ -2293,18 +2539,28 @@ impl SandBox {
             if !matches!(state, TaskState::CREATED | TaskState::RUNNING) {
                 continue;
             }
+            active_ids.insert(id.clone());
             active_limits.push(
                 self.container_vm_resources
                     .get(&id)
                     .and_then(|resource| resource.memory_limit),
             );
         }
-        if !memory_shrink_ready(active_limits, self.vm_resize.desired_memory_bytes)? {
+        self.vm_resize
+            .pending_memory_updates
+            .retain(|id| active_ids.contains(id));
+        if !memory_shrink_ready(
+            active_limits,
+            self.vm_resize.desired_memory_bytes,
+            self.authoritative_memory_target,
+            self.vm_resize.pending_memory_updates.is_empty(),
+        )? {
             return Ok(());
         }
-        // Only reclaim after every active child has a finite applied limit
-        // and their sum fits the requested VM capacity. A Pod-level limit
-        // below that sum stays pending rather than reclaiming prematurely.
+        // Container-level fallback requires every active child to carry a
+        // finite applied limit. With an authoritative Pod target, unlimited
+        // children are governed by the VM effective-memory boundary itself;
+        // finite child limits must still fit below that target.
         let desired_vcpus = self.vm_resize.desired_vcpus;
         let desired_memory = self.vm_resize.desired_memory_bytes;
         let mut timer = metrics::OperationTimer::new("shim", "FinalizeVmMemoryShrink");
@@ -2314,12 +2570,12 @@ impl SandBox {
         Ok(())
     }
 
-    async fn finalize_pending_memory_shrink_best_effort(&mut self, trigger: &str) {
+    pub async fn reconcile_pending_memory_shrink(&mut self, trigger: &str) -> CResult<()> {
         const RETRY_DELAYS: [Duration; 2] =
             [Duration::from_millis(100), Duration::from_millis(500)];
 
         if !self.vm_resize.pending_memory_shrink {
-            return;
+            return Ok(());
         }
 
         let desired_vcpus = self.vm_resize.desired_vcpus;
@@ -2343,7 +2599,7 @@ impl SandBox {
                             pending_age
                         );
                     }
-                    return;
+                    return Ok(());
                 }
                 Err(error) => {
                     let pending_age = self
@@ -2374,7 +2630,7 @@ impl SandBox {
                     || self.vm_resize.desired_vcpus != desired_vcpus
                     || self.vm_resize.desired_memory_bytes != desired_memory_bytes
                 {
-                    return;
+                    return Ok(());
                 }
             }
         }
@@ -2388,12 +2644,29 @@ impl SandBox {
             desired_memory_bytes,
             self.vm_resize.last_error.as_deref().unwrap_or("unknown")
         );
+        Err(self
+            .vm_resize
+            .last_error
+            .clone()
+            .unwrap_or_else(|| "VM memory reclaim failed after bounded retries".to_string()))
     }
 
     async fn vm_targets_with_container_update(
         &self,
         updated_id: &str,
         updated: &ContainerVmResource,
+    ) -> CResult<Option<(u32, u64)>> {
+        self.vm_targets_for_active_containers(Some((updated_id, updated)))
+            .await
+    }
+
+    async fn vm_targets_from_active_containers(&self) -> CResult<Option<(u32, u64)>> {
+        self.vm_targets_for_active_containers(None).await
+    }
+
+    async fn vm_targets_for_active_containers(
+        &self,
+        updated: Option<(&str, &ContainerVmResource)>,
     ) -> CResult<Option<(u32, u64)>> {
         const CPU_SCALE: u128 = 1_000_000;
         const MINIMUM_VM_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
@@ -2420,56 +2693,78 @@ impl SandBox {
                 continue;
             }
             active_containers += 1;
-            let resource = if id == updated_id {
-                updated_seen = true;
-                updated
-            } else {
-                let Some(resource) = self.container_vm_resources.get(&id) else {
-                    return Ok(None);
-                };
-                resource
+            let resource = match updated {
+                Some((updated_id, updated_resource)) if id == updated_id => {
+                    updated_seen = true;
+                    updated_resource
+                }
+                _ => {
+                    let Some(resource) = self.container_vm_resources.get(&id) else {
+                        return Ok(None);
+                    };
+                    resource
+                }
             };
-            scaled_cpu = scaled_cpu
-                .checked_add(resource.scaled_cpu()?)
-                .ok_or_else(|| "container CPU aggregate overflow".to_string())?;
-            if let Some(limit) = resource.memory_limit {
-                memory_bytes = memory_bytes
-                    .checked_add(limit)
-                    .ok_or_else(|| "container memory limit aggregate overflow".to_string())?;
-            } else {
-                finite_memory = false;
+            let resource_cpu = resource.scaled_cpu()?;
+            let resource_memory = resource.memory_limit;
+            if !self.authoritative_cpu_target {
+                scaled_cpu = scaled_cpu
+                    .checked_add(resource_cpu)
+                    .ok_or_else(|| "container CPU aggregate overflow".to_string())?;
+            }
+            if !self.authoritative_memory_target {
+                if let Some(limit) = resource_memory {
+                    memory_bytes = memory_bytes
+                        .checked_add(limit)
+                        .ok_or_else(|| "container memory limit aggregate overflow".to_string())?;
+                } else {
+                    finite_memory = false;
+                }
             }
         }
-        if !updated_seen {
+        if let Some((_, updated)) = updated.filter(|_| !updated_seen) {
             active_containers += 1;
-            scaled_cpu = scaled_cpu
-                .checked_add(updated.scaled_cpu()?)
-                .ok_or_else(|| "container CPU aggregate overflow".to_string())?;
-            if let Some(limit) = updated.memory_limit {
-                memory_bytes = memory_bytes
-                    .checked_add(limit)
-                    .ok_or_else(|| "container memory limit aggregate overflow".to_string())?;
-            } else {
-                finite_memory = false;
+            let updated_cpu = updated.scaled_cpu()?;
+            if !self.authoritative_cpu_target {
+                scaled_cpu = scaled_cpu
+                    .checked_add(updated_cpu)
+                    .ok_or_else(|| "container CPU aggregate overflow".to_string())?;
+            }
+            if !self.authoritative_memory_target {
+                if let Some(limit) = updated.memory_limit {
+                    memory_bytes = memory_bytes
+                        .checked_add(limit)
+                        .ok_or_else(|| "container memory limit aggregate overflow".to_string())?;
+                } else {
+                    finite_memory = false;
+                }
             }
         }
         if active_containers == 0 {
             return Ok(None);
         }
-        let inferred_vcpus = u32::try_from(scaled_cpu.div_ceil(CPU_SCALE))
-            .map_err(|_| "container CPU aggregate exceeds u32".to_string())?
-            .max(1);
+        let inferred_vcpus = if self.authoritative_cpu_target {
+            self.vm_resize.aggregate_floor_vcpus
+        } else {
+            u32::try_from(scaled_cpu.div_ceil(CPU_SCALE))
+                .map_err(|_| "container CPU aggregate exceeds u32".to_string())?
+                .max(1)
+        };
         let inferred_memory = if finite_memory {
             memory_bytes.max(MINIMUM_VM_MEMORY_BYTES)
         } else {
             self.vm_resize.desired_memory_bytes
         };
-        let desired_vcpus = if self.conf.vm_res.max_cpu > self.conf.vm_res.cpu {
+        let desired_vcpus = if self.authoritative_cpu_target {
+            self.vm_resize.aggregate_floor_vcpus
+        } else if self.conf.vm_res.max_cpu > self.conf.vm_res.cpu {
             inferred_vcpus
         } else {
             self.vm_resize.desired_vcpus
         };
-        let desired_memory = if self.conf.vm_res.max_memory > self.conf.vm_res.memory {
+        let desired_memory = if self.authoritative_memory_target {
+            self.vm_resize.aggregate_floor_memory_bytes
+        } else if self.conf.vm_res.max_memory > self.conf.vm_res.memory {
             inferred_memory
         } else {
             self.vm_resize.desired_memory_bytes
@@ -2612,6 +2907,16 @@ impl SandBox {
     pub async fn normal(&self) -> bool {
         let state = self.state.lock().await;
         *state == SandBoxState::Normal
+    }
+
+    pub async fn ensure_resize_compatible(&self) -> CResult<()> {
+        match *self.state.lock().await {
+            SandBoxState::Normal => Ok(()),
+            SandBoxState::Paused => Err("sandbox is paused during Pod resource update".to_string()),
+            SandBoxState::Exited => {
+                Err("sandbox has exited during Pod resource update".to_string())
+            }
+        }
     }
 
     pub async fn pause_vm(&mut self) -> CResult<()> {
@@ -2941,12 +3246,16 @@ mod tests {
     use super::config;
     use super::health;
     use super::memory_shrink_ready;
+    use super::memory_update_advances_convergence;
     use super::normalize_dns_for_agent;
+    use super::pre_container_resize_target;
     use super::AgentCapabilities;
     use super::ContainerVmResource;
     use super::LinuxResources;
     use super::Log;
     use super::SandBox;
+    use super::SandBoxState;
+    use super::VmResizeState;
     use super::AGENT_PROTOCOL_VERSION_LEGACY;
     use super::ENV_GUEST_KERNEL_CMDLINE_APPEND;
 
@@ -2996,6 +3305,25 @@ mod tests {
         assert!(sandbox.ensure_snapshot_compatible().is_err());
     }
 
+    #[tokio::test]
+    async fn paused_or_exited_sandbox_rejects_resize() {
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(1);
+        let sandbox = SandBox::new("resize-state-ut".to_string(), Log::default(), false, tx);
+        assert!(sandbox.ensure_resize_compatible().await.is_ok());
+        *sandbox.state.lock().await = SandBoxState::Paused;
+        assert!(sandbox
+            .ensure_resize_compatible()
+            .await
+            .unwrap_err()
+            .contains("paused"));
+        *sandbox.state.lock().await = SandBoxState::Exited;
+        assert!(sandbox
+            .ensure_resize_compatible()
+            .await
+            .unwrap_err()
+            .contains("exited"));
+    }
+
     #[test]
     fn container_vm_resource_merges_partial_updates_and_scales_cpu() {
         let initial: LinuxResources = serde_json::from_str(
@@ -3024,15 +3352,45 @@ mod tests {
 
         // Pod aggregate Update precedes the child Task.Update. Neither an
         // old limit above the target nor an unlimited child is safe to reclaim.
-        assert!(!memory_shrink_ready([Some(1536 * MIB)], target).unwrap());
-        assert!(!memory_shrink_ready([Some(256 * MIB), None], target).unwrap());
-        assert!(!memory_shrink_ready([Some(384 * MIB), Some(256 * MIB)], target).unwrap());
+        assert!(!memory_shrink_ready([Some(1536 * MIB)], target, false, false).unwrap());
+        assert!(!memory_shrink_ready([Some(256 * MIB), None], target, false, false).unwrap());
+        assert!(
+            !memory_shrink_ready([Some(384 * MIB), Some(256 * MIB)], target, false, false).unwrap()
+        );
 
         // Only the committed child limits open the balloon barrier.
-        assert!(memory_shrink_ready([Some(512 * MIB)], target).unwrap());
-        assert!(memory_shrink_ready([Some(256 * MIB), Some(256 * MIB)], target).unwrap());
-        assert!(memory_shrink_ready([], target).unwrap());
-        assert!(memory_shrink_ready([Some(u64::MAX), Some(1)], target).is_err());
+        assert!(memory_shrink_ready([Some(512 * MIB)], target, false, false).unwrap());
+        assert!(
+            memory_shrink_ready([Some(256 * MIB), Some(256 * MIB)], target, false, false).unwrap()
+        );
+        assert!(memory_shrink_ready([], target, false, false).unwrap());
+        assert!(memory_shrink_ready([Some(u64::MAX), Some(1)], target, false, false).is_err());
+
+        // A containerd 2.4 authoritative Pod-level limit is the Guest Pod
+        // boundary when children inherit/unset their own memory.max. Some
+        // kubelet paths repeat that shared limit on every child, so the
+        // readiness check must use the maximum rather than summing it.
+        assert!(!memory_shrink_ready([None, None], target, true, false).unwrap());
+        assert!(memory_shrink_ready([None, None], target, true, true).unwrap());
+        assert!(!memory_shrink_ready([Some(256 * MIB), None], target, true, false).unwrap());
+        assert!(memory_shrink_ready([Some(256 * MIB), None], target, true, true).unwrap());
+        assert!(!memory_shrink_ready([Some(target), Some(target)], target, true, false).unwrap());
+        assert!(memory_shrink_ready([Some(target), Some(target)], target, true, true).unwrap());
+        assert!(!memory_shrink_ready([Some(256 * MIB), Some(target)], target, true, true).unwrap());
+        assert!(
+            memory_shrink_ready([Some(256 * MIB), Some(256 * MIB)], target, true, false).unwrap()
+        );
+        assert!(!memory_shrink_ready([Some(768 * MIB), None], target, true, true).unwrap());
+
+        // A CPU-only update must not make identical old limits look like a
+        // converged shared Pod limit.
+        assert!(
+            !memory_shrink_ready([Some(512 * MIB), Some(512 * MIB)], 768 * MIB, true, false)
+                .unwrap()
+        );
+        assert!(memory_update_advances_convergence(true, true));
+        assert!(!memory_update_advances_convergence(true, false));
+        assert!(!memory_update_advances_convergence(false, true));
     }
 
     #[test]
@@ -3040,7 +3398,7 @@ mod tests {
         let log = Log::default();
         let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(1);
         let mut sandbox = SandBox::new("pending-shrink-ut".to_string(), log, false, tx);
-        sandbox.authoritative_vm_target = true;
+        sandbox.authoritative_memory_target = true;
         sandbox.vm_resize.generation = 3;
         sandbox.vm_resize.physical_vcpus = 2;
         sandbox.vm_resize.desired_vcpus = 2;
@@ -3056,7 +3414,165 @@ mod tests {
         assert_eq!(sandbox.vm_resize.desired_memory_bytes, 512 * 1024 * 1024);
         assert!(sandbox.vm_resize.pending_memory_shrink);
         assert!(sandbox.vm_resize.pending_memory_shrink_since.is_some());
-        assert!(memory_shrink_ready([Some(512 * 1024 * 1024)], 512 * 1024 * 1024).unwrap());
+        assert!(
+            memory_shrink_ready([Some(512 * 1024 * 1024)], 512 * 1024 * 1024, true, true).unwrap()
+        );
+    }
+
+    #[test]
+    fn failed_mixed_authority_pre_grow_preserves_memory_shrink() {
+        const MIB: u64 = 1024 * 1024;
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(1);
+        let mut sandbox = SandBox::new("mixed-failure-ut".to_string(), Log::default(), false, tx);
+        sandbox.authoritative_memory_target = true;
+        sandbox.vm_resize.aggregate_floor_memory_bytes = 512 * MIB;
+        sandbox.vm_resize.physical_vcpus = 4;
+        sandbox.vm_resize.desired_vcpus = 4;
+        sandbox.vm_resize.physical_memory_bytes = 1024 * MIB;
+        sandbox.vm_resize.desired_memory_bytes = 512 * MIB;
+        sandbox.vm_resize.pending_memory_shrink = true;
+        sandbox.vm_resize.pending_memory_shrink_since = Some(std::time::Instant::now());
+        sandbox
+            .vm_resize
+            .pending_memory_updates
+            .insert("container".to_string());
+
+        sandbox.settle_vm_target_after_container_failure("child create failed", true);
+
+        assert_eq!(sandbox.vm_resize.desired_vcpus, 4);
+        assert_eq!(sandbox.vm_resize.desired_memory_bytes, 512 * MIB);
+        assert!(sandbox.vm_resize.pending_memory_shrink);
+        assert!(sandbox
+            .vm_resize
+            .pending_memory_updates
+            .contains("container"));
+    }
+
+    #[tokio::test]
+    async fn authoritative_resource_dimensions_are_independent() {
+        const MIB: u64 = 1024 * 1024;
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(1);
+        let mut sandbox = SandBox::new("authority-ut".to_string(), Log::default(), false, tx);
+        sandbox.conf.vm_res.cpu = 2;
+        sandbox.conf.vm_res.max_cpu = 4;
+        sandbox.conf.vm_res.memory = 1024;
+        sandbox.conf.vm_res.max_memory = 4096;
+        sandbox.vm_resize.desired_vcpus = 2;
+        sandbox.vm_resize.desired_memory_bytes = 1024 * MIB;
+        let updated = ContainerVmResource {
+            cpu_period: Some(100_000),
+            cpu_quota: Some(100_000),
+            memory_limit: Some(512 * MIB),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            sandbox
+                .vm_targets_with_container_update("container", &updated)
+                .await
+                .unwrap(),
+            Some((1, 512 * MIB)),
+            "legacy container-level shrink must not retain the boot-size floor"
+        );
+
+        sandbox.authoritative_cpu_target = true;
+        sandbox.vm_resize.aggregate_floor_vcpus = 3;
+        assert_eq!(
+            sandbox
+                .vm_targets_with_container_update("container", &updated)
+                .await
+                .unwrap(),
+            Some((3, 512 * MIB)),
+            "CPU authority must not change memory aggregation"
+        );
+
+        sandbox.authoritative_cpu_target = false;
+        sandbox.authoritative_memory_target = true;
+        sandbox.vm_resize.aggregate_floor_memory_bytes = 2 * 1024 * MIB;
+        assert_eq!(
+            sandbox
+                .vm_targets_with_container_update("container", &updated)
+                .await
+                .unwrap(),
+            Some((1, 2 * 1024 * MIB)),
+            "memory authority must not change CPU aggregation"
+        );
+    }
+
+    #[test]
+    fn mixed_authority_pre_grows_only_the_legacy_dimension() {
+        const MIB: u64 = 1024 * 1024;
+        let mut state = VmResizeState {
+            desired_vcpus: 2,
+            physical_vcpus: 2,
+            desired_memory_bytes: 512 * MIB,
+            physical_memory_bytes: 512 * MIB,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            pre_container_resize_target(&state, Some((2, 1024 * MIB)), true, false).unwrap(),
+            Some((2, 1024 * MIB)),
+            "legacy memory must grow before a child update even when CPU is authoritative"
+        );
+        assert_eq!(
+            pre_container_resize_target(&state, Some((4, 512 * MIB)), false, true).unwrap(),
+            Some((4, 512 * MIB)),
+            "legacy CPU must grow before a child update even when memory is authoritative"
+        );
+
+        state.physical_memory_bytes = 1024 * MIB;
+        state.balloon_bytes = 0;
+        state.desired_memory_bytes = 512 * MIB;
+        state.pending_memory_shrink = true;
+        assert_eq!(
+            pre_container_resize_target(&state, Some((4, 1024 * MIB)), false, true).unwrap(),
+            Some((4, 512 * MIB)),
+            "a CPU grow must preserve the existing deferred memory target"
+        );
+    }
+
+    #[tokio::test]
+    async fn unlimited_pod_dimensions_clear_authority() {
+        const MIB: u64 = 1024 * 1024;
+        let (tx, _) = channel::<(String, Box<dyn MessageDyn>)>(1);
+        let mut sandbox = SandBox::new("authority-clear-ut".to_string(), Log::default(), false, tx);
+        sandbox.conf.vm_res.cpu = 2;
+        sandbox.conf.vm_res.max_cpu = 4;
+        sandbox.conf.vm_res.memory = 512;
+        sandbox.conf.vm_res.max_memory = 4096;
+        sandbox.authoritative_cpu_target = true;
+        sandbox.authoritative_memory_target = true;
+        sandbox.vm_resize.aggregate_floor_vcpus = 2;
+        sandbox.vm_resize.aggregate_floor_memory_bytes = 512 * MIB;
+        sandbox.vm_resize.physical_vcpus = 2;
+        sandbox.vm_resize.desired_vcpus = 2;
+        sandbox.vm_resize.physical_memory_bytes = 512 * MIB;
+        sandbox.vm_resize.desired_memory_bytes = 512 * MIB;
+
+        sandbox
+            .prepare_authoritative_vm_resize(None, None)
+            .await
+            .unwrap();
+
+        assert!(!sandbox.authoritative_cpu_target);
+        assert!(!sandbox.authoritative_memory_target);
+        assert_eq!(sandbox.vm_resize.aggregate_floor_vcpus, 0);
+        assert_eq!(sandbox.vm_resize.aggregate_floor_memory_bytes, 0);
+        let legacy = ContainerVmResource {
+            cpu_period: Some(100_000),
+            cpu_quota: Some(300_000),
+            memory_limit: Some(1024 * MIB),
+            ..Default::default()
+        };
+        assert_eq!(
+            sandbox
+                .vm_targets_with_container_update("container", &legacy)
+                .await
+                .unwrap(),
+            Some((3, 1024 * MIB)),
+            "cleared dimensions must immediately return to legacy aggregation"
+        );
     }
 
     #[test]

@@ -38,6 +38,7 @@ const NONCE_ENV: &str = "CUBE_VMM_WORKER_NONCE";
 const PARENT_PID_ENV: &str = "CUBE_VMM_WORKER_PARENT_PID";
 const HELLO_TIMEOUT_SECS: i64 = 2;
 const COMMAND_TIMEOUT_SECS: i64 = 10;
+const RESIZE_COMMAND_TIMEOUT_SECS: i64 = 60;
 const PLACEMENT_DEADLINE: Duration = Duration::from_secs(2);
 
 pub trait WorkerPlacement: Sync {
@@ -455,7 +456,20 @@ impl WorkerClient {
         if self.inner.poisoned.load(Ordering::Acquire) {
             return Err("cube-vmm-worker is poisoned".to_string());
         }
+        let command_timeout_secs = Self::command_timeout_secs(&command);
+        if command_timeout_secs != COMMAND_TIMEOUT_SECS {
+            if let Err(error) = set_socket_timeout(control.as_raw_fd(), command_timeout_secs) {
+                return Err(error);
+            }
+        }
         let result = self.request_once(&control, command, fds);
+        if command_timeout_secs != COMMAND_TIMEOUT_SECS {
+            if let Err(error) = set_socket_timeout(control.as_raw_fd(), COMMAND_TIMEOUT_SECS) {
+                if result.is_ok() {
+                    return Err(error);
+                }
+            }
+        }
         let terminate = result
             .as_ref()
             .err()
@@ -474,6 +488,13 @@ impl WorkerClient {
             ),
             None => error.message,
         })
+    }
+
+    fn command_timeout_secs(command: &WorkerCommand) -> i64 {
+        match command {
+            WorkerCommand::ResizeVm(_) => RESIZE_COMMAND_TIMEOUT_SECS,
+            _ => COMMAND_TIMEOUT_SECS,
+        }
     }
 
     fn request_once(

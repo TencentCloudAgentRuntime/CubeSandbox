@@ -44,6 +44,9 @@ Options:
                            Wait limit for each sandbox-path metric assertion.
   --ephemeral-eviction-timeout DUR
                            Wait limit for rootfs ephemeral-storage eviction.
+  --resize-timeout DUR     Wait limit for AGC-45 in-place resize actuation.
+  --resize-restart-containerd
+                           Run the disruptive AGC-45 containerd restart assessment.
   --awv-csi-storage-class NAME
                            StorageClass used by awv-csi PVC tests.
   --awv-csi-driver NAME    Expected CSI driver for awv-csi PVs.
@@ -72,6 +75,8 @@ while [[ $# -gt 0 ]]; do
     --template-prepare-timeout) extra_args+=("-template-prepare-timeout=$2"); shift 2 ;;
     --sandbox-path-verify-timeout) extra_args+=("-sandbox-path-verify-timeout=$2"); shift 2 ;;
     --ephemeral-eviction-timeout) extra_args+=("-ephemeral-eviction-timeout=$2"); shift 2 ;;
+    --resize-timeout) extra_args+=("-resize-timeout=$2"); shift 2 ;;
+    --resize-restart-containerd) extra_args+=("-resize-restart-containerd=true"); shift ;;
     --awv-csi-storage-class) extra_args+=("-awv-csi-storage-class=$2"); shift 2 ;;
     --awv-csi-driver) extra_args+=("-awv-csi-driver=$2"); shift 2 ;;
     --awv-csi-pvc-size) extra_args+=("-awv-csi-pvc-size=$2"); shift 2 ;;

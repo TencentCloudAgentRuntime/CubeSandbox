@@ -29,7 +29,6 @@ use containerd_shim::{
     Context, Error, TtrpcResult,
 };
 use protobuf::{Enum, Message};
-use serde::Deserialize;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 
@@ -51,48 +50,6 @@ const MODULE: &str = "Shim";
 const INTERNAL_PROBE_EXEC_ID_PREFIX: &str = "cubesandbox-internal-probe-";
 const CGROUP_V2_METRICS_TYPE_URL: &str = "io.containerd.cgroups.v2.Metrics";
 const RESOURCE_METRICS_VERSION_V1: u32 = 1;
-const POD_SANDBOX_RESOURCES_TYPE_URL: &str = "io.cubesandbox.runtime.v1.PodSandboxResources";
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PodSandboxResources {
-    cpu_period: i64,
-    cpu_quota: i64,
-    cpu_shares: i64,
-    memory_limit_in_bytes: i64,
-}
-
-impl PodSandboxResources {
-    fn desired(&self, current_cpu: u32, current_memory: u64) -> Result<(u32, u64), String> {
-        if self.cpu_period < 0
-            || self.cpu_quota < 0
-            || self.cpu_shares < 0
-            || self.memory_limit_in_bytes < 0
-        {
-            return Err("Pod sandbox resize resources must not be negative".to_string());
-        }
-        let cpu = if self.cpu_period > 0 && self.cpu_quota > 0 {
-            let quota = u64::try_from(self.cpu_quota).unwrap();
-            let period = u64::try_from(self.cpu_period).unwrap();
-            u32::try_from(quota.div_ceil(period))
-                .map_err(|_| "Pod sandbox CPU target exceeds u32".to_string())?
-        } else if self.cpu_shares > 0 {
-            u32::try_from(u64::try_from(self.cpu_shares).unwrap().div_ceil(1024))
-                .map_err(|_| "Pod sandbox CPU shares exceed u32".to_string())?
-        } else {
-            current_cpu
-        };
-        let memory = if self.memory_limit_in_bytes > 0 {
-            u64::try_from(self.memory_limit_in_bytes).unwrap()
-        } else {
-            // CRI does not carry memory request. Preserve current VM capacity
-            // for request-only or unlimited updates instead of guessing.
-            current_memory
-        };
-        Ok((cpu.max(1), memory))
-    }
-}
-
 fn create_error_with_rootfs_cleanup(
     prepared_rootfs: &mut Option<PreparedRootfs>,
     message: String,
@@ -666,12 +623,50 @@ impl TaskService {
         forward_event(rx, publisher, ns.clone(), log.clone()).await;
 
         let sb = sb::SandBox::new(id.clone(), log.clone(), debug, tx.clone());
+        let sandbox = Arc::new(Mutex::new(sb));
+        let sandbox_lifecycle = Arc::new(SandboxLifecycle::default());
+        let reconcile_sandbox = Arc::downgrade(&sandbox);
+        let reconcile_lifecycle = Arc::downgrade(&sandbox_lifecycle);
+        let reconcile_log = log.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let Some(sandbox) = reconcile_sandbox.upgrade() else {
+                    return;
+                };
+                let Some(lifecycle) = reconcile_lifecycle.upgrade() else {
+                    return;
+                };
+                let _reservation = match lifecycle.reserve_periodic_reconcile().await {
+                    Ok(reservation) => reservation,
+                    Err(_) => continue,
+                };
+                let result = {
+                    let mut sandbox = sandbox.lock().await;
+                    match sandbox.ensure_resize_compatible().await {
+                        Ok(()) => {
+                            sandbox
+                                .reconcile_pending_memory_shrink("periodic-reconcile")
+                                .await
+                        }
+                        Err(_) => continue,
+                    }
+                };
+                if let Err(error) = result {
+                    warnf!(
+                        reconcile_log,
+                        "periodic VM memory reclaim remains pending: {}",
+                        error
+                    );
+                }
+            }
+        });
         TaskService {
             sandbox_id: id,
             //ns,
-            sandbox: Arc::new(Mutex::new(sb)),
+            sandbox,
             standard_rootfs: Arc::new(Mutex::new(HashMap::new())),
-            sandbox_lifecycle: Arc::new(SandboxLifecycle::default()),
+            sandbox_lifecycle,
             log,
             //debug: debug,
             exit,
@@ -1026,7 +1021,7 @@ impl Task for TaskService {
         // publication. Delete/Kill/Pause and Sandbox Stop use the same mutex,
         // so none can remove or freeze the tracked object while a cloned
         // Container finishes Start in the Guest.
-        let mut sb = self.sandbox.lock().await;
+        let sb = self.sandbox.lock().await;
         if sb.paused().await {
             errf!(self.log, "sandbox not in normal state");
             return Err(Others(format!("sandbox not in normal state")));
@@ -1295,26 +1290,7 @@ impl Task for TaskService {
     ) -> TtrpcResult<api::Empty> {
         infof!(self.log, "update req start, id:{}", &req.id);
         let managed = self.sandbox_lifecycle.is_managed().await;
-        let pod_sandbox_resources = req
-            .resources
-            .as_ref()
-            .filter(|resource| resource.type_url == POD_SANDBOX_RESOURCES_TYPE_URL)
-            .map(|resource| {
-                serde_json::from_slice::<PodSandboxResources>(&resource.value).map_err(|error| {
-                    Error::Other(format!("Invalid Pod sandbox resources: {error}"))
-                })
-            })
-            .transpose()?;
-        if pod_sandbox_resources.is_some() && !managed {
-            return Err(Error::Other(
-                "Pod sandbox VM resize is only supported for managed Kubernetes sandboxes"
-                    .to_string(),
-            )
-            .into());
-        }
-        let parsed_resources = if pod_sandbox_resources.is_some() {
-            None
-        } else if let Some(resource) = req.resources.as_ref() {
+        let parsed_resources = if let Some(resource) = req.resources.as_ref() {
             let resources_v2 = if managed {
                 if resource.type_url != resources::OCI_LINUX_RESOURCES_TYPE_URL {
                     return Err(Error::Other(format!(
@@ -1346,18 +1322,6 @@ impl Task for TaskService {
         if sb.paused().await {
             errf!(self.log, "sandbox not in normal state");
             return Err(Others(format!("sandbox not in normal state")));
-        }
-        if let Some(resources) = pod_sandbox_resources.as_ref() {
-            let (current_cpu, current_memory) = sb.vm_resource_targets();
-            let (desired_cpu, desired_memory) = resources
-                .desired(current_cpu, current_memory)
-                .map_err(Error::Other)?;
-            sb.prepare_authoritative_vm_resize(desired_cpu, desired_memory)
-                .await
-                .map_err(|error| {
-                    errf!(self.log, "resize VM resources failed:{}", error);
-                    Error::Other(format!("resize VM resources failed:{error}"))
-                })?;
         }
         if let Some((resources, resources_v2)) = parsed_resources.as_ref() {
             sb.update_container(&req.id, resources, resources_v2.as_deref())
@@ -1684,32 +1648,6 @@ fn is_internal_probe_exec_id(exec_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pod_sandbox_resources_use_absolute_cpu_and_finite_memory() {
-        let resources = PodSandboxResources {
-            cpu_period: 100_000,
-            cpu_quota: 250_001,
-            cpu_shares: 0,
-            memory_limit_in_bytes: 768 * 1024 * 1024,
-        };
-        assert_eq!(
-            resources.desired(1, 512 * 1024 * 1024).unwrap(),
-            (3, 768 * 1024 * 1024)
-        );
-
-        let request_only = PodSandboxResources {
-            cpu_period: 0,
-            cpu_quota: 0,
-            cpu_shares: 0,
-            memory_limit_in_bytes: 0,
-        };
-        assert_eq!(
-            request_only.desired(2, 1024).unwrap(),
-            (2, 1024),
-            "CRI request-only memory must not invent a VM target"
-        );
-    }
 
     fn privileged_spec_with_mount(source: &std::path::Path) -> oci_spec::runtime::Spec {
         serde_json::from_value(serde_json::json!({

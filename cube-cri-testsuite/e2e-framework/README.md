@@ -17,10 +17,31 @@ task test:e2e-framework -- --feature runtime --cube-node 10.0.244.112
 task test:e2e-framework -- --feature probe --assess 'http|tcp' --cube-node 10.0.244.112
 task test:e2e-framework -- --feature core --assess 'multicontainer.*-(cold|template)' --cube-node 10.0.244.112
 task test:e2e-framework -- --feature core --assess 'rootfs-ephemeral-storage-eviction.*-(cold|template)' --cube-node 10.0.244.112
+task test:e2e-framework -- --feature resize --cube-node 10.0.244.112
 task test:e2e-framework -- --help
 ```
 
 `semantic-rootfs-ephemeral-storage-eviction` 覆盖 AGC-41：容器向 rootfs 写入 64Mi、超过 5Mi `ephemeral-storage` limit 后，Pod 必须在默认 2 分钟内以 `Failed/Evicted` 结束，且所有容器状态均为 `Terminated`。可通过 `EPHEMERAL_EVICTION_TIMEOUT` 或 `--ephemeral-eviction-timeout` 调整等待时间。
+
+## AGC-45 原地升降配
+
+`--feature resize` 运行 Cube 的原地升降配验收。测试读取目标 Cube 节点的 `status.nodeInfo.containerRuntimeVersion` 并按 containerd 版本执行不同契约：
+
+- 所有 containerd 版本均验证 container-level CPU/内存扩缩，包括 Pod resize subresource、容器 status resources、guest cgroup 和 VM 资源变化。
+- containerd 2.4+ 额外验证经标准 `SandboxService.UpdateSandbox` 传递的 Pod-level CPU/内存扩缩、多容器与经典 init container 聚合语义，以及超过 `cube.vmmres` 最大拓扑时的拒绝/能力边界。
+- `--resize-restart-containerd` 启用破坏性重启用例：运行中重启 Cube 节点 containerd，等待节点能力重新发布后重试 Pod-level resize，并确认容器身份不变。
+- containerd <2.4 明确跳过 Pod-level assessments，只承诺 container-level resize；不再把私有 containerd 补丁作为测试前提。
+
+兼容边界也属于本契约：旧格式 `cube.vmmres` 未显式提供 `max_cpu`/`max_memory` 时保持 fixed-size VM；升级 CubeShim 前已存在的 sandbox 仍由旧 Shim 进程服务，需重建 Pod 后才支持 VM-level resize；一旦发生 VM topology resize，该 sandbox 生命周期内禁用 app snapshot/restore/rollback，以避免恢复到不一致的 CPU、内存和 balloon 拓扑。
+
+Pod-level 用例要求集群启用 `PodLevelResources` 和 `InPlacePodLevelResourcesVerticalScaling`。若 API Server 未启用这些特性，对应用例会以明确原因跳过。测试通过 Pod condition、容器 cgroup 和 guest CPU/内存读数确认 resize 已实际生效，不依赖监控组件；当控制面到 kubelet 的 Pod exec 流不可达时，会通过 `kubectl node-shell` 调用节点 `crictl exec` 读取同一 guest 状态。
+
+用例默认最多等待 3 分钟完成一次资源收敛，可通过 `RESIZE_TIMEOUT` 或 `--resize-timeout` 调整：
+
+```bash
+task test:e2e-framework -- --feature resize --cube-node 10.0.244.112 --resize-timeout 5m
+task test:e2e-framework -- --feature resize --assess 'after-containerd-restart' --cube-node 10.0.244.112 --resize-restart-containerd
+```
 
 默认在 `default` 命名空间运行并清理测试资源；`--namespace` 指定已存在的命名空间，`--keep` 保留资源用于排查。每次执行禁用 Go 测试缓存，整体超时默认 30 分钟。
 

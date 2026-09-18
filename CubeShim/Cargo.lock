@@ -650,6 +650,7 @@ dependencies = [
  "containerd-shim-protos",
  "cube-hypervisor",
  "futures",
+ "hex",
  "home",
  "http-body-util",
  "hyper 1.11.1",

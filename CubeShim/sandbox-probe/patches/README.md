@@ -41,33 +41,18 @@ core sandbox 的 `updated-resources` extension 恢复 custom sandboxer 的当前
 当前 memory usage 和瞬时 CPU 等主要统计；需要单调 Pod 生命周期累计值时必须改为
 Guest Pod cgroup 原生指标，不能继续从当前容器集合合成。
 
-## Cube PodSandbox resize 转发
+## Cube PodSandbox resize
 
-`containerd-v2.3.4-cube-sandbox-resize.patch` 仅对
-`io.containerd.cube.rs` 生效：读取 CRI 写入 core sandbox 的
-`updated-resources` extension，并通过 Sandbox shim 的 Task `Update` 转发 Pod CPU、
-memory limit。CubeShim 使用绝对目标执行 VM hotplug；非 Cube runtime 保持原行为。
-权威 Pod memory limit 在缩容时先记为 pending；待所有活跃 Guest 容器已生效的有限
-memory limit 总和不超过目标后，才通过 balloon 回收。这是容量屏障，不要求
-每个容器都在本轮收到一次 `Task.Update`。若任一活跃容器无有限 limit，或 Pod-level
-limit 低于子容器 limit 总和，第一阶段保持 pending，不提前回收内存；这些合法的
-Pod-level-only 缩容场景尚不支持，后续需要明确 Guest Pod 父 cgroup 的收敛协议。
+完整的 Pod 原地升降配以 containerd 2.4 为最低版本。containerd 2.4 会通过上游
+`SandboxService.UpdateSandbox` RPC，把 core sandbox 的 `updated-resources` extension
+原样发送给 CubeShim；CubeShim 从中读取权威 Pod CPU、memory limit，并执行 VM
+hotplug、Guest reconcile 和内存缩容屏障。本项目不再维护将该 extension 改写为
+Sandbox `Task.Update` 私有 TypeURL 的 containerd 补丁。
 
-该补丁提供权威 Pod aggregate，适用于 containerd 2.3.4。未带补丁的 containerd
-仍可通过标准容器 Task `Update` 触发 CubeShim 聚合当前 active 容器 limit，因此
-1.7/2.0～2.2 无需替换节点 containerd 即可覆盖普通 app container 原地 limit 更新和
-重建更新。该兜底不具备完整 Kubernetes Pod aggregate 语义：classic init container max
-需要本补丁提供的权威聚合值；Pod-level-only 缩容即使使用本补丁也仍受上述屏障限制；
-memory request-only 不驱动 VM 扩容。
-
-应用与验证：
-
-```bash
-git checkout v2.3.4
-git apply --check /path/to/containerd-v2.3.4-cube-sandbox-resize.patch
-git apply /path/to/containerd-v2.3.4-cube-sandbox-resize.patch
-go test ./plugins/sandbox
-```
+containerd 低于 2.4 时只承诺 container-level 原地升降配。标准容器 `Task.Update`
+仍可触发 CubeShim 聚合当前 active container limit，覆盖普通运行中 app container，
+但不承诺容器重建、Pod-level-only resize、classic init container 峰值语义或完整的
+Pod aggregate 一致性。memory request-only 在两个版本范围内均不驱动 VM 扩容。
 
 ## S5.5d.1 trace 与外部 Sandbox 并行创建补丁
 

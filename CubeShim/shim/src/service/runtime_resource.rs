@@ -83,11 +83,10 @@ pub(crate) const RUNTIME_REAPER_ACTION: &str = "runtime-resource-reaper";
 pub(crate) const MANAGED_VOLUME_EXPORT_DIR: &str = "volumes";
 pub(crate) const MANAGED_VOLUME_VIRTIOFS_ID: &str = "cubeVolumes";
 
-const REQUIRED_CAPABILITIES: [(&str, u32); 4] = [
+const REQUIRED_CAPABILITIES: [(&str, u32); 3] = [
     ("io.cubesandbox.runtime.assets", 1),
     ("io.cubesandbox.runtime.network.tcfilter", 1),
     ("io.cubesandbox.runtime.fd-handoff", 1),
-    ("io.cubesandbox.runtime.vm-resource-max", 1),
 ];
 
 #[derive(Clone, PartialEq, Message)]
@@ -2448,24 +2447,18 @@ fn runtime_prepare_plan_with_config(
 
     let mut annotations = config.annotations.clone();
     annotations.extend(request_annotations.clone());
-    let explicit_max = annotations
+    let explicit_vm_resources = annotations
         .get(ANNO_VM_RES)
         .map(|value| serde_json::from_str::<serde_json::Value>(value))
         .transpose()
         .map_err(|error| format!("parse {ANNO_VM_RES}: {error}"))?;
     let mut vm = resources_from_config(&annotations, config)?;
-    if !explicit_max
-        .as_ref()
-        .is_some_and(|value| value.get("max_cpu").is_some())
-        && node.max_vcpus > 0
-    {
+    // A legacy cube.vmmres annotation with omitted max fields means a fixed
+    // VM. Only unannotated workloads opt into the node hotplug ceiling.
+    if explicit_vm_resources.is_none() && node.max_vcpus > 0 {
         vm.max_vcpu_count = node.max_vcpus.max(vm.vcpu_count);
     }
-    if !explicit_max
-        .as_ref()
-        .is_some_and(|value| value.get("max_memory").is_some())
-        && node.max_memory_bytes > 0
-    {
+    if explicit_vm_resources.is_none() && node.max_memory_bytes > 0 {
         vm.max_memory_bytes = node.max_memory_bytes.max(vm.memory_bytes);
     }
     if node.max_vcpus > 0 && vm.max_vcpu_count > node.max_vcpus {
@@ -2488,10 +2481,10 @@ fn runtime_prepare_plan_with_config(
         ));
     }
     if vm.max_memory_bytes > vm.memory_bytes {
-        let explicit_memory = explicit_max
+        let explicit_memory = explicit_vm_resources
             .as_ref()
             .is_some_and(|value| value.get("memory").is_some());
-        let explicit_max_memory = explicit_max
+        let explicit_max_memory = explicit_vm_resources
             .as_ref()
             .is_some_and(|value| value.get("max_memory").is_some());
         if explicit_memory && vm.memory_bytes % ACPI_MEMORY_BLOCK_BYTES != 0 {
@@ -3435,6 +3428,25 @@ mod tests {
         assert_eq!(plan.resources.max_memory_bytes, 8 * 1024 * 1024 * 1024);
         assert_eq!(plan.host_ceiling.cpu_max, "825000 100000");
         assert_eq!(plan.host_ceiling.memory_max, "8858370048");
+    }
+
+    #[test]
+    fn legacy_vm_annotation_preserves_fixed_capacity() {
+        let mut node = poc_overhead_config();
+        node.max_vcpus = 8;
+        node.max_memory_bytes = 8 * 1024 * 1024 * 1024;
+        let annotations = HashMap::from([(
+            ANNO_VM_RES.to_string(),
+            r#"{"cpu":2,"memory":768}"#.to_string(),
+        )]);
+
+        let plan = runtime_prepare_plan_with_config(&sample_cri(), &annotations, &node).unwrap();
+        assert_eq!(plan.resources.vcpu_count, 2);
+        assert_eq!(plan.resources.max_vcpu_count, 2);
+        assert_eq!(plan.resources.memory_bytes, 768 * 1024 * 1024);
+        assert_eq!(plan.resources.max_memory_bytes, 768 * 1024 * 1024);
+        assert_eq!(plan.host_ceiling.cpu_max, "225000 100000");
+        assert_eq!(plan.host_ceiling.memory_max, "1073741824");
     }
 
     #[test]

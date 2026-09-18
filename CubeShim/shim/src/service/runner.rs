@@ -27,7 +27,7 @@ use crate::common::utils::ADDRESS_FILE;
 use crate::service::bootstrap::{read_start, BootstrapProtocol};
 use crate::service::host_cgroup::{self, BootstrapSession};
 use crate::service::runtime_resource;
-use crate::service::sandbox_srv::SandboxService;
+use crate::service::sandbox_srv::{add_update_sandbox_method, SandboxService};
 use crate::service::srv::Service;
 
 const DEFAULT_SOCKET_DIR: &str = "/run/containerd/s";
@@ -351,7 +351,8 @@ async fn serve(runtime_id: &str, flags: Flags) -> Result<(), Error> {
     let task: Arc<dyn TaskRpc + Send + Sync> = task;
     let task_v2_service = create_task(task.clone());
     let task_v3_service = create_task_v3(task)?;
-    let sandbox_service = create_sandbox(Arc::new(sandbox));
+    let mut sandbox_service = create_sandbox(Arc::new(sandbox.clone()));
+    add_update_sandbox_method(&mut sandbox_service, sandbox).map_err(Error::Other)?;
     let mut server = Server::new()
         .bind(&flags.socket)
         .map_err(|error| Error::Other(format!("bind CubeShim socket: {error}")))?

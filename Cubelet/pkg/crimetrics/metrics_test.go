@@ -9,3 +9,11 @@ func TestValidOperationAcceptsSandboxStartPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestValidOperationAcceptsInPlaceResizePaths(t *testing.T) {
+	for _, operation := range []string{"ResizeVmResources", "FinalizeVmMemoryShrink"} {
+		if !validOperation("shim", operation) {
+			t.Fatalf("in-place resize operation %q is not accepted", operation)
+		}
+	}
+}

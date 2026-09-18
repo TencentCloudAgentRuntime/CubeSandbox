@@ -2,4 +2,3 @@
 *.yaml text eol=lf
 *.tpl text eol=lf
 CubeShim/sandbox-probe/patches/containerd-v2.3.4-s55d1-perf-trace.patch text eol=lf whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
-CubeShim/sandbox-probe/patches/containerd-v2.3.4-cube-sandbox-resize.patch text eol=lf whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab

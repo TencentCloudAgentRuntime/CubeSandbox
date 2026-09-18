@@ -273,8 +273,14 @@ impl CubeHypervisor {
 
     pub async fn resize_vm(&self, resize: VmResizeData) -> CResult<()> {
         if let Some(worker) = &self.worker {
-            worker.request(WorkerCommand::ResizeVm(resize), &[])?;
-            return Ok(());
+            let worker = worker.clone();
+            return tokio::task::spawn_blocking(move || {
+                worker
+                    .request(WorkerCommand::ResizeVm(resize), &[])
+                    .map(|_| ())
+            })
+            .await
+            .map_err(|error| format!("join cube-vmm-worker resize request: {error}"))?;
         }
         let ch = self.ch.as_ref().unwrap().lock().await;
         ch.send_request(ApiRequest::VmResize(Arc::new(resize)))
