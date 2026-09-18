@@ -73,13 +73,13 @@ The release binaries are output to `target/release/containerd-shim-cube-rs`,
 
 ### Rust Toolchain
 
-CubeShim uses **Rust 1.77.2** (pinned in `rust-toolchain.toml`). If `rust-analyzer` in VS Code reports a version mismatch, pin it explicitly:
+CubeShim uses **Rust 1.97.1** (pinned in `rust-toolchain.toml`). Keep the editor's
+`rust-analyzer` extension up to date. To use the analyzer shipped with the pinned
+toolchain, install and verify the component with:
 
-```json
-// .vscode/settings.json
-{
-    "rust-analyzer.server.path": "~/.rustup/toolchains/1.77.2-x86_64-unknown-linux-gnu/bin/rust-analyzer"
-}
+```bash
+rustup component add rust-analyzer --toolchain 1.97.1
+rustup run 1.97.1 rust-analyzer --version
 ```
 
 ### Registration with containerd
