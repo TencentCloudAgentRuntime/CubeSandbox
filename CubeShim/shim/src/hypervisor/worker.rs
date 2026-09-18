@@ -8,6 +8,7 @@ use cube_hypervisor::config::RestoreConfig;
 use cube_hypervisor::vm_config::{DeviceConfig, FsConfig, NetConfig, VmConfig};
 use cube_hypervisor::{
     ApiRequest, ApiResponsePayload, NotifyEvent, SnapshotConfig, SnapshotType, VmRemoveDeviceData,
+    VmResizeData,
 };
 use nix::sys::socket::{
     getsockopt, sendmsg, socketpair, sockopt, AddressFamily, ControlMessage, MsgFlags, SockFlag,
@@ -37,6 +38,7 @@ const NONCE_ENV: &str = "CUBE_VMM_WORKER_NONCE";
 const PARENT_PID_ENV: &str = "CUBE_VMM_WORKER_PARENT_PID";
 const HELLO_TIMEOUT_SECS: i64 = 2;
 const COMMAND_TIMEOUT_SECS: i64 = 10;
+const RESIZE_COMMAND_TIMEOUT_SECS: i64 = 60;
 const PLACEMENT_DEADLINE: Duration = Duration::from_secs(2);
 
 pub trait WorkerPlacement: Sync {
@@ -98,6 +100,7 @@ pub(crate) enum WorkerCommand {
     SetFs(FsConfig),
     AddDevice(DeviceConfig),
     RemoveDevice(VmRemoveDeviceData),
+    ResizeVm(VmResizeData),
     DeleteVm,
     PauseToSnapshot(SnapshotConfig),
     ResumeFromSnapshot(RestoreConfig),
@@ -435,7 +438,12 @@ impl WorkerClient {
     }
 
     pub(crate) fn request(&self, command: WorkerCommand, fds: &[RawFd]) -> CResult<WorkerReply> {
-        let poison_on_error = !matches!(&command, WorkerCommand::Hello(_) | WorkerCommand::Ping);
+        // Capacity rejection is an ordinary resize result, not a broken
+        // worker. Transport and framing failures still poison the channel.
+        let poison_on_application_error = !matches!(
+            &command,
+            WorkerCommand::Hello(_) | WorkerCommand::Ping | WorkerCommand::ResizeVm(_)
+        );
         let control = match self.inner.control.lock() {
             Ok(control) => control,
             Err(_) => {
@@ -448,11 +456,24 @@ impl WorkerClient {
         if self.inner.poisoned.load(Ordering::Acquire) {
             return Err("cube-vmm-worker is poisoned".to_string());
         }
+        let command_timeout_secs = Self::command_timeout_secs(&command);
+        if command_timeout_secs != COMMAND_TIMEOUT_SECS {
+            if let Err(error) = set_socket_timeout(control.as_raw_fd(), command_timeout_secs) {
+                return Err(error);
+            }
+        }
         let result = self.request_once(&control, command, fds);
+        if command_timeout_secs != COMMAND_TIMEOUT_SECS {
+            if let Err(error) = set_socket_timeout(control.as_raw_fd(), COMMAND_TIMEOUT_SECS) {
+                if result.is_ok() {
+                    return Err(error);
+                }
+            }
+        }
         let terminate = result
             .as_ref()
             .err()
-            .is_some_and(|error| error.channel_failed || poison_on_error);
+            .is_some_and(|error| error.channel_failed || poison_on_application_error);
         let terminate_error = if terminate {
             self.inner.poisoned.store(true, Ordering::Release);
             drop(control);
@@ -467,6 +488,13 @@ impl WorkerClient {
             ),
             None => error.message,
         })
+    }
+
+    fn command_timeout_secs(command: &WorkerCommand) -> i64 {
+        match command {
+            WorkerCommand::ResizeVm(_) => RESIZE_COMMAND_TIMEOUT_SECS,
+            _ => COMMAND_TIMEOUT_SECS,
+        }
     }
 
     fn request_once(
@@ -782,7 +810,7 @@ fn run_worker(
         );
         let poison_on_error = !matches!(
             request.command,
-            WorkerCommand::Hello(_) | WorkerCommand::Ping
+            WorkerCommand::Hello(_) | WorkerCommand::Ping | WorkerCommand::ResizeVm(_)
         );
         let result = execute_command(
             &mut vmm,
@@ -998,6 +1026,10 @@ fn execute_command(
                 ApiRequest::VmRemoveDevice(Arc::new(config)),
                 "remove VM device",
             )?;
+            Ok(WorkerReply::Empty)
+        }
+        WorkerCommand::ResizeVm(config) => {
+            send_vmm(vmm, ApiRequest::VmResize(Arc::new(config)), "resize VM")?;
             Ok(WorkerReply::Empty)
         }
         WorkerCommand::DeleteVm => {
@@ -2147,6 +2179,57 @@ mod tests {
             "cube-vmm-worker is poisoned"
         );
         server.join().unwrap();
+    }
+
+    #[test]
+    fn resize_application_error_keeps_worker_usable() {
+        let (control_client, control_server) = seqpacket_pair().unwrap();
+        let child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let client = WorkerClient {
+            inner: Arc::new(WorkerClientInner {
+                control: Mutex::new(control_client),
+                child: Mutex::new(child),
+                next_request_id: AtomicU64::new(1),
+                poisoned: AtomicBool::new(false),
+                reaped: AtomicBool::new(false),
+            }),
+        };
+        let server = std::thread::spawn(move || {
+            for (expected_id, result) in [
+                (1, Err("resize exceeds maximum".to_string())),
+                (2, Ok(WorkerReply::Empty)),
+            ] {
+                let (payload, descriptors) =
+                    recv_packet(control_server.as_raw_fd()).unwrap().unwrap();
+                assert!(descriptors.is_empty());
+                let request: WorkerRequest = serde_json::from_slice(&payload).unwrap();
+                assert_eq!(request.request_id, expected_id);
+                let response = WorkerResponse {
+                    magic: PROTOCOL_MAGIC.to_string(),
+                    version: PROTOCOL_VERSION,
+                    request_id: request.request_id,
+                    result,
+                };
+                send_packet(
+                    control_server.as_raw_fd(),
+                    &serde_json::to_vec(&response).unwrap(),
+                    &[],
+                )
+                .unwrap();
+            }
+        });
+
+        assert!(client
+            .request(WorkerCommand::ResizeVm(VmResizeData::default()), &[])
+            .unwrap_err()
+            .contains("exceeds maximum"));
+        assert!(!client.inner.poisoned.load(Ordering::Acquire));
+        assert!(matches!(
+            client.request(WorkerCommand::Ping, &[]),
+            Ok(WorkerReply::Empty)
+        ));
+        server.join().unwrap();
+        client.terminate().unwrap();
     }
 
     #[test]

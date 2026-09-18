@@ -41,6 +41,19 @@ core sandbox 的 `updated-resources` extension 恢复 custom sandboxer 的当前
 当前 memory usage 和瞬时 CPU 等主要统计；需要单调 Pod 生命周期累计值时必须改为
 Guest Pod cgroup 原生指标，不能继续从当前容器集合合成。
 
+## Cube PodSandbox resize
+
+完整的 Pod 原地升降配以 containerd 2.4 为最低版本。containerd 2.4 会通过上游
+`SandboxService.UpdateSandbox` RPC，把 core sandbox 的 `updated-resources` extension
+原样发送给 CubeShim；CubeShim 从中读取权威 Pod CPU、memory limit，并执行 VM
+hotplug、Guest reconcile 和内存缩容屏障。本项目不再维护将该 extension 改写为
+Sandbox `Task.Update` 私有 TypeURL 的 containerd 补丁。
+
+containerd 低于 2.4 时只承诺 container-level 原地升降配。标准容器 `Task.Update`
+仍可触发 CubeShim 聚合当前 active container limit，覆盖普通运行中 app container，
+但不承诺容器重建、Pod-level-only resize、classic init container 峰值语义或完整的
+Pod aggregate 一致性。memory request-only 在两个版本范围内均不驱动 VM 扩容。
+
 ## S5.5d.1 trace 与外部 Sandbox 并行创建补丁
 
 `containerd-v2.3.4-s34-trace.patch` 只用于 S3.4 诊断，不应进入运行时验收制品。

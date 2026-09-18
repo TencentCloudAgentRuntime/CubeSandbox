@@ -2159,6 +2159,20 @@ impl protocols::agent_ttrpc::AgentService for AgentService {
         .await
     }
 
+    async fn reconcile_vm_resources(
+        &self,
+        ctx: &TtrpcContext,
+        req: protocols::agent::ReconcileVmResourcesRequest,
+    ) -> ttrpc::Result<protocols::agent::ReconcileVmResourcesResponse> {
+        is_allowed!(req);
+        trace_rpc_call!(ctx, "reconcile_vm_resources", req);
+        self.sandbox
+            .lock()
+            .await
+            .reconcile_vm_resources(&req)
+            .map_err(|error| ttrpc_error!(ttrpc::Code::INTERNAL, error))
+    }
+
     async fn reseed_random_dev(
         &self,
         ctx: &TtrpcContext,
@@ -2393,6 +2407,7 @@ const AGENT_CAPABILITIES: &[(&str, u32)] = &[
     ("io.cubesandbox.agent.sandbox.shared-pidns", 1),
     ("io.cubesandbox.agent.mount.dynamic", 1),
     ("io.cubesandbox.agent.stdio.passfd", 1),
+    ("io.cubesandbox.agent.vm-resource-reconcile", 1),
     (rustjail::resources::RESOURCE_V2_CAPABILITY, 1),
 ];
 

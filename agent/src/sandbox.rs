@@ -14,7 +14,9 @@ use crate::watcher::BindWatcher;
 use anyhow::{anyhow, Context, Result};
 use libc::pid_t;
 use oci::Hooks;
-use protocols::agent::OnlineCPUMemRequest;
+use protocols::agent::{
+    OnlineCPUMemRequest, ReconcileVmResourcesRequest, ReconcileVmResourcesResponse,
+};
 use regex::Regex;
 use rustjail::cgroups as rustjail_cgroups;
 use rustjail::container::BaseContainer;
@@ -23,7 +25,7 @@ use rustjail::process::Process;
 use slog::Logger;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{thread, time};
@@ -440,7 +442,10 @@ impl Sandbox {
         if req.nb_cpus == 0 {
             return Ok(());
         }
+        self.refresh_container_cpusets()
+    }
 
+    fn refresh_container_cpusets(&self) -> Result<()> {
         let guest_cpuset = rustjail_cgroups::fs::get_guest_cpuset()?;
 
         for (_, ctr) in self.containers.iter() {
@@ -448,25 +453,80 @@ impl Sandbox {
                 .config
                 .spec
                 .as_ref()
-                .unwrap()
-                .linux
-                .as_ref()
-                .unwrap()
-                .resources
-                .as_ref()
-                .unwrap()
-                .cpu
-                .as_ref();
+                .and_then(|spec| spec.linux.as_ref())
+                .and_then(|linux| linux.resources.as_ref())
+                .and_then(|resources| resources.cpu.as_ref());
             let container_cpust = cpu.and_then(|value| value.cpus.as_deref()).unwrap_or("");
 
-            info!(self.logger, "updating {}", ctr.id.as_str());
-            ctr.cgroup_manager
-                .as_ref()
-                .unwrap()
-                .update_cpuset_path(guest_cpuset.as_str(), container_cpust)?;
+            // An empty cpuset inherits the parent effective mask and expands
+            // automatically when Linux onlines a CPU. Explicit CPU Manager
+            // assignments must remain unchanged until the corresponding
+            // Task.Update provides the new assignment; widening them here
+            // would violate exclusive-CPU semantics.
+            info!(
+                self.logger,
+                "CPU hotplug cpuset policy container={} guest={} explicit={}",
+                ctr.id.as_str(),
+                guest_cpuset,
+                if container_cpust.is_empty() {
+                    "<inherited>"
+                } else {
+                    container_cpust
+                }
+            );
         }
 
         Ok(())
+    }
+
+    /// Converge hot-added VM resources to an absolute target. Unlike the
+    /// legacy increment-based OnlineCPUMem call, retries are idempotent.
+    pub fn reconcile_vm_resources(
+        &self,
+        req: &ReconcileVmResourcesRequest,
+    ) -> Result<ReconcileVmResourcesResponse> {
+        let mut online_cpus_count = online_resource_count("/sys/devices/system/cpu/online")?;
+        if req.desired_online_cpus > online_cpus_count {
+            online_cpus(
+                &self.logger,
+                i32::try_from(req.desired_online_cpus - online_cpus_count)?,
+            )?;
+            online_cpus_count = online_resource_count("/sys/devices/system/cpu/online")?;
+        }
+        if online_cpus_count < req.desired_online_cpus {
+            return Err(anyhow!(
+                "online CPU readback {} is below desired {}",
+                online_cpus_count,
+                req.desired_online_cpus
+            ));
+        }
+        self.refresh_container_cpusets()?;
+
+        let mut actual_memory_bytes = online_memory_bytes()?;
+        if req.desired_memory_bytes > actual_memory_bytes {
+            for _ in 0..ONLINE_CPUMEM_MAX_RETRIES {
+                online_memory(&self.logger)?;
+                actual_memory_bytes = online_memory_bytes()?;
+                if actual_memory_bytes >= req.desired_memory_bytes {
+                    break;
+                }
+                thread::sleep(time::Duration::from_millis(ONLINE_CPUMEM_WATI_MILLIS));
+            }
+        }
+        if actual_memory_bytes < req.desired_memory_bytes {
+            return Err(anyhow!(
+                "online memory readback {} is below desired {}",
+                actual_memory_bytes,
+                req.desired_memory_bytes
+            ));
+        }
+
+        Ok(ReconcileVmResourcesResponse {
+            actual_online_cpus: online_cpus_count,
+            actual_online_memory_bytes: actual_memory_bytes,
+            generation: req.generation,
+            ..Default::default()
+        })
     }
 
     #[instrument(skip(self, notifier))]
@@ -547,6 +607,63 @@ fn online_resources(logger: &Logger, path: &str, pattern: &str, num: i32) -> Res
     Ok(0)
 }
 
+fn online_resource_count(path: &str) -> Result<u32> {
+    let value = fs::read_to_string(path)?;
+    parse_online_resource_count(value.trim())
+}
+
+fn parse_online_resource_count(value: &str) -> Result<u32> {
+    value.split(',').try_fold(0u32, |total, part| {
+        let (start, end) = match part.split_once('-') {
+            Some((start, end)) => (start.parse::<u32>()?, end.parse::<u32>()?),
+            None => {
+                let value = part.parse::<u32>()?;
+                (value, value)
+            }
+        };
+        if end < start {
+            return Err(anyhow!("invalid online resource range {part:?}"));
+        }
+        total
+            .checked_add(end - start + 1)
+            .ok_or_else(|| anyhow!("online resource count overflow"))
+    })
+}
+
+fn online_memory_bytes() -> Result<u64> {
+    let blocks = online_memory_block_count(Path::new("/sys/devices/system/memory"))?;
+    let block_size = fs::read_to_string(SYSFS_MEMORY_BLOCK_SIZE_PATH)?;
+    let block_size = u64::from_str_radix(block_size.trim().trim_start_matches("0x"), 16)?;
+    blocks
+        .checked_mul(block_size)
+        .ok_or_else(|| anyhow!("online memory byte count overflow"))
+}
+
+fn online_memory_block_count(root: &Path) -> Result<u64> {
+    fs::read_dir(root)?.try_fold(0u64, |count, entry| {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(index) = name.strip_prefix("memory") else {
+            return Ok(count);
+        };
+        if index.is_empty() || index.parse::<u64>().is_err() {
+            return Ok(count);
+        }
+        let online = entry.path().join("online");
+        match fs::read_to_string(&online) {
+            Ok(value) if value.trim() == "1" => count
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("online memory block count overflow")),
+            Ok(_) => Ok(count),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => count
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("online memory block count overflow")),
+            Err(error) => Err(error.into()),
+        }
+    })
+}
+
 // max wait for all CPUs to online will use 50 * 100 = 5 seconds.
 const ONLINE_CPUMEM_WATI_MILLIS: u64 = 50;
 const ONLINE_CPUMEM_MAX_RETRIES: u32 = 100;
@@ -609,6 +726,32 @@ mod tests {
     }
 
     use serial_test::serial;
+
+    #[test]
+    fn parse_online_resource_ranges() {
+        assert_eq!(parse_online_resource_count("0").unwrap(), 1);
+        assert_eq!(parse_online_resource_count("0-3,8,10-11").unwrap(), 7);
+        assert!(parse_online_resource_count("3-1").is_err());
+    }
+
+    #[test]
+    fn counts_online_memory_block_directories() {
+        let root = tempfile::tempdir().unwrap();
+        for (name, online) in [
+            ("memory0", None),
+            ("memory1", Some("1")),
+            ("memory2", Some("0")),
+        ] {
+            let path = root.path().join(name);
+            fs::create_dir(&path).unwrap();
+            if let Some(online) = online {
+                fs::write(path.join("online"), online).unwrap();
+            }
+        }
+        fs::write(root.path().join("block_size_bytes"), "8000000").unwrap();
+
+        assert_eq!(online_memory_block_count(root.path()).unwrap(), 2);
+    }
 
     #[tokio::test]
     async fn pending_create_activity_cancels_and_notifies_waiters() {

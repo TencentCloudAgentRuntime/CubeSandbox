@@ -138,7 +138,7 @@ func TestServicePrepareReleaseIsIdempotentAndLeaseScoped(t *testing.T) {
 	service, registry := newTestService(t, store, adapter)
 
 	capabilities, err := service.GetCapabilities(ctx, &runtimev1.GetCapabilitiesRequest{ClientApiVersion: APIVersion})
-	if err != nil || capabilities.GetApiVersion() != APIVersion || capabilities.GetServiceMode() != ServiceMode || len(capabilities.GetCapabilities()) != 3 {
+	if err != nil || capabilities.GetApiVersion() != APIVersion || capabilities.GetServiceMode() != ServiceMode || len(capabilities.GetCapabilities()) != 4 {
 		t.Fatalf("capabilities=%+v err=%v", capabilities, err)
 	}
 	request := serviceRequest("sandbox-a", 1, "prepare-a")

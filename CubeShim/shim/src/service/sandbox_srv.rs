@@ -8,12 +8,15 @@ use containerd_shim::protos::protobuf::{
     MessageField,
 };
 use containerd_shim::protos::ttrpc::{r#async::TtrpcContext, Code, Error as TtrpcError};
+use containerd_shim::protos::ttrpc::{Request as TtrpcRequest, Response as TtrpcResponse};
 use containerd_shim::protos::types::platform::Platform;
 use containerd_shim::protos::{sandbox_api as api, sandbox_async::Sandbox};
 use containerd_shim::TtrpcResult;
 use oci_spec::runtime::Spec;
+use prost::Message as ProstMessage;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,6 +40,164 @@ const READY: &str = "SANDBOX_READY";
 const NOT_READY: &str = "SANDBOX_NOTREADY";
 const REQUIRED_SANDBOX_CAPABILITY: &str = "io.cubesandbox.agent.sandbox.lifecycle";
 const OCI_SPEC_TYPE_URL: &str = "types.containerd.io/opencontainers/runtime-spec/1/Spec";
+const SANDBOX_SERVICE_NAME: &str = "containerd.runtime.sandbox.v1.Sandbox";
+const UPDATED_RESOURCES_KEY: &str = "updated-resources";
+const UPDATED_RESOURCES_TYPE_URL: &str = "io.containerd.cri.v1/UpdatedResources";
+
+// Wire-compatible subset of containerd 2.4's UpdateSandboxRequest. Keeping
+// this local avoids carrying a fork of containerd-shim-protos while the Rust
+// crate still vendors the pre-2.4 service definition.
+#[derive(Clone, PartialEq, ProstMessage)]
+struct UpdateSandboxRequestWire {
+    #[prost(string, tag = "1")]
+    sandbox_id: String,
+    #[prost(message, optional, tag = "4")]
+    sandbox: Option<SandboxMetadataWire>,
+    #[prost(string, repeated, tag = "5")]
+    fields: Vec<String>,
+}
+
+#[derive(Clone, PartialEq, ProstMessage)]
+struct SandboxMetadataWire {
+    #[prost(string, tag = "1")]
+    sandbox_id: String,
+    #[prost(map = "string, message", tag = "7")]
+    extensions: HashMap<String, AnyWire>,
+}
+
+#[derive(Clone, PartialEq, ProstMessage)]
+struct AnyWire {
+    #[prost(string, tag = "1")]
+    type_url: String,
+    #[prost(bytes = "vec", tag = "2")]
+    value: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdatedResourcesPayload {
+    #[serde(default, alias = "Resources")]
+    resources: Option<PodSandboxResources>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PodSandboxResources {
+    #[serde(default, alias = "CpuPeriod")]
+    cpu_period: i64,
+    #[serde(default, alias = "CpuQuota")]
+    cpu_quota: i64,
+    #[serde(default, alias = "CpuShares")]
+    cpu_shares: i64,
+    #[serde(default, alias = "MemoryLimitInBytes")]
+    memory_limit_in_bytes: i64,
+}
+
+impl PodSandboxResources {
+    fn desired(&self) -> Result<(Option<u32>, Option<u64>), String> {
+        if self.cpu_period < 0
+            || self.cpu_quota < -1
+            || self.cpu_shares < 0
+            || self.memory_limit_in_bytes < 0
+        {
+            return Err("Pod sandbox resize resources must not be negative".to_string());
+        }
+        let cpu = if self.cpu_period > 0 && self.cpu_quota > 0 {
+            let quota = u64::try_from(self.cpu_quota).unwrap();
+            let period = u64::try_from(self.cpu_period).unwrap();
+            Some(
+                u32::try_from(quota.div_ceil(period))
+                    .map_err(|_| "Pod sandbox CPU target exceeds u32".to_string())?
+                    .max(1),
+            )
+        } else {
+            // CpuShares represents request weight, not finite CPU capacity.
+            // Only quota/period makes this dimension authoritative.
+            None
+        };
+        let memory = if self.memory_limit_in_bytes > 0 {
+            Some(u64::try_from(self.memory_limit_in_bytes).unwrap())
+        } else {
+            // CRI does not carry a memory request here. Keep this dimension
+            // under the legacy active-container aggregate policy.
+            None
+        };
+        Ok((cpu, memory))
+    }
+}
+
+fn updates_resources(fields: &[String]) -> bool {
+    fields.is_empty()
+        || fields
+            .iter()
+            .any(|field| field == "extensions" || field == "extensions.updated-resources")
+}
+
+fn updated_resources_from_request(
+    request: &UpdateSandboxRequestWire,
+    expected_id: &str,
+) -> Result<Option<PodSandboxResources>, String> {
+    if request.sandbox_id.is_empty() {
+        return Err("sandbox_id is empty".to_string());
+    }
+    if request.sandbox_id != expected_id {
+        return Err(format!(
+            "sandbox_id {} does not match shim {expected_id}",
+            request.sandbox_id
+        ));
+    }
+    if !updates_resources(&request.fields) {
+        return Ok(None);
+    }
+    let sandbox = request.sandbox.as_ref().ok_or_else(|| {
+        "containerd 2.4 UpdateSandbox request has no sandbox metadata".to_string()
+    })?;
+    if !sandbox.sandbox_id.is_empty() && sandbox.sandbox_id != expected_id {
+        return Err(format!(
+            "updated sandbox metadata ID {} does not match shim {expected_id}",
+            sandbox.sandbox_id
+        ));
+    }
+    let Some(extension) = sandbox.extensions.get(UPDATED_RESOURCES_KEY) else {
+        if request
+            .fields
+            .iter()
+            .any(|field| field == "extensions.updated-resources")
+        {
+            return Err(
+                "containerd 2.4 UpdateSandbox request has no updated-resources extension"
+                    .to_string(),
+            );
+        }
+        return Ok(None);
+    };
+    if extension.type_url != UPDATED_RESOURCES_TYPE_URL {
+        return Err(format!(
+            "updated-resources TypeURL {:?} does not match {}",
+            extension.type_url, UPDATED_RESOURCES_TYPE_URL
+        ));
+    }
+    let updated: UpdatedResourcesPayload = serde_json::from_slice(&extension.value)
+        .map_err(|error| format!("decode containerd updated-resources extension: {error}"))?;
+    updated
+        .resources
+        .map(Some)
+        .ok_or_else(|| "containerd updated-resources extension has no Pod resources".to_string())
+}
+
+fn resize_rpc_error(error: String) -> TtrpcError {
+    let code = if error.contains("exceeds hotplug maximum")
+        || error.contains("aligned VM memory target")
+    {
+        Code::OUT_OF_RANGE
+    } else if error.contains("guest VM resource reconcile")
+        || error.contains("cube-vmm-worker")
+        || error.contains("Resize vm")
+    {
+        Code::UNAVAILABLE
+    } else {
+        Code::INTERNAL
+    };
+    rpc_error(code, error)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Phase {
@@ -83,6 +244,7 @@ impl Default for LifecycleState {
 pub(crate) struct SandboxLifecycle {
     state: Mutex<LifecycleState>,
     task_creates: StdMutex<HashSet<String>>,
+    sandbox_updates: StdMutex<usize>,
     changed: Notify,
 }
 
@@ -91,6 +253,7 @@ impl Default for SandboxLifecycle {
         Self {
             state: Mutex::new(LifecycleState::default()),
             task_creates: StdMutex::new(HashSet::new()),
+            sandbox_updates: StdMutex::new(0),
             changed: Notify::new(),
         }
     }
@@ -121,6 +284,23 @@ impl Drop for TaskCreateReservation {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&self.task_id);
+        self.lifecycle.changed.notify_waiters();
+    }
+}
+
+pub(crate) struct SandboxUpdateReservation {
+    lifecycle: Arc<SandboxLifecycle>,
+}
+
+impl Drop for SandboxUpdateReservation {
+    fn drop(&mut self) {
+        let mut updates = self
+            .lifecycle
+            .sandbox_updates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *updates = updates.saturating_sub(1);
+        drop(updates);
         self.lifecycle.changed.notify_waiters();
     }
 }
@@ -173,7 +353,7 @@ impl SandboxLifecycle {
         loop {
             let notified = self.changed.notified();
             let mut state = self.state.lock().await;
-            if self.has_task_creates() {
+            if self.has_inflight_mutations() {
                 drop(state);
                 notified.await;
                 continue;
@@ -221,12 +401,67 @@ impl SandboxLifecycle {
         self.state.lock().await.phase != Phase::Unmanaged
     }
 
-    fn has_task_creates(&self) -> bool {
-        !self
+    async fn reserve_sandbox_update(self: &Arc<Self>) -> Result<SandboxUpdateReservation, String> {
+        let state = self.state.lock().await;
+        if state.phase != Phase::Ready {
+            return Err(format!(
+                "managed Sandbox is not ready (phase {:?})",
+                state.phase
+            ));
+        }
+        let mut updates = self
+            .sandbox_updates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *updates = updates
+            .checked_add(1)
+            .ok_or_else(|| "sandbox update reservation overflow".to_string())?;
+        drop(updates);
+        drop(state);
+        Ok(SandboxUpdateReservation {
+            lifecycle: self.clone(),
+        })
+    }
+
+    pub(crate) async fn reserve_periodic_reconcile(
+        self: &Arc<Self>,
+    ) -> Result<Option<SandboxUpdateReservation>, String> {
+        let state = self.state.lock().await;
+        match state.phase {
+            Phase::Unmanaged => return Ok(None),
+            Phase::Ready => {}
+            phase => {
+                return Err(format!(
+                    "sandbox is not available for periodic reconcile (phase {phase:?})"
+                ));
+            }
+        }
+        let mut updates = self
+            .sandbox_updates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *updates = updates
+            .checked_add(1)
+            .ok_or_else(|| "sandbox update reservation overflow".to_string())?;
+        drop(updates);
+        drop(state);
+        Ok(Some(SandboxUpdateReservation {
+            lifecycle: self.clone(),
+        }))
+    }
+
+    fn has_inflight_mutations(&self) -> bool {
+        let task_creates = !self
             .task_creates
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty()
+            .is_empty();
+        let sandbox_updates = *self
+            .sandbox_updates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            > 0;
+        task_creates || sandbox_updates
     }
 }
 
@@ -259,6 +494,52 @@ impl SandboxService {
             ));
         }
         Ok(())
+    }
+
+    async fn update_sandbox_resources(&self, request: UpdateSandboxRequestWire) -> TtrpcResult<()> {
+        let resources = updated_resources_from_request(&request, &self.id)
+            .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
+        let Some(resources) = resources else {
+            return Ok(());
+        };
+        let _reservation = self
+            .lifecycle
+            .reserve_sandbox_update()
+            .await
+            .map_err(|error| {
+                rpc_error(
+                    Code::FAILED_PRECONDITION,
+                    format!("Pod sandbox VM resize requires a ready managed sandbox: {error}"),
+                )
+            })?;
+
+        let mut sandbox = self.sandbox.lock().await;
+        sandbox
+            .ensure_resize_compatible()
+            .await
+            .map_err(|error| rpc_error(Code::FAILED_PRECONDITION, error))?;
+        let (current_cpu, current_memory) = sandbox.vm_resource_targets();
+        let (desired_cpu, desired_memory) = resources
+            .desired()
+            .map_err(|error| rpc_error(Code::INVALID_ARGUMENT, error))?;
+        log::info!(
+            "containerd 2.4 UpdateSandbox resources: sandbox={} current={}vCPU/{}B desired_cpu={:?} desired_memory={:?}",
+            self.id,
+            current_cpu,
+            current_memory,
+            desired_cpu,
+            desired_memory
+        );
+        sandbox
+            .prepare_authoritative_vm_resize(desired_cpu, desired_memory)
+            .await
+            .map_err(|error| {
+                log::error!(
+                    "containerd 2.4 UpdateSandbox failed: sandbox={} error={error}",
+                    self.id
+                );
+                resize_rpc_error(error)
+            })
     }
 
     async fn run_create(
@@ -927,6 +1208,55 @@ impl SandboxService {
     }
 }
 
+struct UpdateSandboxMethod {
+    service: SandboxService,
+}
+
+#[async_trait]
+impl containerd_shim::protos::ttrpc::r#async::MethodHandler for UpdateSandboxMethod {
+    async fn handler(
+        &self,
+        _ctx: TtrpcContext,
+        request: TtrpcRequest,
+    ) -> containerd_shim::protos::ttrpc::Result<TtrpcResponse> {
+        let result = match UpdateSandboxRequestWire::decode(request.payload.as_slice()) {
+            Ok(request) => self.service.update_sandbox_resources(request).await,
+            Err(error) => Err(rpc_error(
+                Code::INVALID_ARGUMENT,
+                format!("decode containerd 2.4 UpdateSandbox request: {error}"),
+            )),
+        };
+
+        let mut response = TtrpcResponse::new();
+        match result {
+            Ok(()) => response.set_status(containerd_shim::protos::ttrpc::get_status(
+                Code::OK,
+                String::new(),
+            )),
+            Err(TtrpcError::RpcStatus(status)) => response.set_status(status),
+            Err(error) => response.set_status(containerd_shim::protos::ttrpc::get_status(
+                Code::UNKNOWN,
+                error.to_string(),
+            )),
+        }
+        Ok(response)
+    }
+}
+
+pub fn add_update_sandbox_method(
+    services: &mut HashMap<String, containerd_shim::protos::ttrpc::r#async::Service>,
+    service: SandboxService,
+) -> Result<(), String> {
+    let sandbox_service = services
+        .get_mut(SANDBOX_SERVICE_NAME)
+        .ok_or_else(|| format!("generated sandbox service {SANDBOX_SERVICE_NAME} is missing"))?;
+    sandbox_service.methods.insert(
+        "UpdateSandbox".to_string(),
+        Box::new(UpdateSandboxMethod { service }),
+    );
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StartCleanup {
     Released,
@@ -1383,7 +1713,7 @@ impl Sandbox for SandboxService {
         let (should_stop, previous) = loop {
             let notified = self.lifecycle.changed.notified();
             let mut state = self.lifecycle.state.lock().await;
-            if self.lifecycle.has_task_creates() {
+            if self.lifecycle.has_inflight_mutations() {
                 drop(state);
                 notified.await;
                 continue;
@@ -1580,12 +1910,150 @@ fn now_timestamp() -> Timestamp {
 mod tests {
     use super::*;
 
+    fn update_request(fields: &[&str], type_url: &str, payload: &[u8]) -> UpdateSandboxRequestWire {
+        UpdateSandboxRequestWire {
+            sandbox_id: "sandbox-id".to_string(),
+            sandbox: Some(SandboxMetadataWire {
+                sandbox_id: "sandbox-id".to_string(),
+                extensions: HashMap::from([(
+                    UPDATED_RESOURCES_KEY.to_string(),
+                    AnyWire {
+                        type_url: type_url.to_string(),
+                        value: payload.to_vec(),
+                    },
+                )]),
+            }),
+            fields: fields.iter().map(|field| (*field).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn containerd_2_4_update_sandbox_decodes_authoritative_resources() {
+        let request = update_request(
+            &["extensions"],
+            UPDATED_RESOURCES_TYPE_URL,
+            br#"{"Resources":{"CpuPeriod":100000,"CpuQuota":250001,"CpuShares":0,"MemoryLimitInBytes":805306368},"Overhead":null}"#,
+        );
+        let wire = request.encode_to_vec();
+        let decoded = UpdateSandboxRequestWire::decode(wire.as_slice()).unwrap();
+        let resources = updated_resources_from_request(&decoded, "sandbox-id")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resources.desired().unwrap(),
+            (Some(3), Some(768 * 1024 * 1024))
+        );
+    }
+
+    #[test]
+    fn containerd_2_4_update_sandbox_accepts_unlimited_cpu_quota() {
+        let resources = PodSandboxResources {
+            cpu_period: 100_000,
+            cpu_quota: -1,
+            cpu_shares: 2048,
+            memory_limit_in_bytes: 536_870_912,
+        };
+        assert_eq!(
+            resources.desired().unwrap(),
+            (None, Some(512 * 1024 * 1024))
+        );
+    }
+
+    #[test]
+    fn containerd_2_4_go_wire_fixture_is_compatible() {
+        // Generated by containerd v2.4.0's Go API from an
+        // UpdateSandboxRequest carrying the updated-resources extension.
+        let wire = hex::decode(concat!(
+            "0a0a73616e64626f782d696422bf010a0a73616e64626f782d69643ab001",
+            "0a11757064617465642d7265736f7572636573129a010a25696f2e636f6e",
+            "7461696e6572642e6372692e76312f557064617465645265736f75726365",
+            "7312717b225265736f7572636573223a7b22437075506572696f64223a31",
+            "30303030302c2243707551756f7461223a3235303030312c224370755368",
+            "61726573223a302c224d656d6f72794c696d6974496e4279746573223a38",
+            "30353330363336387d2c224f76657268656164223a6e756c6c7d2a0a65",
+            "7874656e73696f6e73"
+        ))
+        .unwrap();
+        let request = UpdateSandboxRequestWire::decode(wire.as_slice()).unwrap();
+        let resources = updated_resources_from_request(&request, "sandbox-id")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resources.desired().unwrap(),
+            (Some(3), Some(768 * 1024 * 1024))
+        );
+    }
+
+    #[test]
+    fn containerd_2_4_update_sandbox_ignores_unrelated_fields() {
+        let request = UpdateSandboxRequestWire {
+            sandbox_id: "sandbox-id".to_string(),
+            sandbox: Some(SandboxMetadataWire {
+                sandbox_id: "sandbox-id".to_string(),
+                extensions: HashMap::new(),
+            }),
+            fields: vec!["labels".to_string()],
+        };
+        assert!(updated_resources_from_request(&request, "sandbox-id")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn containerd_2_4_update_sandbox_rejects_wrong_extension_type() {
+        let request = update_request(
+            &["extensions.updated-resources"],
+            "io.example/Wrong",
+            br#"{"Resources":{}}"#,
+        );
+        assert!(updated_resources_from_request(&request, "sandbox-id")
+            .unwrap_err()
+            .contains("TypeURL"));
+    }
+
+    #[test]
+    fn pod_sandbox_resources_preserve_request_only_targets() {
+        let resources = PodSandboxResources {
+            cpu_period: 0,
+            cpu_quota: 0,
+            cpu_shares: 0,
+            memory_limit_in_bytes: 0,
+        };
+        assert_eq!(resources.desired().unwrap(), (None, None));
+    }
+
     #[tokio::test]
     async fn unmanaged_task_mode_preserves_legacy_runtime() {
         let lifecycle = Arc::new(SandboxLifecycle::default());
         let reservation = lifecycle.reserve_task_create("legacy-task").await.unwrap();
         assert_eq!(reservation.mode(), &TaskMode::Legacy);
         assert!(!lifecycle.is_managed().await);
+    }
+
+    #[tokio::test]
+    async fn sandbox_update_reservation_fences_lifecycle_transitions() {
+        let lifecycle = Arc::new(SandboxLifecycle::default());
+        assert!(lifecycle
+            .reserve_periodic_reconcile()
+            .await
+            .unwrap()
+            .is_none());
+        assert!(lifecycle.reserve_sandbox_update().await.is_err());
+        lifecycle.state.lock().await.phase = Phase::Ready;
+        let reservation = lifecycle.reserve_sandbox_update().await.unwrap();
+        assert!(lifecycle.has_inflight_mutations());
+        drop(reservation);
+        assert!(!lifecycle.has_inflight_mutations());
+        let reservation = lifecycle
+            .reserve_periodic_reconcile()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(lifecycle.has_inflight_mutations());
+        drop(reservation);
+        lifecycle.state.lock().await.phase = Phase::Stopping;
+        assert!(lifecycle.reserve_sandbox_update().await.is_err());
+        assert!(lifecycle.reserve_periodic_reconcile().await.is_err());
     }
 
     #[tokio::test]

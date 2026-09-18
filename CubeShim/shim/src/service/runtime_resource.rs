@@ -75,6 +75,7 @@ const MINIMUM_VM_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 // supported 256 MiB explicit floor, but default unannotated sandboxes to a
 // guest large enough for a 200 MB container workload and its rootfs page cache.
 const DEFAULT_VM_MEMORY_BYTES: u64 = 512 * 1024 * 1024;
+const ACPI_MEMORY_BLOCK_BYTES: u64 = 128 * 1024 * 1024;
 // Linux 6.6 on the supported x86_64 PoC nodes defines PIDS_MAX as
 // PID_MAX_LIMIT + 1 and rejects numeric pids.max values >= PIDS_MAX.
 pub(crate) const LINUX_PIDS_MAX_LIMIT: u64 = 4_194_304;
@@ -132,6 +133,10 @@ struct ResourceRequest {
     vcpu_count: u32,
     #[prost(uint64, tag = "2")]
     memory_bytes: u64,
+    #[prost(uint32, tag = "3")]
+    max_vcpu_count: u32,
+    #[prost(uint64, tag = "4")]
+    max_memory_bytes: u64,
 }
 
 /// Static Host-side budget for the CubeShim/VMM leaf. Kubernetes owns the
@@ -164,6 +169,10 @@ struct RuntimeClassOverheadConfig {
     minimum_cpu_millicores: u64,
     minimum_memory_bytes: u64,
     host_pids_max: u64,
+    #[serde(default)]
+    max_vcpus: u32,
+    #[serde(default)]
+    max_memory_bytes: u64,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -1824,6 +1833,8 @@ fn inject_annotations(
         serde_json::json!({
             "cpu": resources.vcpu_count,
             "memory": resources.memory_bytes.div_ceil(1024 * 1024),
+            "max_cpu": resources.max_vcpu_count,
+            "max_memory": resources.max_memory_bytes.div_ceil(1024 * 1024),
             "preserve_memory": resources.memory_bytes.div_ceil(1024 * 1024),
             "snap_memory": resources.memory_bytes.div_ceil(1024 * 1024),
         })
@@ -2162,6 +2173,8 @@ fn resources_from_config(
     struct VmResource {
         cpu: Option<u32>,
         memory: Option<u64>,
+        max_cpu: Option<u32>,
+        max_memory: Option<u64>,
     }
     let configured = annotations
         .get(ANNO_VM_RES)
@@ -2217,9 +2230,36 @@ fn resources_from_config(
     if cpu == 0 || memory_bytes == 0 {
         return Err("Cube VM CPU and memory must be non-zero".to_string());
     }
+    let max_vcpu_count = configured
+        .as_ref()
+        .and_then(|value| value.max_cpu)
+        .unwrap_or(cpu);
+    let max_memory_bytes = configured
+        .as_ref()
+        .and_then(|value| value.max_memory)
+        .map(|memory_mib| {
+            memory_mib
+                .checked_mul(1024 * 1024)
+                .ok_or_else(|| "Cube VM maximum memory annotation overflows bytes".to_string())
+        })
+        .transpose()?
+        .unwrap_or(memory_bytes);
+    if max_vcpu_count < cpu || max_memory_bytes < memory_bytes {
+        return Err(format!(
+            "Cube VM hotplug maximum must not be below boot capacity: boot={cpu}vCPU/{memory_bytes}B max={max_vcpu_count}vCPU/{max_memory_bytes}B"
+        ));
+    }
+    if max_vcpu_count > u8::MAX as u32 {
+        return Err(format!(
+            "Cube VM max_cpu {max_vcpu_count} exceeds VMM limit {}",
+            u8::MAX
+        ));
+    }
     Ok(ResourceRequest {
         vcpu_count: cpu,
         memory_bytes,
+        max_vcpu_count,
+        max_memory_bytes,
     })
 }
 
@@ -2269,6 +2309,19 @@ fn validate_runtimeclass_overhead_config(
         return Err(format!(
             "RuntimeClass Host PIDs {} exceeds Linux numeric pids.max limit {LINUX_PIDS_MAX_LIMIT}",
             config.host_pids_max
+        ));
+    }
+    if config.max_vcpus > u8::MAX as u32 {
+        return Err(format!(
+            "RuntimeClass max_vcpus {} exceeds VMM limit {}",
+            config.max_vcpus,
+            u8::MAX
+        ));
+    }
+    if config.max_memory_bytes > 0 && config.max_memory_bytes % ACPI_MEMORY_BLOCK_BYTES != 0 {
+        return Err(format!(
+            "RuntimeClass max_memory_bytes {} must be aligned to {} bytes",
+            config.max_memory_bytes, ACPI_MEMORY_BLOCK_BYTES
         ));
     }
     Ok(())
@@ -2394,8 +2447,68 @@ fn runtime_prepare_plan_with_config(
 
     let mut annotations = config.annotations.clone();
     annotations.extend(request_annotations.clone());
-    let vm = resources_from_config(&annotations, config)?;
-    let cpu_quota = u128::from(vm.vcpu_count)
+    let explicit_vm_resources = annotations
+        .get(ANNO_VM_RES)
+        .map(|value| serde_json::from_str::<serde_json::Value>(value))
+        .transpose()
+        .map_err(|error| format!("parse {ANNO_VM_RES}: {error}"))?;
+    let mut vm = resources_from_config(&annotations, config)?;
+    // A legacy cube.vmmres annotation with omitted max fields means a fixed
+    // VM. Only unannotated workloads opt into the node hotplug ceiling.
+    if explicit_vm_resources.is_none() && node.max_vcpus > 0 {
+        vm.max_vcpu_count = node.max_vcpus.max(vm.vcpu_count);
+    }
+    if explicit_vm_resources.is_none() && node.max_memory_bytes > 0 {
+        vm.max_memory_bytes = node.max_memory_bytes.max(vm.memory_bytes);
+    }
+    if node.max_vcpus > 0 && vm.max_vcpu_count > node.max_vcpus {
+        return Err(format!(
+            "cube.vmmres max_cpu {} exceeds node hotplug policy {}",
+            vm.max_vcpu_count, node.max_vcpus
+        ));
+    }
+    if node.max_memory_bytes > 0 && vm.max_memory_bytes > node.max_memory_bytes {
+        return Err(format!(
+            "cube.vmmres max_memory {} exceeds node hotplug policy {} bytes",
+            vm.max_memory_bytes, node.max_memory_bytes
+        ));
+    }
+    if vm.max_vcpu_count > u8::MAX as u32 {
+        return Err(format!(
+            "node max_vcpus {} exceeds VMM limit {}",
+            vm.max_vcpu_count,
+            u8::MAX
+        ));
+    }
+    if vm.max_memory_bytes > vm.memory_bytes {
+        let explicit_memory = explicit_vm_resources
+            .as_ref()
+            .is_some_and(|value| value.get("memory").is_some());
+        let explicit_max_memory = explicit_vm_resources
+            .as_ref()
+            .is_some_and(|value| value.get("max_memory").is_some());
+        if explicit_memory && vm.memory_bytes % ACPI_MEMORY_BLOCK_BYTES != 0 {
+            return Err(format!(
+                "hotpluggable cube.vmmres memory {} must be aligned to {} bytes",
+                vm.memory_bytes, ACPI_MEMORY_BLOCK_BYTES
+            ));
+        }
+        if explicit_max_memory && vm.max_memory_bytes % ACPI_MEMORY_BLOCK_BYTES != 0 {
+            return Err(format!(
+                "cube.vmmres max_memory {} must be aligned to {} bytes",
+                vm.max_memory_bytes, ACPI_MEMORY_BLOCK_BYTES
+            ));
+        }
+        if !explicit_memory {
+            vm.memory_bytes = vm
+                .memory_bytes
+                .div_ceil(ACPI_MEMORY_BLOCK_BYTES)
+                .checked_mul(ACPI_MEMORY_BLOCK_BYTES)
+                .ok_or_else(|| "Cube VM boot memory alignment overflow".to_string())?;
+        }
+        vm.max_memory_bytes = vm.max_memory_bytes.max(vm.memory_bytes);
+    }
+    let cpu_quota = u128::from(vm.max_vcpu_count)
         .checked_mul(100_000)
         .and_then(|value| value.checked_add(normalized))
         .ok_or_else(|| "Host CPU ceiling overflow".to_string())?;
@@ -2403,7 +2516,7 @@ fn runtime_prepare_plan_with_config(
         return Err("Host CPU ceiling exceeds cgroup controller range".to_string());
     }
     let memory_max = vm
-        .memory_bytes
+        .max_memory_bytes
         .checked_add(overhead_memory)
         .ok_or_else(|| "Host memory ceiling overflow".to_string())?;
     if memory_max > i64::MAX as u64 {
@@ -2612,6 +2725,8 @@ mod tests {
             &ResourceRequest {
                 vcpu_count: 1,
                 memory_bytes: 256 * 1024 * 1024,
+                max_vcpu_count: 1,
+                max_memory_bytes: 256 * 1024 * 1024,
             },
             &sandbox,
         )
@@ -3301,6 +3416,40 @@ mod tests {
     }
 
     #[test]
+    fn node_hotplug_policy_sets_vm_and_host_maximums() {
+        let mut node = poc_overhead_config();
+        node.max_vcpus = 8;
+        node.max_memory_bytes = 8 * 1024 * 1024 * 1024;
+
+        let plan = runtime_prepare_plan_with_config(&sample_cri(), &HashMap::new(), &node).unwrap();
+        assert_eq!(plan.resources.vcpu_count, 2);
+        assert_eq!(plan.resources.max_vcpu_count, 8);
+        assert_eq!(plan.resources.memory_bytes, 768 * 1024 * 1024);
+        assert_eq!(plan.resources.max_memory_bytes, 8 * 1024 * 1024 * 1024);
+        assert_eq!(plan.host_ceiling.cpu_max, "825000 100000");
+        assert_eq!(plan.host_ceiling.memory_max, "8858370048");
+    }
+
+    #[test]
+    fn legacy_vm_annotation_preserves_fixed_capacity() {
+        let mut node = poc_overhead_config();
+        node.max_vcpus = 8;
+        node.max_memory_bytes = 8 * 1024 * 1024 * 1024;
+        let annotations = HashMap::from([(
+            ANNO_VM_RES.to_string(),
+            r#"{"cpu":2,"memory":768}"#.to_string(),
+        )]);
+
+        let plan = runtime_prepare_plan_with_config(&sample_cri(), &annotations, &node).unwrap();
+        assert_eq!(plan.resources.vcpu_count, 2);
+        assert_eq!(plan.resources.max_vcpu_count, 2);
+        assert_eq!(plan.resources.memory_bytes, 768 * 1024 * 1024);
+        assert_eq!(plan.resources.max_memory_bytes, 768 * 1024 * 1024);
+        assert_eq!(plan.host_ceiling.cpu_max, "225000 100000");
+        assert_eq!(plan.host_ceiling.memory_max, "1073741824");
+    }
+
+    #[test]
     fn vm_resources_floor_small_cri_aggregate_but_reject_small_explicit_override() {
         let mut config = sample_cri();
         config
@@ -3336,6 +3485,8 @@ mod tests {
             minimum_cpu_millicores: 250,
             minimum_memory_bytes: 256 * 1024 * 1024,
             host_pids_max: 512,
+            max_vcpus: 0,
+            max_memory_bytes: 0,
         }
     }
 

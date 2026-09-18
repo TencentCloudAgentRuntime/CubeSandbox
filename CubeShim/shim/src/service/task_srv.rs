@@ -50,7 +50,6 @@ const MODULE: &str = "Shim";
 const INTERNAL_PROBE_EXEC_ID_PREFIX: &str = "cubesandbox-internal-probe-";
 const CGROUP_V2_METRICS_TYPE_URL: &str = "io.containerd.cgroups.v2.Metrics";
 const RESOURCE_METRICS_VERSION_V1: u32 = 1;
-
 fn create_error_with_rootfs_cleanup(
     prepared_rootfs: &mut Option<PreparedRootfs>,
     message: String,
@@ -624,12 +623,50 @@ impl TaskService {
         forward_event(rx, publisher, ns.clone(), log.clone()).await;
 
         let sb = sb::SandBox::new(id.clone(), log.clone(), debug, tx.clone());
+        let sandbox = Arc::new(Mutex::new(sb));
+        let sandbox_lifecycle = Arc::new(SandboxLifecycle::default());
+        let reconcile_sandbox = Arc::downgrade(&sandbox);
+        let reconcile_lifecycle = Arc::downgrade(&sandbox_lifecycle);
+        let reconcile_log = log.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let Some(sandbox) = reconcile_sandbox.upgrade() else {
+                    return;
+                };
+                let Some(lifecycle) = reconcile_lifecycle.upgrade() else {
+                    return;
+                };
+                let _reservation = match lifecycle.reserve_periodic_reconcile().await {
+                    Ok(reservation) => reservation,
+                    Err(_) => continue,
+                };
+                let result = {
+                    let mut sandbox = sandbox.lock().await;
+                    match sandbox.ensure_resize_compatible().await {
+                        Ok(()) => {
+                            sandbox
+                                .reconcile_pending_memory_shrink("periodic-reconcile")
+                                .await
+                        }
+                        Err(_) => continue,
+                    }
+                };
+                if let Err(error) = result {
+                    warnf!(
+                        reconcile_log,
+                        "periodic VM memory reclaim remains pending: {}",
+                        error
+                    );
+                }
+            }
+        });
         TaskService {
             sandbox_id: id,
             //ns,
-            sandbox: Arc::new(Mutex::new(sb)),
+            sandbox,
             standard_rootfs: Arc::new(Mutex::new(HashMap::new())),
-            sandbox_lifecycle: Arc::new(SandboxLifecycle::default()),
+            sandbox_lifecycle,
             log,
             //debug: debug,
             exit,

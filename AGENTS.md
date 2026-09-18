@@ -4,11 +4,13 @@
 
 - AGC = Agent Cluster. 公有云类 K8S 产品. 尽可能保证 k8s 语义兼容 + 快速端到端启动. 项目目标为兼容标准 Pod 语义的同时实现基于 cube sandbox 的 pod 创建快路径.
 
-- 开发应遵循最小化改动的原则, 如非必要, 就避免引入改动.
+- 应遵循最小化改动的原则, 如非必要, 就避免引入改动.
+
+- 应遵循测试驱动开发的原则, 新增/修改功能特性时需要首先对 [e2e测试用例](./cube-cri-testsuite/) 做补充/调整. 
 
 - 使用 task --list-all 命令查看项目的各类脚本入口. 
 
-- 测试
+- 测试环境
     - 本项目采用多工作区并行开发模式. 当前工作区的测试集群环境见 [本地 workspace 配置](local.env)
     - 登陆节点可使用 node-shell 插件, 例如 k node-shell 172.17.137.56 -- kubelet --version
     - 如果cube节点受发布组件影响, 无法通过 node-shell 登陆节点, 可以先通过node-shell登陆非cube节点, 然后把 [本地 workspace 配置](local.env) 中的密钥上传到node-shell容器后再通过ssh登陆到目标节点. 
